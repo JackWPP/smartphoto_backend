@@ -1,0 +1,28 @@
+from sqlalchemy import Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import JSON
+
+from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+
+class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "sessions"
+
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="created", index=True)
+    current_step: Mapped[int] = mapped_column(Integer, default=1)
+
+    selected_platform_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    active_platform_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    analysis_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    confirmed_copy: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    strategy_preview: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    latest_analysis_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    latest_copy_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    latest_strategy_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    latest_generate_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    generation_round: Mapped[int] = mapped_column(Integer, default=0)
+    latest_result_version: Mapped[int] = mapped_column(Integer, default=0)
