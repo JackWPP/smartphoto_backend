@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -10,7 +10,7 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 class JobModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "jobs"
 
-    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), index=True)
+    session_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("sessions.id"), index=True)
     user_id: Mapped[str] = mapped_column(String(36), index=True)
 
     job_type: Mapped[str] = mapped_column(String(64), index=True)

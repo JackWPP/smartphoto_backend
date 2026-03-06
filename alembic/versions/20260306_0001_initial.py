@@ -42,7 +42,7 @@ def upgrade() -> None:
 
     op.create_table(
         "session_images",
-        sa.Column("session_id", sa.String(length=36), nullable=False),
+        sa.Column("session_id", sa.Uuid(as_uuid=False), nullable=False),
         sa.Column("slot_type", sa.String(length=32), nullable=False),
         sa.Column("display_order", sa.Integer(), nullable=False),
         sa.Column("source_url", sa.String(length=1024), nullable=False),
@@ -62,7 +62,7 @@ def upgrade() -> None:
 
     op.create_table(
         "jobs",
-        sa.Column("session_id", sa.String(length=36), nullable=False),
+        sa.Column("session_id", sa.Uuid(as_uuid=False), nullable=False),
         sa.Column("user_id", sa.String(length=36), nullable=False),
         sa.Column("job_type", sa.String(length=64), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
@@ -92,7 +92,7 @@ def upgrade() -> None:
 
     op.create_table(
         "job_events",
-        sa.Column("job_id", sa.String(length=36), nullable=False),
+        sa.Column("job_id", sa.Uuid(as_uuid=False), nullable=False),
         sa.Column("seq_no", sa.Integer(), nullable=False),
         sa.Column("event_type", sa.String(length=64), nullable=False),
         sa.Column("payload", sa.JSON(), nullable=False),
@@ -107,11 +107,11 @@ def upgrade() -> None:
 
     op.create_table(
         "assets",
-        sa.Column("session_id", sa.String(length=36), nullable=False),
-        sa.Column("job_id", sa.String(length=36), nullable=False),
+        sa.Column("session_id", sa.Uuid(as_uuid=False), nullable=False),
+        sa.Column("job_id", sa.Uuid(as_uuid=False), nullable=False),
         sa.Column("round_no", sa.Integer(), nullable=False),
         sa.Column("version_no", sa.Integer(), nullable=False),
-        sa.Column("parent_asset_id", sa.String(length=36), nullable=True),
+        sa.Column("parent_asset_id", sa.Uuid(as_uuid=False), nullable=True),
         sa.Column("platform_id", sa.String(length=64), nullable=False),
         sa.Column("asset_role", sa.String(length=64), nullable=False),
         sa.Column("display_order", sa.Integer(), nullable=False),
