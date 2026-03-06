@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 from sse_starlette import EventSourceResponse
 
 from app.core.response import success_response

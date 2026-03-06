@@ -168,6 +168,32 @@ def delete_session_image(
     return success_response({"image_id": image_id, "deleted": True})
 
 
+@router.get("/{session_id}/images")
+def list_session_images(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    """获取 Session 的所有图片列表"""
+    get_session_or_404(db, session_id, str(user_id))
+    images = list_active_session_images(db, session_id)
+    return success_response({
+        "images": [
+            {
+                "image_id": img.id,
+                "slot_type": img.slot_type,
+                "display_order": img.display_order,
+                "url": img.source_url,
+                "width": img.width,
+                "height": img.height,
+                "mime_type": img.mime_type,
+                "file_size": img.file_size,
+            }
+            for img in images
+        ]
+    })
+
+
 @router.post("/{session_id}/analysis")
 def trigger_analysis(
     session_id: str,

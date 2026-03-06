@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     test_user_id: str = "00000000-0000-0000-0000-000000000001"
     tasks_eager: bool = False
 
-    whatai_api_base: str = "https://whatai.cc/v1"
+    whatai_api_base: str = "https://api.whatai.cc"
     whatai_api_key: str = ""
     whatai_chat_model: str = "gpt-4.1-mini"
     whatai_image_model: str = "gpt-image-1"

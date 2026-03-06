@@ -33,11 +33,12 @@ ERRORS = {
 
 
 class AppError(Exception):
-    def __init__(self, key: str, message: str | None = None, http_status: int = 400):
+    def __init__(self, key: str, message: str | None = None, http_status: int = 400, retryable: bool = False):
         if key not in ERRORS:
             key = "internal_error"
         self.key = key
         self.error = ERRORS[key]
         self.message = message or self.error.message
         self.http_status = http_status
+        self.retryable = retryable
         super().__init__(self.message)
