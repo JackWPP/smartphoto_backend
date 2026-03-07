@@ -1,4 +1,5 @@
 import io
+import zipfile
 
 from PIL import Image
 
@@ -44,6 +45,12 @@ def create_ready_session(client):
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
     client.post(f"/api/v2/sessions/{sid}/strategy/preview")
     return sid
+
+
+def upload_detail_style_image(client, sid, display_order=1):
+    files = {"file": (f"style-{display_order}.jpg", make_image_bytes(color=(220, 230, 240)), "image/jpeg")}
+    data = {"display_order": str(display_order)}
+    return client.post(f"/api/v2/sessions/{sid}/detail-pages/style-images", files=files, data=data)
 
 
 def test_strategy_preview_contains_prompt_plan_metadata(client):
@@ -120,6 +127,109 @@ def test_prompt_preview_returns_structured_prompts_and_latest_snapshots(client):
     assert all(item["generation_snapshot"] for item in latest_assets)
     assert all(item["reference_image_ids"] for item in latest_assets)
     assert {item["role"] for item in latest_assets} == {"hero", "white_bg", "selling_point", "scene", "detail"}
+
+
+def test_detail_page_preview_and_prompt_preview_without_style_images(client):
+    sid = create_ready_session(client)
+
+    preview = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
+        json={"planner_instruction": "标题更短，版式更清晰"},
+    )
+    assert preview.status_code == 200
+    detail_strategy = preview.json()["data"]["detail_strategy_preview"]
+    assert detail_strategy["use_case"] == "amazon_detail"
+    assert detail_strategy["aspect_ratio"] == "21:9"
+    assert detail_strategy["panel_count"] == 8
+    assert detail_strategy["style_source"] == "copy_fields"
+    assert detail_strategy["style_reference_manifest"] == []
+    assert len(detail_strategy["panel_plan"]) == 8
+
+    prompt_preview = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/prompts/preview",
+        json={"instruction": "整体更干净", "include_latest_assets": True},
+    )
+    assert prompt_preview.status_code == 200
+    data = prompt_preview.json()["data"]
+    assert data["use_case"] == "amazon_detail"
+    assert data["aspect_ratio"] == "21:9"
+    assert data["panel_count"] == 8
+    assert data["image_size"] == "1792x768"
+    assert len(data["prompts"]) == 8
+    assert data["prompts"][0]["blocks"]["instruction"] == "整体更干净"
+    assert data["prompts"][0]["product_reference_images_used"][0]["slot_type"] == "front"
+    assert data["prompts"][0]["style_reference_images_used"] == []
+    assert data["latest_assets"] == []
+
+
+def test_detail_page_full_pipeline_keeps_main_gallery_untouched(client):
+    sid = create_ready_session(client)
+    upload_detail_style_image(client, sid, display_order=1)
+    upload_detail_style_image(client, sid, display_order=2)
+
+    preview = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert preview.status_code == 200
+    assert len(preview.json()["data"]["detail_strategy_preview"]["style_reference_manifest"]) == 2
+
+    gen = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "整体更高级"})
+    assert gen.status_code == 200
+    job_id = gen.json()["data"]["job_id"]
+
+    job = client.get(f"/api/v2/jobs/{job_id}").json()["data"]
+    assert job["status"] == "succeeded"
+
+    detail_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results").json()["data"]
+    assert detail_results["detail_generation_round"] == 1
+    assert detail_results["detail_latest_result_version"] == 1
+    assert detail_results["summary"]["total_count"] == 9
+    assert detail_results["summary"]["panel_count"] == 8
+    assert len(detail_results["panels"]) == 8
+    assert detail_results["stitched_asset"] is not None
+
+    session_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert session_snapshot["latest_result_version"] == 0
+    assert session_snapshot["detail_latest_result_version"] == 1
+
+    main_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
+    assert main_results["summary"]["ready_count"] == 0
+
+    dl = client.get(f"/api/v2/sessions/{sid}/detail-pages/download")
+    assert dl.status_code == 200
+    assert dl.headers["content-type"].startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
+        assert len(zf.namelist()) == 9
+
+
+def test_detail_page_generation_idempotency_and_conflict(client, monkeypatch):
+    sid = create_ready_session(client)
+    client.post(f"/api/v2/sessions/{sid}/strategy/preview")
+
+    monkeypatch.setattr("app.api.v2.sessions.dispatch_job", lambda *_args, **_kwargs: None)
+    first = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/generations",
+        json={"instruction": "a"},
+        headers={"Idempotency-Key": "detail-key"},
+    )
+    assert first.status_code == 200
+
+    second = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": None})
+    assert second.status_code == 409
+    assert second.json()["code"] == 40901
+
+    same = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/generations",
+        json={"instruction": "a"},
+        headers={"Idempotency-Key": "detail-key"},
+    )
+    assert same.json()["data"]["job_id"] == first.json()["data"]["job_id"]
+
+    diff = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/generations",
+        json={"instruction": "b"},
+        headers={"Idempotency-Key": "detail-key"},
+    )
+    assert diff.status_code == 409
+    assert diff.json()["code"] == 40902
 
 
 def test_copy_regenerate_not_overwrite_confirmed_copy(client):

@@ -3,7 +3,12 @@ from celery import shared_task
 from app.core.errors import AppError
 from app.db.session import SessionLocal
 from app.services.jobs import append_job_event, update_job_status
-from app.services.pipeline import run_analysis_job, run_generate_family_job, run_regenerate_copy_job
+from app.services.pipeline import (
+    run_analysis_job,
+    run_generate_detail_page_job,
+    run_generate_family_job,
+    run_regenerate_copy_job,
+)
 
 RETRYABLE_UPSTREAM_KEYS = {"upstream_llm_error"}
 
@@ -63,6 +68,8 @@ def execute_job(self, job_id: str) -> None:
             "regenerate_asset",
         }:
             run_generate_family_job(db, job_id)
+        elif job.job_type == "generate_detail_page":
+            run_generate_detail_page_job(db, job_id)
         else:
             raise ValueError(f"unsupported job type: {job.job_type}")
         db.commit()

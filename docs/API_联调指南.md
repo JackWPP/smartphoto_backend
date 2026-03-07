@@ -221,6 +221,88 @@
 - 常见错误：`40002` `40003`
 - 并发/幂等：无 Idempotency-Key
 
+### 详情页独立生成出口
+- 定位：
+  - 与主图 `/generations` 分开
+  - 由前端开关决定本次走主图还是详情页
+  - 详情页生成不会触发主图 5 张策略预览和生图
+- 前置状态：
+  - `confirmed_copy` 已保存
+  - `active_platform_id` 已设置
+  - 至少 1 张商品图
+- 详情页风格图接口：
+  - `POST /sessions/{session_id}/detail-pages/style-images`
+  - `GET /sessions/{session_id}/detail-pages/style-images`
+  - `DELETE /sessions/{session_id}/detail-pages/style-images/{image_id}`
+  - 当前只接收 `display_order`，不要求 `slot_type`
+  - 最多 4 张，可为空
+- 详情页策略预览：
+  - 接口：`POST /sessions/{session_id}/detail-pages/strategy/preview`
+  - 请求体：`planner_instruction: string | null`
+  - 同步落库到 `session.detail_strategy_preview`
+  - 固定返回：
+    - `use_case = amazon_detail`
+    - `aspect_ratio = 21:9`
+    - `panel_count = 8`
+    - `product_reference_manifest`
+    - `style_reference_manifest`
+    - `panel_plan`
+  - `panel_plan` 每项至少包含：
+    - `panel_id`
+    - `panel_label`
+    - `display_order`
+    - `planner_prompt_base`
+    - `copy_lines`
+    - `layout_notes`
+    - `planner_source`
+    - `product_reference_ids`
+    - `style_reference_ids`
+  - 未上传风格图时，planner 自动退回 `style_choice + style_custom`
+- 详情页 Prompt 预览：
+  - 接口：`POST /sessions/{session_id}/detail-pages/prompts/preview`
+  - 请求体：
+    - `instruction: string | null`
+    - `include_latest_assets: boolean`
+  - 返回：
+    - `use_case`
+    - `aspect_ratio`
+    - `panel_count`
+    - `image_size = 1792x768`
+    - `product_reference_manifest`
+    - `style_reference_manifest`
+    - `prompts`
+    - `latest_assets`
+  - `prompts` 固定按 8 个 panel 顺序返回，每项包含：
+    - `panel_id`
+    - `panel_label`
+    - `display_order`
+    - `blocks`
+    - `product_reference_ids`
+    - `style_reference_ids`
+    - `product_reference_images_used`
+    - `style_reference_images_used`
+    - `planner_source`
+    - `planner_base`
+    - `final_prompt`
+- 详情页生成/结果/下载：
+  - 首次生成：`POST /sessions/{session_id}/detail-pages/generations`
+  - 结果查询：`GET /sessions/{session_id}/detail-pages/results`
+  - 下载：`GET /sessions/{session_id}/detail-pages/download`
+  - `job_type`：`generate_detail_page`
+  - 固定产出：
+    - 8 张 `panel`
+    - 1 张竖向拼接长图 `stitched`
+  - 独立版本字段：
+    - `detail_generation_round`
+    - `detail_latest_result_version`
+  - 主图版本字段 `generation_round/latest_result_version` 不会被详情页生成改写
+  - 并发保护：
+    - 详情页与主图共用 generation 并发锁
+    - 冲突仍返回 `40901`
+  - 幂等：
+    - `POST /detail-pages/generations` 支持 `Idempotency-Key`
+    - 相同 key + 相同 payload 命中幂等；不同 payload 返回 `40902`
+
 ### Step 6 生成/结果/重生成/下载
 - 前置状态：
   - 首次生成：session 必须是 `strategy_ready` 或 `completed`
@@ -285,7 +367,7 @@ data: {"event":"job_succeeded","job_id":"..."}
 2. `build_strategy` 当前为同步执行，不走 Worker 队列。
 3. `regenerate_copy` 仍返回占位重写结果，尚未解析上游真实输出。
 4. `global_edit` 的 `scope=selected` 参数已接收，但执行时仍按整组处理。
-5. 当前未实现“风格参考图单独上传”“ComfyUI 节点级调试信息”“详情页长图工作流”。
+5. 当前已实现“风格参考图单独上传 + 详情页独立首次生成”，但未实现详情页 `global_edit`、单 panel 重生成、ComfyUI 节点级调试信息。
 6. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
 7. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
 
@@ -301,3 +383,12 @@ data: {"event":"job_succeeded","job_id":"..."}
 9. `GET /jobs/{job_id}` 或 `GET /jobs/{job_id}/events`
 10. `GET /sessions/{id}/results`
 11. `GET /sessions/{id}/download`
+
+详情页最短路径（可替代 6~11）：
+1. `POST /sessions/{id}/detail-pages/style-images`（可选）
+2. `POST /sessions/{id}/detail-pages/strategy/preview`
+3. `POST /sessions/{id}/detail-pages/prompts/preview`（可选）
+4. `POST /sessions/{id}/detail-pages/generations`
+5. `GET /jobs/{job_id}` 或 `GET /jobs/{job_id}/events`
+6. `GET /sessions/{id}/detail-pages/results`
+7. `GET /sessions/{id}/detail-pages/download`

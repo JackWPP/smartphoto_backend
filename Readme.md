@@ -12,6 +12,7 @@ SmartPhoto Backend v2 是一个围绕前端 6 步流程设计的后端系统，�
 | 层级 | 状态 | 说明 |
 |---|---|---|
 | P0 主链路 | 已实现 | 上传、分析、平台选择、copy、策略预览、生图、结果、下载 |
+| 详情页独立生成 | 已实现 | `detail-pages` 独立策略预览、Prompt 调试、8 张 panel + 长图生成、结果、下载 |
 | 重生成能力 | 已实现 | `global_edit`、`regenerate_gallery`、`regenerate_asset` |
 | 并发与幂等 | 已实现 | `Idempotency-Key` + DB 并发检查 + Redis 锁 |
 | Auth/JWT | 延后到 P1 | 当前使用固定测试用户上下文 |
@@ -74,6 +75,7 @@ alembic upgrade head
   - `POST /sessions`
   - `POST /sessions/{id}/analysis`
   - `POST /sessions/{id}/generations`
+  - `POST /sessions/{id}/detail-pages/generations`
   - `GET /jobs/{job_id}` + `GET /jobs/{job_id}/events`
 
 ## OpenAPI / Apifox
@@ -95,6 +97,7 @@ alembic upgrade head
 - `build_strategy` 当前是同步落库，不走 Worker 队列
 - `analyze_images` / `regenerate_copy` 当前仍返回占位结果（即使配置 key）
 - `global_edit` 的 `scope=selected` 已接收参数，但当前实现仍按整组处理
+- 详情页当前仅实现独立首次生成，不包含详情页 `global_edit` / 单 panel 重生成
 - 未实现 `partial_succeeded` / `canceled` 的实际产出流程
 
 详细差距请看 [API 联调指南](docs/API_联调指南.md) 的“实现 vs SPEC 差距清单”。

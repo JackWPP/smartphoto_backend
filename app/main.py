@@ -18,7 +18,8 @@ app = FastAPI(
     version="2.0.0",
     description=(
         "SmartPhoto Backend v2 OpenAPI。"
-        "系统围绕前端 6 步流程设计，覆盖 session 创建、图片上传、分析、平台选择、copy 编辑、策略预览、Prompt 调试、整组生图、结果查询、下载、重生成。"
+        "系统围绕前端 6 步流程设计，覆盖 session 创建、图片上传、分析、平台选择、copy 编辑、策略预览、Prompt 调试、"
+        "主图整组生图、详情页独立生成、结果查询、下载、重生成。"
     ),
     openapi_tags=[
         {"name": "platforms", "description": "平台能力与默认配置。"},

@@ -16,6 +16,8 @@ class AssetModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     parent_asset_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("assets.id"), nullable=True)
 
     platform_id: Mapped[str] = mapped_column(String(64), index=True)
+    asset_family: Mapped[str] = mapped_column(String(32), default="main_gallery", index=True)
+    asset_kind: Mapped[str] = mapped_column(String(32), default="panel", index=True)
     asset_role: Mapped[str] = mapped_column(String(64))
     display_order: Mapped[int] = mapped_column(Integer)
 

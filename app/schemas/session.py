@@ -47,6 +47,37 @@ class SessionImagesData(BaseModel):
     images: list[SessionImageItem] = Field(description="当前 session 的有效图片列表。")
 
 
+class DetailStyleImageSummary(BaseModel):
+    image_id: str = Field(description="详情页风格图 ID。")
+    display_order: int = Field(description="显示顺序。")
+    url: str = Field(description="图片访问地址。")
+
+
+class DetailStyleImageItem(BaseModel):
+    image_id: str = Field(description="详情页风格图 ID。")
+    display_order: int = Field(description="显示顺序。")
+    url: str = Field(description="图片访问地址。")
+    width: int = Field(description="图片宽度。")
+    height: int = Field(description="图片高度。")
+    mime_type: str = Field(description="MIME 类型。")
+    file_size: int = Field(description="文件大小，单位字节。")
+
+
+class UploadDetailStyleImageData(BaseModel):
+    image_id: str = Field(description="本次新上传的详情页风格图 ID。")
+    session_id: str = Field(description="所属会话 ID。")
+    uploaded_images: list[DetailStyleImageSummary] = Field(description="当前 session 下所有有效详情页风格图。")
+
+
+class DeleteDetailStyleImageData(BaseModel):
+    image_id: str = Field(description="被删除的详情页风格图 ID。")
+    deleted: bool = Field(description="是否删除成功。", examples=[True])
+
+
+class DetailStyleImagesData(BaseModel):
+    images: list[DetailStyleImageItem] = Field(description="当前 session 的详情页风格图列表。")
+
+
 class PlatformSelectionRequest(BaseModel):
     selected_platform_ids: list[str] = Field(
         min_length=1,
@@ -138,6 +169,20 @@ class StrategyPreviewData(BaseModel):
     strategy_preview: dict[str, Any] = Field(description="完整策略预览对象，包含 asset_plan/reference_manifest/prompt_plan。")
 
 
+class DetailStrategyPreviewRequest(BaseModel):
+    planner_instruction: str | None = Field(
+        default=None,
+        description="详情页 planner 的额外策略指令，例如“标题更简洁，字体更偏科技感”。",
+    )
+
+
+class DetailStrategyPreviewData(BaseModel):
+    session_id: str = Field(description="会话 ID。")
+    detail_strategy_preview: dict[str, Any] = Field(
+        description="详情页策略预览对象，包含 use_case/aspect_ratio/panel_count/product_reference_manifest/style_reference_manifest/panel_plan。"
+    )
+
+
 class PromptPreviewRequest(BaseModel):
     instruction: str | None = Field(default=None, description="本轮附加生图指令，用于预览 prompt。")
     include_latest_assets: bool = Field(default=True, description="是否回带最近一版已生成资产的 prompt_snapshot。")
@@ -177,6 +222,48 @@ class PromptPreviewData(BaseModel):
     latest_assets: list[PromptPreviewLatestAsset] = Field(description="最近一版结果的执行快照。")
 
 
+class DetailPromptPreviewItem(BaseModel):
+    panel_id: str = Field(description="详情页 panel ID。")
+    panel_label: str = Field(description="panel 中文名。")
+    display_order: int = Field(description="显示顺序。")
+    aspect_ratio: str = Field(description="固定为 21:9。")
+    use_case: str = Field(description="固定为 amazon_detail。")
+    final_prompt: str = Field(description="最终提交给上游的 prompt。")
+    blocks: dict[str, Any] = Field(description="结构化 prompt blocks。")
+    strategy_fields_used: list[str] = Field(description="本次 prompt 用到的策略字段路径列表。")
+    product_reference_ids: list[str] = Field(default_factory=list, description="本次 prompt 使用的商品参考图 ID。")
+    style_reference_ids: list[str] = Field(default_factory=list, description="本次 prompt 使用的风格参考图 ID。")
+    product_reference_images_used: list[dict[str, Any]] = Field(default_factory=list, description="本次 prompt 使用的商品参考图清单。")
+    style_reference_images_used: list[dict[str, Any]] = Field(default_factory=list, description="本次 prompt 使用的风格参考图清单。")
+    planner_source: str | None = Field(default=None, description="panel planner 来源，rule_based 或 llm。")
+    planner_base: str | None = Field(default=None, description="panel 级 planner 基础语义。")
+
+
+class DetailPromptPreviewLatestAsset(BaseModel):
+    asset_id: str = Field(description="资产 ID。")
+    asset_kind: str = Field(description="资产类型，panel 或 stitched。")
+    version_no: int = Field(description="结果版本号。")
+    panel_id: str = Field(description="panel ID；拼接长图固定为 detail_page_long。")
+    display_order: int = Field(description="显示顺序。")
+    prompt_snapshot: str | None = Field(default=None, description="真实执行时保存的 prompt 文本。")
+    edit_instruction: str | None = Field(default=None, description="该次结果的编辑指令。")
+    generation_snapshot: dict[str, Any] | None = Field(default=None, description="真实执行快照。")
+
+
+class DetailPromptPreviewData(BaseModel):
+    session_id: str = Field(description="会话 ID。")
+    active_platform_id: str | None = Field(default=None, description="当前生效平台。")
+    use_case: str = Field(description="固定为 amazon_detail。")
+    aspect_ratio: str = Field(description="固定为 21:9。")
+    panel_count: int = Field(description="固定为 8。")
+    model: str = Field(description="当前图片模型名称。")
+    image_size: str = Field(description="当前详情页预览输出尺寸。")
+    product_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用商品参考图清单。")
+    style_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用详情页风格图清单。")
+    prompts: list[DetailPromptPreviewItem] = Field(description="按 panel 顺序生成的 prompt 预览列表。")
+    latest_assets: list[DetailPromptPreviewLatestAsset] = Field(description="最近一版详情页结果的执行快照。")
+
+
 class GenerateGalleryRequest(BaseModel):
     instruction: str | None = Field(default=None, description="本轮整组生图附加指令。")
 
@@ -187,6 +274,14 @@ class GenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
     generation_round: int = Field(description="触发后预期进入的轮次。")
+
+
+class DetailGenerationJobData(BaseModel):
+    job_id: str = Field(description="任务 ID。")
+    job_type: str = Field(description="任务类型。", examples=["generate_detail_page"])
+    status: str = Field(description="任务状态。")
+    session_id: str = Field(description="会话 ID。")
+    detail_generation_round: int = Field(description="触发后预期进入的详情页轮次。")
 
 
 class GenericGenerationJobData(BaseModel):
@@ -232,6 +327,10 @@ class SessionSnapshotData(BaseModel):
     analysis_snapshot: dict[str, Any] | None = Field(default=None, description="分析结果快照。")
     confirmed_copy: dict[str, Any] | None = Field(default=None, description="当前保存的 copy。")
     strategy_preview: dict[str, Any] | None = Field(default=None, description="当前保存的策略预览。")
+    detail_strategy_preview: dict[str, Any] | None = Field(default=None, description="当前保存的详情页策略预览。")
     latest_generate_job_id: str | None = Field(default=None, description="最近一次生成任务 ID。")
+    latest_detail_generate_job_id: str | None = Field(default=None, description="最近一次详情页生成任务 ID。")
     generation_round: int = Field(description="当前生成轮次。")
     latest_result_version: int = Field(description="最近一版结果版本号。")
+    detail_generation_round: int = Field(description="当前详情页生成轮次。")
+    detail_latest_result_version: int = Field(description="最近一版详情页结果版本号。")
