@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-celery -A app.workers.celery_app.celery_app worker -Q q.analysis,q.copy,q.generation --loglevel=info
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+./.venv/bin/alembic upgrade head
+exec ./.venv/bin/celery -A app.workers.celery_app.celery_app worker -Q q.analysis,q.copy,q.generation --loglevel=info

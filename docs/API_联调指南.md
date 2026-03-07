@@ -5,6 +5,18 @@
 ### 1.1 Base URL
 - 前缀：`/api/v2`
 - 健康检查：`GET /healthz`
+- OpenAPI：`GET /openapi.json`
+- Apifox 导入文件：`docs/openapi/smartphoto_backend_openapi.json`
+
+### 1.1.1 OpenAPI 导出
+```bash
+./.venv/bin/python scripts/export_openapi.py
+```
+
+说明：
+- 该命令会导出当前代码实现对应的 OpenAPI JSON
+- 导出文件可直接导入 Apifox
+- 若接口有变更，优先重新导出后再同步给联调方
 
 ### 1.2 统一响应
 成功：
@@ -74,6 +86,13 @@
   - 生成 `analysis` job（队列 `q.analysis`）
   - session 状态：`analyzing -> analyzed`
   - 自动写入 `analysis_snapshot`
+  - 当前实现会把 session 上传图片以内联图像内容的方式发给上游分析模型，不再只传文本
+  - `analysis_snapshot` 额外包含 `reference_summary`：
+    - `shape`
+    - `colors`
+    - `materials`
+    - `structures`
+    - `must_keep`
   - 若 `confirmed_copy` 为空，自动写入草稿默认值
 - 常见错误：`40008`（无可用图片）
 - 幂等：支持 `Idempotency-Key`
@@ -105,10 +124,100 @@
   - `confirmed_copy` 已保存
   - `active_platform_id` 已设置
 - 接口：`POST /sessions/{session_id}/strategy/preview`
+- 请求体：
+  - `planner_instruction: string | null`
 - 当前实现行为：
   - 立即同步生成预览并落库
   - 创建 `build_strategy` job 记录，但不进队列
+  - Step 5 当前会结合 `confirmed_copy + active_platform_id + session 图片 + analysis.reference_summary` 做一轮角色级 prompt planner
+  - `asset_plan` 当前固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
+  - 每个 `asset_plan` 项都包含 prompt 可驱动元数据：
+    - `role`
+    - `display_order`
+    - `role_label`
+    - `goal`
+    - `background_mode`
+    - `text_policy`
+    - `composition_hint`
+    - `aspect_ratio`
+  - 同步返回并落库：
+    - `reference_manifest`
+      - `image_id`
+      - `slot_type`
+      - `display_order`
+      - `source_url`
+      - `width`
+      - `height`
+      - `mime_type`
+      - `file_size`
+    - `prompt_plan`
+      - `role`
+      - `display_order`
+      - `reference_image_ids`
+      - `reference_slots`
+      - `must_keep`
+      - `must_avoid`
+      - `background_rule`
+      - `composition_rule`
+      - `lighting_rule`
+      - `fidelity_rule`
+      - `final_prompt_base`
+      - `planner_source`
+      - `white_bg_mode`
 - 成功后：状态写为 `strategy_ready`
+- 常见错误：`40002` `40003`
+- 并发/幂等：无 Idempotency-Key
+
+### Prompt 调试预览
+- 前置状态：
+  - `confirmed_copy` 已保存
+  - `active_platform_id` 已设置
+- 接口：`POST /sessions/{session_id}/prompts/preview`
+- 请求体：
+  - `instruction: string | null`
+  - `include_latest_assets: boolean`
+- 当前实现行为：
+  - 只读接口，不创建 job，不写库
+  - 即使 session 还没进入 `strategy_ready`，只要 copy 和平台已齐备，也会动态返回当前可计算的 prompt
+  - 返回 `model`、`image_size`、`reference_manifest`、`prompts`、`latest_assets`
+  - `prompts` 按当前 `asset_plan` 顺序返回，每项包含：
+    - `role`
+    - `display_order`
+    - `role_label`
+    - `aspect_ratio`
+    - `background_mode`
+    - `text_policy`
+    - `composition_hint`
+    - `blocks`
+    - `strategy_fields_used`
+    - `reference_image_ids`
+    - `reference_slots`
+    - `reference_images_used`
+    - `must_keep`
+    - `must_avoid`
+    - `planner_source`
+    - `planner_base`
+    - `final_prompt`
+  - `blocks` 当前固定为：
+    - `goal`
+    - `subject`
+    - `composition`
+    - `background`
+    - `style`
+    - `selling_points`
+    - `constraints`
+    - `instruction`
+  - `latest_assets` 返回最新结果版本中每张图的：
+    - `asset_id`
+    - `version_no`
+    - `role`
+    - `display_order`
+    - `prompt_snapshot`
+    - `edit_instruction`
+    - `generation_snapshot`
+    - `reference_image_ids`
+    - `upstream_endpoint`
+    - `planner_instruction`
 - 常见错误：`40002` `40003`
 - 并发/幂等：无 Idempotency-Key
 
@@ -123,9 +232,22 @@
   - 整组重生成：`POST /sessions/{session_id}/results/regenerate`
   - 单图重生成：`POST /assets/{asset_id}/regenerate`
   - 下载：`GET /sessions/{session_id}/download`
+- 结果集字段补充：
+  - `assets[].role`
+  - `assets[].status`
+  - `assets[].display_order`
+  - `assets[].version_no`
 - 版本规则：
   - `generate_gallery` / `global_edit` / `regenerate_gallery`：`round_no + 1` 且 `version_no + 1`
   - `regenerate_asset`：`version_no + 1`，`round_no` 保持当前轮次，且写 `parent_asset_id`
+- 当前实现补充：
+  - 主图组默认按 `hero -> white_bg -> selling_point -> scene -> detail` 生成
+  - 每个 role 默认会从 session 图片中选最多 2 张参考图，并优先走 `/v1/images/edits`
+  - 参考图优先级：`front > angle45 > side > extra`
+  - `detail` 默认优先 `front + side`，其余角色默认优先 `front + angle45`
+  - 生图执行最大并发数固定为 `2`
+  - `white_bg` 走独立白底分支；若白底校验失败，仅对白底图内部再尝试 1 次，不重跑整组
+  - 实际提交给上游的快照会落到 `assets.generation_snapshot`
 - 并发保护：
   - 同 session 或同 user 同时只允许 1 个运行中生图任务
   - 冲突返回 `40901`
@@ -150,19 +272,22 @@ data: {"event":"job_succeeded","job_id":"..."}
 - 补充说明：
   - 生图链路当前改为异步提交 WhatAI 任务后轮询结果，因此单次接口抖动不一定意味着上游未生成
   - 图片任务结果当前按同一 `task_id` 约每 20 秒轮询一次，最长约 8 分钟；前端若见到 job 长时间停在 `generating`，不应立刻重复触发生图
+  - Prompt 预览建议走独立的 `POST /sessions/{id}/prompts/preview`，不要从 `GET /results` 推导 prompt
 
 ### 3.3 前端消费建议
 - 建议同时使用：
   - SSE 实时展示阶段进度与单图就绪
   - Job 轮询兜底（SSE 中断或网络抖动）
+  - Prompt Debug 面板单独调 `POST /sessions/{id}/prompts/preview`，避免结果接口变重
 
 ## 4. 实现 vs SPEC 差距清单（集中维护）
 1. 鉴权接口（`/auth/register` `/auth/login` `/auth/me`）未实现，当前固定测试用户。
 2. `build_strategy` 当前为同步执行，不走 Worker 队列。
-3. `WhataiClient.analyze_images` 与 `regenerate_copy` 当前返回占位结果，尚未解析上游真实输出。
+3. `regenerate_copy` 仍返回占位重写结果，尚未解析上游真实输出。
 4. `global_edit` 的 `scope=selected` 参数已接收，但执行时仍按整组处理。
-5. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
-6. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
+5. 当前未实现“风格参考图单独上传”“ComfyUI 节点级调试信息”“详情页长图工作流”。
+6. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
+7. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
 
 ## 5. 联调最短路径
 1. `POST /sessions`
@@ -171,7 +296,8 @@ data: {"event":"job_succeeded","job_id":"..."}
 4. `PUT /sessions/{id}/platform-selection`
 5. `PUT /sessions/{id}/copy`
 6. `POST /sessions/{id}/strategy/preview`
-7. `POST /sessions/{id}/generations`
-8. `GET /jobs/{job_id}` 或 `GET /jobs/{job_id}/events`
-9. `GET /sessions/{id}/results`
-10. `GET /sessions/{id}/download`
+7. `POST /sessions/{id}/prompts/preview`（可选，用于调 prompt）
+8. `POST /sessions/{id}/generations`
+9. `GET /jobs/{job_id}` 或 `GET /jobs/{job_id}/events`
+10. `GET /sessions/{id}/results`
+11. `GET /sessions/{id}/download`

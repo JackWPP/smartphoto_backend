@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from redis import Redis
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -14,6 +15,7 @@ os.environ["DATABASE_URL"] = TEST_DB
 os.environ["TASKS_EAGER"] = "true"
 os.environ["STORAGE_ROOT"] = str(TEST_STORAGE)
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
+os.environ["WHATAI_API_KEY"] = ""
 
 from app.core.config import get_settings  # noqa: E402
 
@@ -50,3 +52,18 @@ def setup_database():
 @pytest.fixture
 def client(setup_database):
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def reset_test_state(setup_database):
+    redis = Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+    redis.flushdb()
+    with db_session.SessionLocal() as db:
+        for table in reversed(Base.metadata.sorted_tables):
+            db.execute(table.delete())
+        db.commit()
+    if TEST_STORAGE.exists():
+        shutil.rmtree(TEST_STORAGE)
+    TEST_STORAGE.mkdir(parents=True, exist_ok=True)
+    yield
+    redis.flushdb()

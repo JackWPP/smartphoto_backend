@@ -1,15 +1,19 @@
+from __future__ import annotations
+
 import base64
 import io
+import json
 import logging
 import time
-from urllib.parse import urlsplit, urlunsplit
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from PIL import Image, ImageDraw
 
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.services.reference_images import LoadedReferenceImage
 
 logger = logging.getLogger(__name__)
 
@@ -18,27 +22,132 @@ class WhataiClient:
     REQUEST_RETRYABLE_ERRORS = (httpx.TransportError,)
     IMAGE_TASK_POLL_ATTEMPTS = 24
     IMAGE_TASK_POLL_INTERVAL_SECONDS = 20
+    IMAGE_EDIT_REQUEST_ATTEMPTS = 4
 
     def __init__(self) -> None:
         self.settings = get_settings()
 
-    def analyze_images(self, image_urls: list[str], active_platform_id: str | None) -> dict[str, Any]:
-        if not self.settings.whatai_api_key:
-            return self._fake_analysis(active_platform_id)
+    def analyze_images(
+        self,
+        reference_images: list[LoadedReferenceImage] | list[str],
+        active_platform_id: str | None,
+    ) -> dict[str, Any]:
+        normalized_images = [item for item in reference_images if isinstance(item, LoadedReferenceImage)]
+        fallback = self._fake_analysis(active_platform_id, normalized_images)
+        if not self.settings.whatai_api_key or not normalized_images:
+            return fallback
 
-        prompt = "请输出SmartPhoto所需JSON结构：recognized_product,image_assessment,missing_views,suggestions,copy_draft,key_parameters,suggested_styles"
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "你是 SmartPhoto 的商品视觉分析器。"
+                    "请阅读上传的商品参考图，只返回 JSON 对象，字段必须包含："
+                    "recognized_product,image_assessment,missing_views,suggestions,copy_draft,key_parameters,"
+                    "suggested_styles,reference_summary。"
+                    "其中 reference_summary 至少包含 shape,colors,materials,structures,must_keep。"
+                    f"当前平台：{active_platform_id or 'temu'}。"
+                ),
+            },
+            *self._build_chat_image_parts(normalized_images),
+        ]
         payload = {
             "model": self.settings.whatai_chat_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.2,
         }
 
         resp = self._post_chat_json(payload, "upstream_llm_error")
         text = self._extract_text(resp)
-        # 上游输出不稳定，失败则退回可用默认结果
-        if not text:
-            return self._fake_analysis(active_platform_id)
-        return self._fake_analysis(active_platform_id)
+        parsed = self._parse_json_object(text)
+        if not isinstance(parsed, dict):
+            return fallback
+        return self._merge_analysis_result(fallback, parsed)
+
+    def plan_prompt_plan(
+        self,
+        *,
+        confirmed_copy: dict[str, Any],
+        active_platform_id: str,
+        asset_plan: list[dict[str, Any]],
+        reference_images: list[LoadedReferenceImage],
+        reference_summary: dict[str, Any] | None,
+        planner_instruction: str | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not self.settings.whatai_api_key or not reference_images:
+            return {}
+
+        defaults = [
+            {
+                "role": item["role"],
+                "display_order": item["display_order"],
+                "role_label": item["role_label"],
+                "goal": item["goal"],
+                "background_mode": item["background_mode"],
+                "composition_hint": item["composition_hint"],
+            }
+            for item in asset_plan
+        ]
+        manifest = [image.to_manifest_item() for image in reference_images]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "你是 SmartPhoto 的电商主图 Prompt Planner。"
+                    "请根据商品 copy、平台信息、角色定义和参考图，为 5 个主图角色输出 JSON。"
+                    "只能返回 JSON 对象，顶层键必须是 prompt_plan，值是数组。"
+                    "prompt_plan 中每项必须包含：role,reference_image_ids,must_keep,must_avoid,"
+                    "background_rule,composition_rule,lighting_rule,fidelity_rule,final_prompt_base。"
+                    "reference_image_ids 只能从可用参考图 id 中选择。"
+                    "白底图必须严格强调纯白无缝背景、单主体、不要人物和道具。"
+                    "所有角色都必须以商品保真为最高优先级。"
+                    f"平台：{active_platform_id}。"
+                    f"商品 copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
+                    f"角色定义：{json.dumps(defaults, ensure_ascii=False)}。"
+                    f"可用参考图：{json.dumps(manifest, ensure_ascii=False)}。"
+                    f"参考图摘要：{json.dumps(reference_summary or {}, ensure_ascii=False)}。"
+                    f"额外策略指令：{planner_instruction or '无'}。"
+                ),
+            },
+            *self._build_chat_image_parts(reference_images),
+        ]
+        payload = {
+            "model": self.settings.whatai_chat_model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.3,
+        }
+        response = self._post_chat_json(payload, "upstream_llm_error")
+        parsed = self._parse_json_object(self._extract_text(response))
+        if not isinstance(parsed, dict):
+            return {}
+        prompt_plan_items = parsed.get("prompt_plan")
+        if not isinstance(prompt_plan_items, list):
+            return {}
+        valid_image_ids = {image.image_id for image in reference_images}
+        by_role: dict[str, dict[str, Any]] = {}
+        for item in prompt_plan_items:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "")
+            if not role:
+                continue
+            reference_image_ids = [
+                image_id
+                for image_id in [str(value) for value in item.get("reference_image_ids", [])]
+                if image_id in valid_image_ids
+            ]
+            by_role[role] = {
+                "reference_image_ids": reference_image_ids,
+                "must_keep": [str(value) for value in item.get("must_keep", []) if str(value).strip()],
+                "must_avoid": [str(value) for value in item.get("must_avoid", []) if str(value).strip()],
+                "background_rule": str(item.get("background_rule") or "").strip(),
+                "composition_rule": str(item.get("composition_rule") or "").strip(),
+                "lighting_rule": str(item.get("lighting_rule") or "").strip(),
+                "fidelity_rule": str(item.get("fidelity_rule") or "").strip(),
+                "final_prompt_base": str(item.get("final_prompt_base") or "").strip(),
+                "reference_slots": [str(value) for value in item.get("reference_slots", []) if str(value).strip()],
+            }
+        return by_role
 
     def regenerate_copy(
         self,
@@ -58,22 +167,28 @@ class WhataiClient:
         self._post_chat_json(payload, "upstream_llm_error")
         return {key: self._regenerated_text(current_copy.get(key, ""), instruction) for key in targets}
 
-    def generate_image(self, prompt: str, size: str = "1024x1024") -> bytes:
+    def generate_image(
+        self,
+        prompt: str,
+        size: str = "1024x1024",
+        *,
+        reference_images: list[LoadedReferenceImage] | None = None,
+    ) -> bytes:
         if not self.settings.whatai_api_key:
             return self._fake_image(prompt)
 
-        payload = {
-            "model": self.settings.whatai_image_model,
-            "prompt": prompt,
-            "size": size,
-        }
-        response_json = self._submit_image_generation_task(payload, "upstream_image_error")
-        task_id = self._extract_image_task_id(response_json)
-        if task_id:
-            data = self._poll_image_generation_task(task_id, "upstream_image_error")
+        if reference_images:
+            response_json = self._submit_image_edit(prompt, size, reference_images, "upstream_image_error")
         else:
-            data = self._extract_image_result(response_json)
+            payload = {
+                "model": self.settings.whatai_image_model,
+                "prompt": prompt,
+                "size": size,
+            }
+            response_json = self._submit_image_generation_task(payload, "upstream_image_error")
 
+        task_id = self._extract_image_task_id(response_json)
+        data = self._poll_image_generation_task(task_id, "upstream_image_error") if task_id else self._extract_image_result(response_json)
         image_url = data.get("url")
         b64 = data.get("b64_json")
         if image_url:
@@ -84,7 +199,6 @@ class WhataiClient:
 
     def _post_json(self, path: str, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
-        attempts = 2
         return self._request_json_with_retry(
             base_url=self._normalized_base_url(),
             method="POST",
@@ -92,7 +206,7 @@ class WhataiClient:
             payload=payload,
             headers=headers,
             error_key=error_key,
-            attempts=attempts,
+            attempts=2,
         )
 
     def _post_chat_json(self, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
@@ -140,6 +254,31 @@ class WhataiClient:
         if task_id:
             logger.info("Submitted async image generation task: task_id=%s", task_id)
         return response_json
+
+    def _submit_image_edit(
+        self,
+        prompt: str,
+        size: str,
+        reference_images: list[LoadedReferenceImage],
+        error_key: str,
+    ) -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
+        files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:2]]
+        data = {
+            "model": self.settings.whatai_image_model,
+            "prompt": prompt,
+            "size": size,
+        }
+        return self._request_multipart_json_with_retry(
+            base_url=self._normalized_base_url(),
+            path="/images/edits",
+            data=data,
+            files=files,
+            headers=headers,
+            error_key=error_key,
+            attempts=self.IMAGE_EDIT_REQUEST_ATTEMPTS,
+            retryable_on_exhausted=True,
+        )
 
     def _poll_image_generation_task(self, task_id: str, error_key: str) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
@@ -218,6 +357,36 @@ class WhataiClient:
             raise AppError(error_key, str(last_error), 502, retryable=retryable_on_exhausted) from last_error
         except TypeError as exc:  # pragma: no cover
             raise AppError(error_key, "unknown upstream error", 502) from exc
+
+    def _request_multipart_json_with_retry(
+        self,
+        *,
+        base_url: str,
+        path: str,
+        data: dict[str, Any],
+        files: list[tuple[str, tuple[str, bytes, str]]],
+        headers: dict[str, str],
+        error_key: str,
+        attempts: int,
+        retryable_on_exhausted: bool = True,
+    ) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                with httpx.Client(base_url=base_url, timeout=180) as client:
+                    response = client.post(path, data=data, files=files, headers=headers)
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.HTTPStatusError as exc:
+                raise AppError(error_key, self._format_http_error(exc), 502) from exc
+            except self.REQUEST_RETRYABLE_ERRORS as exc:
+                last_error = exc
+                if attempt == attempts:
+                    break
+                self._sleep_before_retry(path, attempt, attempts, exc)
+            except Exception as exc:  # noqa: BLE001
+                raise AppError(error_key, str(exc), 502) from exc
+        raise AppError(error_key, str(last_error), 502, retryable=retryable_on_exhausted) from last_error
 
     def _get_bytes_with_retry(self, url: str, error_key: str, attempts: int) -> bytes:
         last_error: Exception | None = None
@@ -324,7 +493,19 @@ class WhataiClient:
                 continue
             if item.get("type") == "text" and item.get("text"):
                 parts.append({"text": item["text"]})
+                continue
+            if item.get("type") == "image_url":
+                image_url = item.get("image_url") or {}
+                inline_data = self._data_uri_to_gemini_inline_data(str(image_url.get("url") or ""))
+                if inline_data:
+                    parts.append({"inlineData": inline_data})
         return parts
+
+    def _data_uri_to_gemini_inline_data(self, data_uri: str) -> dict[str, str] | None:
+        if not data_uri.startswith("data:") or ";base64," not in data_uri:
+            return None
+        mime_type, encoded = data_uri[5:].split(";base64,", 1)
+        return {"mimeType": mime_type, "data": encoded}
 
     def _extract_text(self, response_json: dict[str, Any]) -> str:
         choices = response_json.get("choices")
@@ -346,8 +527,198 @@ class WhataiClient:
                 texts.append(text)
         return "\n".join(texts)
 
-    def _fake_analysis(self, active_platform_id: str | None) -> dict[str, Any]:
+    def _build_chat_image_parts(self, images: list[LoadedReferenceImage]) -> list[dict[str, Any]]:
+        content: list[dict[str, Any]] = []
+        for index, image in enumerate(images, start=1):
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"参考图 {index}: image_id={image.image_id}, slot_type={image.slot_type}, "
+                        f"display_order={image.display_order}"
+                    ),
+                }
+            )
+            content.append({"type": "image_url", "image_url": {"url": image.to_data_uri()}})
+        return content
+
+    def _parse_json_object(self, text: str) -> dict[str, Any] | None:
+        stripped = text.strip()
+        if not stripped:
+            return None
+        candidate_texts = [stripped]
+        if "```" in stripped:
+            candidate_texts.extend(
+                block.strip()
+                for block in stripped.split("```")
+                if block.strip() and not block.strip().startswith(("json", "JSON"))
+            )
+        candidate_texts.append(self._extract_braced_json(stripped))
+
+        for candidate in candidate_texts:
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    def _extract_braced_json(self, text: str) -> str:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return ""
+        return text[start : end + 1]
+
+    def _merge_analysis_result(self, fallback: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
+        merged = {**fallback}
+        handled_keys = {
+            "recognized_product",
+            "image_assessment",
+            "copy_draft",
+            "reference_summary",
+            "missing_views",
+            "suggestions",
+            "suggested_styles",
+            "key_parameters",
+        }
+        for key, value in parsed.items():
+            if key in handled_keys or value is None:
+                continue
+            merged[key] = value
+
+        merged["recognized_product"] = self._normalize_analysis_dict(
+            parsed.get("recognized_product"),
+            fallback.get("recognized_product", {}),
+            text_key="product_name",
+        )
+        merged["image_assessment"] = self._normalize_analysis_dict(
+            parsed.get("image_assessment"),
+            fallback.get("image_assessment", {}),
+            text_key="summary",
+        )
+        merged["copy_draft"] = self._normalize_copy_draft(
+            parsed.get("copy_draft"),
+            fallback.get("copy_draft", {}),
+        )
+        merged["reference_summary"] = self._normalize_reference_summary(
+            parsed.get("reference_summary"),
+            fallback.get("reference_summary", {}),
+        )
+        merged["missing_views"] = self._normalize_string_list(
+            parsed.get("missing_views"),
+            fallback.get("missing_views", []),
+        )
+        merged["suggestions"] = self._normalize_string_list(
+            parsed.get("suggestions"),
+            fallback.get("suggestions", []),
+        )
+        merged["suggested_styles"] = self._normalize_string_list(
+            parsed.get("suggested_styles"),
+            fallback.get("suggested_styles", []),
+        )
+        merged["key_parameters"] = self._normalize_key_parameters(
+            parsed.get("key_parameters"),
+            fallback.get("key_parameters", []),
+        )
+        return merged
+
+    def _normalize_analysis_dict(
+        self,
+        value: Any,
+        fallback: dict[str, Any],
+        *,
+        text_key: str,
+    ) -> dict[str, Any]:
+        parsed = self._decode_json_like(value)
+        if isinstance(parsed, dict):
+            return {**fallback, **parsed}
+        if isinstance(parsed, str) and parsed.strip():
+            return {**fallback, text_key: parsed.strip()}
+        return dict(fallback)
+
+    def _normalize_copy_draft(self, value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+        parsed = self._decode_json_like(value)
+        if isinstance(parsed, dict):
+            return {**fallback, **parsed}
+        if isinstance(parsed, str) and parsed.strip():
+            return {**fallback, "headline": parsed.strip()}
+        return dict(fallback)
+
+    def _normalize_reference_summary(self, value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+        parsed = self._decode_json_like(value)
+        if isinstance(parsed, dict):
+            return {**fallback, **parsed}
+        if isinstance(parsed, str) and parsed.strip():
+            text = parsed.strip()
+            return {
+                **fallback,
+                "shape": fallback.get("shape") or text,
+                "must_keep": text,
+            }
+        return dict(fallback)
+
+    def _normalize_string_list(self, value: Any, fallback: list[Any]) -> list[str]:
+        parsed = self._decode_json_like(value)
+        if isinstance(parsed, list):
+            values = [str(item).strip() for item in parsed if str(item).strip()]
+            return values or [str(item).strip() for item in fallback if str(item).strip()]
+        if isinstance(parsed, str) and parsed.strip():
+            parts = [
+                item.strip()
+                for item in parsed.replace("｜", ",").replace("、", ",").replace("/", ",").split(",")
+                if item.strip()
+            ]
+            return parts or [parsed.strip()]
+        return [str(item).strip() for item in fallback if str(item).strip()]
+
+    def _normalize_key_parameters(self, value: Any, fallback: list[Any]) -> list[dict[str, Any]]:
+        parsed = self._decode_json_like(value)
+        items = parsed if isinstance(parsed, list) else fallback
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(items, start=1):
+            if isinstance(item, dict):
+                normalized.append(item)
+                continue
+            text = str(item).strip()
+            if not text:
+                continue
+            normalized.append(
+                {
+                    "key": f"param_{index}",
+                    "label": text,
+                    "value": text,
+                    "unit": "",
+                    "confidence": None,
+                    "editable": True,
+                }
+            )
+        return normalized
+
+    def _decode_json_like(self, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return value
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = self._parse_json_object(stripped)
+                if parsed is not None:
+                    return parsed
+        return value
+
+    def _fake_analysis(
+        self,
+        active_platform_id: str | None,
+        reference_images: list[LoadedReferenceImage] | None = None,
+    ) -> dict[str, Any]:
         platform_hint = active_platform_id or "temu"
+        slots = [image.slot_type for image in reference_images or []]
+        slot_hint = "、".join(slots) if slots else "front"
         return {
             "recognized_product": {
                 "product_name": "智能产品",
@@ -361,7 +732,7 @@ class WhataiClient:
                 "clarity": "good",
                 "background_cleanliness": "medium",
             },
-            "missing_views": ["side"],
+            "missing_views": ["side"] if "side" not in slots else [],
             "suggestions": [
                 "图片质量良好，适合AI处理",
                 f"建议补充侧面图以提升{platform_hint}平台适配效果",
@@ -383,6 +754,13 @@ class WhataiClient:
                 }
             ],
             "suggested_styles": ["现代简约", "科技感"],
+            "reference_summary": {
+                "shape": f"当前参考图包含 {slot_hint} 视角，建议保持商品整体轮廓、比例和边角特征一致",
+                "colors": "保持参考图中的主色、辅色和明暗关系",
+                "materials": "按照参考图中的真实材质和表面纹理表达，不要臆造材质",
+                "structures": "保留商品的开孔、按钮、接口、边缘结构和装配关系",
+                "must_keep": "商品外观、比例、核心结构和主色不能漂移",
+            },
         }
 
     def _regenerated_text(self, original: str, instruction: str | None) -> str:

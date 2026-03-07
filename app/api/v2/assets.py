@@ -5,22 +5,34 @@ from app.core.deps import get_current_user_id
 from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
-from app.schemas.session import AssetRegenerateRequest
+from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
+from app.schemas.session import AssetRegenerateRequest, GenericGenerationJobData
 from app.services.dispatcher import dispatch_job
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
 from app.services.jobs import create_job
 from app.services.locking import acquire_generation_locks
+from app.services.strategy import normalize_strategy_preview
 from app.services.repo import get_asset_or_404, get_session_or_404
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
 
-@router.post("/{asset_id}/regenerate")
+@router.post(
+    "/{asset_id}/regenerate",
+    response_model=APIResponse[GenericGenerationJobData],
+    summary="单图重生成",
+    description=(
+        "基于指定 asset 触发单图重生成。当前会继承该图对应的 role/display_order，并创建新的 generation job。"
+        "支持 `Idempotency-Key`，也会受 generation 并发保护。"
+    ),
+    operation_id="regenerateAsset",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
 def regenerate_asset(
     asset_id: str,
     req: AssetRegenerateRequest,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
     user_id=Depends(get_current_user_id),
 ) -> dict:
@@ -32,12 +44,27 @@ def regenerate_asset(
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
 
     lock_keys = acquire_generation_locks(session.id, str(user_id))
+    strategy_preview = normalize_strategy_preview(
+        session.strategy_preview,
+        session.confirmed_copy or {},
+        session.active_platform_id or asset.platform_id,
+    )
+    strategy_plan_item = next(
+        (
+            item
+            for item in strategy_preview.get("asset_plan", [])
+            if isinstance(item, dict)
+            and item.get("role") == asset.asset_role
+            and int(item.get("display_order") or 0) == asset.display_order
+        ),
+        None,
+    )
 
     input_payload = {
         "instruction": req.instruction,
         "keep_style_consistency": req.keep_style_consistency,
         "parent_asset_id": asset.id,
-        "asset_plan_item": {"role": asset.asset_role, "display_order": asset.display_order},
+        "asset_plan_item": strategy_plan_item or {"role": asset.asset_role, "display_order": asset.display_order},
         "lock_keys": lock_keys,
     }
 

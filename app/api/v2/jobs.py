@@ -7,12 +7,21 @@ from sse_starlette import EventSourceResponse
 
 from app.core.response import success_response
 from app.db.session import SessionLocal, get_db
+from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
+from app.schemas.jobs import JobStatusData
 from app.services.repo import get_job_or_404, list_job_events_after
 
 router = APIRouter(tags=["jobs"])
 
 
-@router.get("/jobs/{job_id}")
+@router.get(
+    "/jobs/{job_id}",
+    response_model=APIResponse[JobStatusData],
+    summary="查询任务状态",
+    description="按 job_id 查询异步任务状态。适用于 analysis、copy regenerate、generate gallery、global edit、single asset regenerate 等所有任务。",
+    operation_id="getJobStatus",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
 def get_job_status(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = get_job_or_404(db, job_id)
     data = {
@@ -28,7 +37,26 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)) -> dict:
     return success_response(data)
 
 
-@router.get("/jobs/{job_id}/events")
+@router.get(
+    "/jobs/{job_id}/events",
+    summary="订阅任务事件流",
+    description=(
+        "通过 Server-Sent Events 持续获取任务事件。"
+        "事件载荷来自持久化的 job_events 表，典型事件包括 job_started/job_progress/asset_ready/job_succeeded/job_failed。"
+    ),
+    operation_id="streamJobEvents",
+    responses={
+        200: {
+            "description": "SSE 事件流，Content-Type 为 text/event-stream。",
+            "content": {
+                "text/event-stream": {
+                    "example": 'data: {"event":"job_progress","progress":60,"stage":"generating"}\n\n'
+                }
+            },
+        },
+        **OPENAPI_ERROR_RESPONSES,
+    },
+)
 async def stream_job_events(job_id: str) -> EventSourceResponse:
     with SessionLocal() as db:
         get_job_or_404(db, job_id)
