@@ -43,3 +43,19 @@ def test_dispatch_job_runs_inline_when_tasks_eager(monkeypatch):
     dispatcher.dispatch_job("job-inline", queue="q.analysis")
 
     assert called == {"job_id": "job-inline"}
+
+
+def test_dispatch_job_swallows_inline_worker_exception(monkeypatch):
+    monkeypatch.setattr(dispatcher, "get_settings", lambda: SimpleNamespace(tasks_eager=True))
+    monkeypatch.setattr(
+        dispatcher.celery_app,
+        "send_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("send_task should not be used")),
+    )
+
+    def broken_execute(_job_id: str) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dispatcher, "execute_job", broken_execute)
+
+    dispatcher.dispatch_job("job-inline-failed", queue="q.analysis")

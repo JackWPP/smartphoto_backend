@@ -1,5 +1,6 @@
 from sqlalchemy import ForeignKey, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import JSON
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -27,5 +28,6 @@ class AssetModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     prompt_snapshot: Mapped[str | None] = mapped_column(String(4000), nullable=True)
     edit_instruction: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    generation_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     status: Mapped[str] = mapped_column(String(32), default="ready", index=True)

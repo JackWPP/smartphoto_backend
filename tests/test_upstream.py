@@ -1,28 +1,87 @@
 import httpx
+import pytest
+from pathlib import Path
 
+from PIL import Image
+
+from app.core.errors import AppError
+from app.services.reference_images import LoadedReferenceImage, select_reference_images_for_role
+from app.services.strategy import build_strategy_preview
 from app.services.upstream import WhataiClient
+from app.services.white_bg import validate_white_background
 
 
-def test_compose_prompt_like_natural_language():
+def test_compose_prompt_returns_structured_prompt_payload():
     from app.services.prompts import compose_prompt
 
-    prompt = compose_prompt(
+    strategy_preview = build_strategy_preview(
         {
             "product_name": "智能空气净化器",
             "headline": "除甲醛99.9%",
-            "selling_points": "低噪音、母婴可用",
-            "usage_scenes": "卧室、客厅",
+            "selling_points": "低噪音｜母婴可用",
+            "usage_scenes": "卧室｜客厅",
             "specs": "CADR 500m3/h",
             "style_choice": "现代简约",
             "style_custom": "浅色暖光",
         },
-        {},
+        "temu",
+    )
+    prompt = compose_prompt(
+        {
+            "product_name": "智能空气净化器",
+            "headline": "除甲醛99.9%",
+            "selling_points": "低噪音｜母婴可用",
+            "usage_scenes": "卧室｜客厅",
+            "specs": "CADR 500m3/h",
+            "style_choice": "现代简约",
+            "style_custom": "浅色暖光",
+        },
+        strategy_preview,
         "hero",
     )
 
-    assert "|" not in prompt
-    assert "请生成一张用于电商展示的hero图片" in prompt
-    assert "智能空气净化器" in prompt
+    assert prompt["role"] == "hero"
+    assert prompt["role_label"] == "主图"
+    assert prompt["background_mode"] == "clean_studio"
+    assert "智能空气净化器" in prompt["blocks"]["subject"]
+    assert "不要生成海报文字" in prompt["blocks"]["constraints"]
+    assert "目标：" in prompt["final_prompt"]
+    assert "参考画幅比例 1:1" in prompt["final_prompt"]
+
+
+def test_white_bg_prompt_has_strict_background_constraints():
+    from app.services.prompts import compose_prompt
+
+    strategy_preview = build_strategy_preview(
+        {
+            "product_name": "便携榨汁杯",
+            "headline": "鲜榨更方便",
+            "selling_points": "轻便携带｜一键启动",
+            "usage_scenes": "办公室｜露营",
+            "specs": "300ml",
+            "style_choice": "清爽极简",
+            "style_custom": "",
+        },
+        "temu",
+    )
+    prompt = compose_prompt(
+        {
+            "product_name": "便携榨汁杯",
+            "headline": "鲜榨更方便",
+            "selling_points": "轻便携带｜一键启动",
+            "usage_scenes": "办公室｜露营",
+            "specs": "300ml",
+            "style_choice": "清爽极简",
+            "style_custom": "",
+        },
+        strategy_preview,
+        "white_bg",
+    )
+
+    assert prompt["background_mode"] == "pure_white"
+    assert "纯白无缝背景" in prompt["blocks"]["background"]
+    assert "不要出现人物" in prompt["blocks"]["constraints"]
+    assert "不要把白底图做成海报图或场景图" in prompt["blocks"]["constraints"]
 
 
 def test_extract_text_supports_gemini_response():
@@ -231,3 +290,168 @@ def test_get_bytes_with_retry_retries_remote_protocol_error(monkeypatch):
 
     assert result == b"image-bytes"
     assert calls["count"] == 2
+
+
+def test_reference_selector_prefers_role_specific_slots():
+    images = [
+        LoadedReferenceImage("img-front", "front", 1, "/storage/front.jpg", 100, 100, "image/jpeg", 100, "front.jpg", Path("front.jpg"), b"front"),
+        LoadedReferenceImage("img-angle", "angle45", 2, "/storage/angle.jpg", 100, 100, "image/jpeg", 100, "angle.jpg", Path("angle.jpg"), b"angle"),
+        LoadedReferenceImage("img-side", "side", 3, "/storage/side.jpg", 100, 100, "image/jpeg", 100, "side.jpg", Path("side.jpg"), b"side"),
+    ]
+
+    detail_refs = select_reference_images_for_role(images, "detail")
+    hero_refs = select_reference_images_for_role(images, "hero")
+
+    assert [item.image_id for item in detail_refs] == ["img-front", "img-side"]
+    assert [item.image_id for item in hero_refs] == ["img-front", "img-angle"]
+
+
+def test_validate_white_background_rejects_non_white_edges():
+    white = Image.new("RGB", (256, 256), (255, 255, 255))
+    white_bytes = _image_bytes(white)
+    passed, _ = validate_white_background(white_bytes)
+    assert passed is True
+
+    dirty = Image.new("RGB", (256, 256), (255, 255, 255))
+    for x in range(256):
+        dirty.putpixel((x, 0), (220, 220, 220))
+        dirty.putpixel((x, 255), (220, 220, 220))
+    dirty_bytes = _image_bytes(dirty)
+    passed_dirty, diagnostics = validate_white_background(dirty_bytes)
+
+    assert passed_dirty is False
+    assert diagnostics["edge_white_ratio"] < 0.97
+
+
+def test_generate_image_uses_multipart_edits_with_reference_images(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    captured: dict[str, object] = {}
+
+    def fake_request_multipart_json_with_retry(**kwargs):
+        captured.update(kwargs)
+        return {"data": [{"url": "https://example.com/out.jpg"}]}
+
+    monkeypatch.setattr(client, "_request_multipart_json_with_retry", fake_request_multipart_json_with_retry)
+    monkeypatch.setattr(client, "_get_bytes_with_retry", lambda *_args, **_kwargs: b"image-bytes")
+
+    image = LoadedReferenceImage(
+        "img-front",
+        "front",
+        1,
+        "/storage/front.jpg",
+        100,
+        100,
+        "image/jpeg",
+        100,
+        "front.jpg",
+        Path("front.jpg"),
+        b"front-image",
+    )
+    result = client.generate_image("prompt", reference_images=[image])
+
+    assert result == b"image-bytes"
+    assert captured["path"] == "/images/edits"
+    assert captured["data"]["prompt"] == "prompt"
+    assert captured["files"][0][0] == "image"
+    assert captured["files"][0][1][0] == "front.jpg"
+
+
+def test_request_multipart_json_with_retry_marks_transport_errors_retryable(monkeypatch):
+    client = WhataiClient()
+    calls = {"count": 0}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            calls["count"] += 1
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+
+    monkeypatch.setattr("app.services.upstream.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.services.upstream.time.sleep", lambda *_args: None)
+
+    with pytest.raises(AppError) as exc_info:
+        client._request_multipart_json_with_retry(
+            base_url="https://api.whatai.cc/v1",
+            path="/images/edits",
+            data={"model": "nano-banana-2-2k", "prompt": "test", "size": "1024x1024"},
+            files=[],
+            headers={"Authorization": "Bearer test"},
+            error_key="upstream_image_error",
+            attempts=2,
+            retryable_on_exhausted=True,
+        )
+
+    assert calls["count"] == 2
+    assert exc_info.value.retryable is True
+
+
+def test_analyze_images_builds_inline_image_payload(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    captured: dict[str, object] = {}
+
+    def fake_post_chat_json(payload, _error_key):
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+    monkeypatch.setattr(client, "_post_chat_json", fake_post_chat_json)
+
+    image = LoadedReferenceImage(
+        "img-front",
+        "front",
+        1,
+        "/storage/front.jpg",
+        100,
+        100,
+        "image/jpeg",
+        100,
+        "front.jpg",
+        Path("front.jpg"),
+        b"front-image",
+    )
+    client.analyze_images([image], "temu")
+
+    message_content = captured["payload"]["messages"][0]["content"]
+    assert any(part.get("type") == "image_url" for part in message_content)
+    assert any("data:image/jpeg;base64," in part.get("image_url", {}).get("url", "") for part in message_content)
+
+
+def test_merge_analysis_result_normalizes_scalar_sections():
+    client = WhataiClient()
+    fallback = client._fake_analysis("temu")
+
+    merged = client._merge_analysis_result(
+        fallback,
+        {
+            "recognized_product": "便携榨汁杯",
+            "copy_draft": "鲜榨更方便",
+            "reference_summary": "保持杯体颜色和把手结构一致",
+            "missing_views": "side,detail",
+            "suggested_styles": "现代简约,清爽明亮",
+            "key_parameters": ["300ml", "Type-C 充电"],
+        },
+    )
+
+    assert merged["recognized_product"]["product_name"] == "便携榨汁杯"
+    assert merged["copy_draft"]["headline"] == "鲜榨更方便"
+    assert merged["reference_summary"]["must_keep"] == "保持杯体颜色和把手结构一致"
+    assert merged["missing_views"] == ["side", "detail"]
+    assert merged["suggested_styles"] == ["现代简约", "清爽明亮"]
+    assert merged["key_parameters"][0]["label"] == "300ml"
+
+
+def _image_bytes(image: Image.Image) -> bytes:
+    from io import BytesIO
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()

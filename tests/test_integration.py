@@ -4,6 +4,7 @@ from PIL import Image
 
 from app.db.session import SessionLocal
 from app.models.asset import AssetModel
+from app.models.session import SessionModel
 
 
 def make_image_bytes(size=(1200, 1200), color=(240, 240, 240)) -> bytes:
@@ -45,6 +46,34 @@ def create_ready_session(client):
     return sid
 
 
+def test_strategy_preview_contains_prompt_plan_metadata(client):
+    sid = create_ready_session(client)
+
+    session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    strategy_preview = session["strategy_preview"]
+    asset_plan = strategy_preview["asset_plan"]
+    prompt_plan = strategy_preview["prompt_plan"]
+
+    assert [item["role"] for item in asset_plan] == ["hero", "white_bg", "selling_point", "scene", "detail"]
+    assert all("role_label" in item for item in asset_plan)
+    assert all("background_mode" in item for item in asset_plan)
+    assert all("text_policy" in item for item in asset_plan)
+    assert all("composition_hint" in item for item in asset_plan)
+    assert all(item["aspect_ratio"] == "1:1" for item in asset_plan)
+    assert len(strategy_preview["reference_manifest"]) == 1
+    assert [item["role"] for item in prompt_plan] == ["hero", "white_bg", "selling_point", "scene", "detail"]
+    assert all("reference_image_ids" in item for item in prompt_plan)
+    assert all("final_prompt_base" in item for item in prompt_plan)
+    assert prompt_plan[1]["white_bg_mode"] is True
+
+    rebuilt = client.post(
+        f"/api/v2/sessions/{sid}/strategy/preview",
+        json={"planner_instruction": "白底图必须更标准，主图更像参考图"},
+    ).json()["data"]["strategy_preview"]
+    assert rebuilt["planner_instruction"] == "白底图必须更标准，主图更像参考图"
+    assert rebuilt["prompt_plan"][1]["role"] == "white_bg"
+
+
 def test_full_pipeline_and_download(client):
     sid = create_ready_session(client)
 
@@ -60,6 +89,37 @@ def test_full_pipeline_and_download(client):
     dl = client.get(f"/api/v2/sessions/{sid}/download")
     assert dl.status_code == 200
     assert dl.headers["content-type"].startswith("application/zip")
+
+
+def test_prompt_preview_returns_structured_prompts_and_latest_snapshots(client):
+    sid = create_ready_session(client)
+
+    preview = client.post(
+        f"/api/v2/sessions/{sid}/prompts/preview",
+        json={"instruction": "背景更干净，主体更靠中间", "include_latest_assets": True},
+    )
+    assert preview.status_code == 200
+    preview_data = preview.json()["data"]
+    assert [item["role"] for item in preview_data["prompts"]] == ["hero", "white_bg", "selling_point", "scene", "detail"]
+    assert preview_data["prompts"][0]["blocks"]["instruction"] == "背景更干净，主体更靠中间"
+    assert preview_data["prompts"][0]["final_prompt"]
+    assert preview_data["reference_manifest"][0]["slot_type"] == "front"
+    assert preview_data["prompts"][0]["reference_images_used"][0]["slot_type"] == "front"
+    assert preview_data["prompts"][0]["planner_source"] in {"rule_based", "llm"}
+    assert preview_data["latest_assets"] == []
+
+    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "整体更简洁"})
+
+    preview_after_gen = client.post(
+        f"/api/v2/sessions/{sid}/prompts/preview",
+        json={"instruction": "整体更简洁", "include_latest_assets": True},
+    )
+    latest_assets = preview_after_gen.json()["data"]["latest_assets"]
+    assert latest_assets
+    assert all(item["prompt_snapshot"] for item in latest_assets)
+    assert all(item["generation_snapshot"] for item in latest_assets)
+    assert all(item["reference_image_ids"] for item in latest_assets)
+    assert {item["role"] for item in latest_assets} == {"hero", "white_bg", "selling_point", "scene", "detail"}
 
 
 def test_copy_regenerate_not_overwrite_confirmed_copy(client):
@@ -174,6 +234,72 @@ def test_state_guard_and_file_validation(client):
     )
     assert bad.status_code == 400
     assert bad.json()["code"] == 40006
+
+
+def test_prompt_preview_state_guards(client):
+    sid = client.post("/api/v2/sessions").json()["data"]["session_id"]
+
+    missing_copy = client.post(
+        f"/api/v2/sessions/{sid}/prompts/preview",
+        json={"instruction": None, "include_latest_assets": True},
+    )
+    assert missing_copy.status_code == 400
+    assert missing_copy.json()["code"] == 40002
+
+    copy_payload = {
+        "product_name": "测试产品",
+        "category": "测试类目",
+        "headline": "测试标题",
+        "selling_points": "卖点A",
+        "usage_scenes": "客厅",
+        "specs": "参数A",
+        "style_choice": "现代简约",
+        "style_custom": "",
+        "key_parameters": [],
+    }
+    client.put(f"/api/v2/sessions/{sid}/copy", json=copy_payload)
+
+
+def test_copy_form_normalizes_legacy_list_fields(client):
+    sid = client.post("/api/v2/sessions").json()["data"]["session_id"]
+
+    with SessionLocal() as db:
+        session = db.query(SessionModel).filter(SessionModel.id == sid).one()
+        session.confirmed_copy = {
+            "product_name": "空气净化器",
+            "category": "家电",
+            "headline": "高效体验",
+            "selling_points": ["卖点A", "卖点B"],
+            "usage_scenes": ["客厅", "卧室"],
+            "specs": ["参数A", "参数B"],
+            "style_choice": "现代简约",
+            "style_custom": None,
+            "key_parameters": ["300ml"],
+        }
+        db.commit()
+
+    copy_response = client.get(f"/api/v2/sessions/{sid}/copy")
+    assert copy_response.status_code == 200
+    copy_data = copy_response.json()["data"]
+    assert copy_data["selling_points"] == "卖点A\n卖点B"
+    assert copy_data["usage_scenes"] == "客厅\n卧室"
+    assert copy_data["specs"] == "参数A\n参数B"
+    assert copy_data["key_parameters"][0]["label"] == "300ml"
+
+    save_response = client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
+    assert save_response.status_code == 200
+
+    with SessionLocal() as db:
+        session = db.query(SessionModel).filter(SessionModel.id == sid).one()
+        assert session.confirmed_copy["selling_points"] == "卖点A\n卖点B"
+        assert session.confirmed_copy["usage_scenes"] == "客厅\n卧室"
+
+    missing_platform = client.post(
+        f"/api/v2/sessions/{sid}/prompts/preview",
+        json={"instruction": None, "include_latest_assets": True},
+    )
+    assert missing_platform.status_code == 400
+    assert missing_platform.json()["code"] == 40003
 
 
 def test_sse_events_and_failure_recovery(client, monkeypatch):

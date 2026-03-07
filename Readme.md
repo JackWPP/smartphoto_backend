@@ -19,6 +19,7 @@ SmartPhoto Backend v2 是一个围绕前端 6 步流程设计的后端系统，�
 
 ## 文档索引
 - [API 联调指南](docs/API_联调指南.md)
+- [OpenAPI 导出（Apifox 可导入）](docs/openapi/smartphoto_backend_openapi.json)
 - [生图 Agent 协作逻辑](docs/生图Agent协作逻辑.md)
 - [运行与排障手册](docs/运行与排障手册.md)
 - [开发约束与维护规则](AGENTS.md)
@@ -56,21 +57,38 @@ alembic upgrade head
 ./scripts/dev-worker.sh
 ```
 
+说明：`dev-api.sh` 和 `dev-worker.sh` 启动前会自动执行一次 `alembic upgrade head`，避免代码升级后因漏跑迁移导致运行时缺列。
+
 ## 真实运行前检查清单
 - Postgres 和 Redis 已启动（`docker compose ps`）
 - `.env` 中 `DATABASE_URL`、`REDIS_URL`、`STORAGE_ROOT` 正确
-- `alembic upgrade head` 已执行
+- `alembic upgrade head` 已执行（或通过启动脚本自动补齐）
 - API 进程与 Worker 进程都在运行
 - 若需真实上游：`WHATAI_API_KEY` 已配置且可用
 
 ## 联调入口
 - API 前缀：`/api/v2`
 - 健康检查：`GET /healthz`
+- OpenAPI：`GET /openapi.json`
 - 核心流程入口：
   - `POST /sessions`
   - `POST /sessions/{id}/analysis`
   - `POST /sessions/{id}/generations`
   - `GET /jobs/{job_id}` + `GET /jobs/{job_id}/events`
+
+## OpenAPI / Apifox
+导出命令：
+```bash
+./.venv/bin/python scripts/export_openapi.py
+```
+
+导出产物：
+- `docs/openapi/smartphoto_backend_openapi.json`
+
+导入 Apifox：
+1. 在 Apifox 选择导入 OpenAPI/Swagger
+2. 选择 `docs/openapi/smartphoto_backend_openapi.json`
+3. 导入后将环境 Base URL 配置为你的 API 地址，例如 `http://127.0.0.1:8000`
 
 ## 已知限制（当前实现）
 - `/auth/register|login|me` 尚未实现（P1）
