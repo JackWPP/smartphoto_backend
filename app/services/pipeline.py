@@ -1,19 +1,31 @@
 from __future__ import annotations
 
+import io
 import logging
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from PIL import Image
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.models.asset import AssetModel
+from app.models.detail_style_image import DetailStyleImageModel
 from app.models.job import JobModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
 from app.services.copy_normalization import normalize_copy_payload
+from app.services.detail_pages import (
+    DETAIL_PAGE_ASPECT_RATIO,
+    DETAIL_PAGE_IMAGE_SIZE,
+    build_detail_prompt_previews,
+    build_detail_reference_grids,
+    build_detail_strategy_preview,
+    compose_detail_panel_prompt,
+    normalize_detail_strategy_preview,
+)
 from app.services.jobs import append_job_event, update_job_status
 from app.services.locking import release_locks
 from app.services.prompts import compose_prompt
@@ -49,6 +61,15 @@ def _session_images(db: Session, session_id: str) -> list[SessionImageModel]:
         db.query(SessionImageModel)
         .filter(and_(SessionImageModel.session_id == session_id, SessionImageModel.is_deleted.is_(False)))
         .order_by(SessionImageModel.display_order.asc())
+        .all()
+    )
+
+
+def _detail_style_images(db: Session, session_id: str) -> list[DetailStyleImageModel]:
+    return (
+        db.query(DetailStyleImageModel)
+        .filter(and_(DetailStyleImageModel.session_id == session_id, DetailStyleImageModel.is_deleted.is_(False)))
+        .order_by(DetailStyleImageModel.display_order.asc())
         .all()
     )
 
@@ -184,12 +205,15 @@ def _mark_superseded_assets(
     db: Session,
     session_id: str,
     version_no: int,
+    *,
+    asset_family: str = "main_gallery",
     include_all: bool = True,
     asset_ids: Iterable[str] | None = None,
 ) -> None:
     query = db.query(AssetModel).filter(
         AssetModel.session_id == session_id,
         AssetModel.version_no == version_no,
+        AssetModel.asset_family == asset_family,
         AssetModel.status == "ready",
     )
     if not include_all and asset_ids:
@@ -235,12 +259,19 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         plan = _prepare_assets_plan(job, effective_strategy_preview, session)
 
         if job.job_type in {"global_edit", "regenerate_gallery"}:
-            _mark_superseded_assets(db, session.id, last_version)
+            _mark_superseded_assets(db, session.id, last_version, asset_family="main_gallery")
 
         if job.job_type == "regenerate_asset":
             parent_asset_id = payload.get("parent_asset_id")
             if parent_asset_id:
-                _mark_superseded_assets(db, session.id, last_version, include_all=False, asset_ids=[parent_asset_id])
+                _mark_superseded_assets(
+                    db,
+                    session.id,
+                    last_version,
+                    asset_family="main_gallery",
+                    include_all=False,
+                    asset_ids=[parent_asset_id],
+                )
 
         rendered_assets = _render_assets_concurrently(
             confirmed_copy=session.confirmed_copy or {},
@@ -271,6 +302,8 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                 version_no=version_no,
                 parent_asset_id=payload.get("parent_asset_id"),
                 platform_id=session.active_platform_id,
+                asset_family="main_gallery",
+                asset_kind="panel",
                 asset_role=rendered["role"],
                 display_order=rendered["display_order"],
                 image_url=image_url,
@@ -459,6 +492,177 @@ def _render_single_asset(
     }
 
 
+def run_generate_detail_page_job(db: Session, job_id: str) -> None:
+    storage = LocalStorageAdapter()
+    job = _require_job(db, job_id)
+    session = _require_session(db, job.session_id)
+    payload = job.input_payload or {}
+    lock_keys = payload.get("lock_keys") or []
+
+    try:
+        update_job_status(db, job, status="running", progress=3, stage="preparing")
+        append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
+
+        if not session.confirmed_copy:
+            raise AppError("invalid_session_status", "confirmed_copy missing", 400)
+        if not session.active_platform_id:
+            raise AppError("invalid_platform", "active_platform_id missing", 400)
+
+        session_images = _session_images(db, session.id)
+        if not session_images:
+            raise AppError("missing_required_images", http_status=400)
+        style_images = _detail_style_images(db, session.id)
+
+        effective_strategy_preview = _ensure_detail_strategy_preview(session, session_images, style_images)
+        loaded_product_images = load_reference_images(session_images, storage=storage)
+        loaded_style_images = load_reference_images(style_images, storage=storage) if style_images else []
+        product_grid, style_grid = build_detail_reference_grids(loaded_product_images, loaded_style_images)
+        reference_grids = [product_grid, *([style_grid] if style_grid is not None else [])]
+
+        last_version = session.detail_latest_result_version
+        if last_version > 0:
+            _mark_superseded_assets(db, session.id, last_version, asset_family="detail_page")
+
+        version_no = last_version + 1
+        round_no = session.detail_generation_round + 1
+        rendered_panels = _render_detail_panels_concurrently(
+            confirmed_copy=session.confirmed_copy or {},
+            strategy_preview=effective_strategy_preview,
+            plan=effective_strategy_preview.get("panel_plan") or [],
+            instruction=payload.get("instruction"),
+            reference_grids=reference_grids,
+        )
+
+        total_assets = max(len(rendered_panels) + 1, 1)
+        created_assets: list[AssetModel] = []
+
+        for idx, rendered in enumerate(sorted(rendered_panels, key=lambda item: item["display_order"]), start=1):
+            image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
+                session_id=session.id,
+                round_no=round_no,
+                version_no=version_no,
+                role=rendered["panel_id"],
+                display_order=rendered["display_order"],
+                image_bytes=rendered["image_bytes"],
+                ext=".jpg",
+            )
+            asset = AssetModel(
+                session_id=session.id,
+                job_id=job.id,
+                round_no=round_no,
+                version_no=version_no,
+                parent_asset_id=None,
+                platform_id=session.active_platform_id,
+                asset_family="detail_page",
+                asset_kind="panel",
+                asset_role=rendered["panel_id"],
+                display_order=rendered["display_order"],
+                image_url=image_url,
+                thumbnail_url=thumb_url,
+                width=width,
+                height=height,
+                mime_type=mime_type,
+                file_size=file_size,
+                prompt_snapshot=rendered["prompt_payload"]["final_prompt"],
+                edit_instruction=payload.get("instruction"),
+                generation_snapshot=rendered["generation_snapshot"],
+                status="ready",
+            )
+            db.add(asset)
+            db.flush()
+            created_assets.append(asset)
+            update_job_status(db, job, status="running", progress=int((idx / total_assets) * 85), stage="generating")
+            append_job_event(
+                db,
+                job.id,
+                "asset_ready",
+                {
+                    "event": "asset_ready",
+                    "asset_id": asset.id,
+                    "asset_kind": "panel",
+                    "panel_id": rendered["panel_id"],
+                    "display_order": rendered["display_order"],
+                },
+            )
+
+        update_job_status(db, job, status="running", progress=90, stage="stitching")
+        append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 90, "stage": "stitching"})
+
+        stitched_bytes = _stitch_detail_panels([item["image_bytes"] for item in sorted(rendered_panels, key=lambda item: item["display_order"])])
+        image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
+            session_id=session.id,
+            round_no=round_no,
+            version_no=version_no,
+            role="detail_page_long",
+            display_order=len(rendered_panels) + 1,
+            image_bytes=stitched_bytes,
+            ext=".jpg",
+        )
+        stitched_asset = AssetModel(
+            session_id=session.id,
+            job_id=job.id,
+            round_no=round_no,
+            version_no=version_no,
+            parent_asset_id=None,
+            platform_id=session.active_platform_id,
+            asset_family="detail_page",
+            asset_kind="stitched",
+            asset_role="detail_page_long",
+            display_order=len(rendered_panels) + 1,
+            image_url=image_url,
+            thumbnail_url=thumb_url,
+            width=width,
+            height=height,
+            mime_type=mime_type,
+            file_size=file_size,
+            prompt_snapshot=None,
+            edit_instruction=payload.get("instruction"),
+            generation_snapshot={
+                "asset_family": "detail_page",
+                "asset_kind": "stitched",
+                "source_panel_asset_ids": [asset.id for asset in created_assets],
+                "panel_count": len(created_assets),
+                "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+            },
+            status="ready",
+        )
+        db.add(stitched_asset)
+        db.flush()
+        created_assets.append(stitched_asset)
+        append_job_event(
+            db,
+            job.id,
+            "asset_ready",
+            {
+                "event": "asset_ready",
+                "asset_id": stitched_asset.id,
+                "asset_kind": "stitched",
+                "display_order": stitched_asset.display_order,
+            },
+        )
+
+        session.detail_generation_round = round_no
+        session.detail_latest_result_version = version_no
+        session.latest_detail_generate_job_id = job.id
+
+        update_job_status(
+            db,
+            job,
+            status="succeeded",
+            progress=100,
+            stage="done",
+            result_payload={
+                "asset_ids": [asset.id for asset in created_assets if asset.asset_kind == "panel"],
+                "stitched_asset_id": stitched_asset.id,
+                "detail_generation_round": round_no,
+                "version_no": version_no,
+            },
+        )
+        append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+    finally:
+        release_locks(lock_keys)
+
+
 def _generate_image_with_asset_retry(
     *,
     client: WhataiClient,
@@ -501,6 +705,7 @@ def _resolve_image_size(aspect_ratio: str) -> str:
         "4:5": "1024x1280",
         "3:4": "1024x1365",
         "16:9": "1280x720",
+        "21:9": DETAIL_PAGE_IMAGE_SIZE,
     }.get(aspect_ratio, "1024x1024")
 
 
@@ -508,3 +713,113 @@ def _merge_instructions(instruction: str | None, appended: str) -> str:
     if not instruction:
         return appended
     return f"{instruction}；{appended}"
+
+
+def _ensure_detail_strategy_preview(
+    session: SessionModel,
+    session_images: list[SessionImageModel],
+    style_images: list[DetailStyleImageModel],
+) -> dict:
+    effective_strategy_preview = normalize_detail_strategy_preview(
+        session.detail_strategy_preview,
+        session.confirmed_copy or {},
+        product_images=session_images,
+        style_images=style_images,
+        analysis_snapshot=session.analysis_snapshot or {},
+    )
+    session.detail_strategy_preview = effective_strategy_preview
+    return effective_strategy_preview
+
+
+def _render_detail_panels_concurrently(
+    *,
+    confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, object],
+    plan: list[dict[str, object]],
+    instruction: str | None,
+    reference_grids: list,
+) -> list[dict[str, object]]:
+    rendered: list[dict[str, object]] = []
+    with ThreadPoolExecutor(max_workers=min(MAX_GENERATION_CONCURRENCY, max(len(plan), 1))) as executor:
+        future_map = {
+            executor.submit(
+                _render_single_detail_panel,
+                confirmed_copy=confirmed_copy,
+                strategy_preview=strategy_preview,
+                plan_item=plan_item,
+                instruction=instruction,
+                reference_grids=reference_grids,
+            ): plan_item
+            for plan_item in plan
+        }
+        for future in as_completed(future_map):
+            rendered.append(future.result())
+    return rendered
+
+
+def _render_single_detail_panel(
+    *,
+    confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, object],
+    plan_item: dict[str, object],
+    instruction: str | None,
+    reference_grids: list,
+) -> dict[str, object]:
+    panel_id = str(plan_item["panel_id"])
+    display_order = int(plan_item["display_order"])
+    planner_instruction = str(strategy_preview.get("planner_instruction") or "") or None
+    prompt_payload = compose_detail_panel_prompt(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        panel_id=panel_id,
+        instruction=instruction,
+        panel_plan_item=plan_item,
+    )
+    client = WhataiClient()
+    image_bytes = _generate_image_with_asset_retry(
+        client=client,
+        prompt=prompt_payload["final_prompt"],
+        image_size=DETAIL_PAGE_IMAGE_SIZE,
+        reference_images=reference_grids,
+        role=panel_id,
+        display_order=display_order,
+    )
+    generation_snapshot = {
+        "asset_family": "detail_page",
+        "asset_kind": "panel",
+        "use_case": strategy_preview.get("use_case"),
+        "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+        "image_size": DETAIL_PAGE_IMAGE_SIZE,
+        "panel_label": plan_item.get("panel_label"),
+        "final_prompt": prompt_payload["final_prompt"],
+        "prompt_blocks": prompt_payload["blocks"],
+        "product_reference_image_ids": [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)],
+        "style_reference_image_ids": [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)],
+        "reference_grid_ids": [grid.image_id for grid in reference_grids],
+        "upstream_endpoint": "/v1/images/edits",
+        "planner_instruction": planner_instruction,
+        "planner_source": prompt_payload.get("planner_source"),
+    }
+    return {
+        "panel_id": panel_id,
+        "display_order": display_order,
+        "image_bytes": image_bytes,
+        "prompt_payload": prompt_payload,
+        "generation_snapshot": generation_snapshot,
+    }
+
+
+def _stitch_detail_panels(panel_images: list[bytes]) -> bytes:
+    frames = [Image.open(io.BytesIO(item)).convert("RGB") for item in panel_images]
+    if not frames:
+        raise AppError("missing_required_images", "detail panels missing", 400)
+    width = max(frame.width for frame in frames)
+    height = sum(frame.height for frame in frames)
+    canvas = Image.new("RGB", (width, height), color=(255, 255, 255))
+    offset = 0
+    for frame in frames:
+        canvas.paste(frame, (0, offset))
+        offset += frame.height
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="JPEG", quality=92)
+    return buffer.getvalue()

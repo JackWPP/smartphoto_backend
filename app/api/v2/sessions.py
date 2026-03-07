@@ -9,10 +9,11 @@ from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
 from app.models.asset import AssetModel
+from app.models.detail_style_image import DetailStyleImageModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
-from app.schemas.results import ResultsData
+from app.schemas.results import DetailResultsData, ResultsData
 from app.schemas.session import (
     AnalysisData,
     AnalysisTriggerData,
@@ -23,6 +24,12 @@ from app.schemas.session import (
     CopySaveData,
     CreateSessionData,
     DeleteSessionImageData,
+    DeleteDetailStyleImageData,
+    DetailGenerationJobData,
+    DetailPromptPreviewData,
+    DetailStrategyPreviewData,
+    DetailStrategyPreviewRequest,
+    DetailStyleImagesData,
     GenerateGalleryRequest,
     GenerationJobData,
     GenericGenerationJobData,
@@ -37,9 +44,19 @@ from app.schemas.session import (
     SessionSnapshotData,
     StrategyPreviewRequest,
     StrategyPreviewData,
+    UploadDetailStyleImageData,
     UploadSessionImageData,
 )
 from app.services.copy_normalization import normalize_copy_payload
+from app.services.detail_pages import (
+    DETAIL_PAGE_ASPECT_RATIO,
+    DETAIL_PAGE_IMAGE_SIZE,
+    DETAIL_PAGE_PANEL_COUNT,
+    DETAIL_PAGE_USE_CASE,
+    build_detail_prompt_previews,
+    build_detail_strategy_preview,
+    normalize_detail_strategy_preview,
+)
 from app.services.dispatcher import dispatch_job
 from app.services.download import build_zip_for_assets
 from app.services.guards import ensure_no_running_generation_jobs
@@ -51,6 +68,7 @@ from app.services.prompts import build_prompt_previews
 from app.services.repo import (
     get_job_or_404,
     get_session_or_404,
+    list_active_detail_style_images,
     list_active_session_images,
 )
 from app.services.state_machine import ensure_session_transition
@@ -63,6 +81,7 @@ ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 ALLOWED_SLOT = {"front", "angle45", "side", "extra"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_SESSION_IMAGES = 6
+MAX_DETAIL_STYLE_IMAGES = 4
 
 
 def _effective_strategy_preview(session: SessionModel) -> dict:
@@ -71,6 +90,47 @@ def _effective_strategy_preview(session: SessionModel) -> dict:
     if not session.active_platform_id:
         raise AppError("invalid_platform", "active platform required", 400)
     return normalize_strategy_preview(session.strategy_preview, session.confirmed_copy, session.active_platform_id)
+
+
+def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> dict:
+    if not session.confirmed_copy:
+        raise AppError("invalid_session_status", "copy not ready", 400)
+    if not session.active_platform_id:
+        raise AppError("invalid_platform", "active platform required", 400)
+
+    return normalize_detail_strategy_preview(
+        session.detail_strategy_preview,
+        session.confirmed_copy,
+        product_images=list_active_session_images(db, session.id),
+        style_images=list_active_detail_style_images(db, session.id),
+        analysis_snapshot=session.analysis_snapshot or {},
+    )
+
+
+def _main_gallery_assets_query(db: Session, session_id: str, version_no: int):
+    return (
+        db.query(AssetModel)
+        .filter(
+            AssetModel.session_id == session_id,
+            AssetModel.version_no == version_no,
+            AssetModel.asset_family == "main_gallery",
+            AssetModel.status == "ready",
+        )
+        .order_by(AssetModel.display_order.asc())
+    )
+
+
+def _detail_page_assets_query(db: Session, session_id: str, version_no: int):
+    return (
+        db.query(AssetModel)
+        .filter(
+            AssetModel.session_id == session_id,
+            AssetModel.version_no == version_no,
+            AssetModel.asset_family == "detail_page",
+            AssetModel.status == "ready",
+        )
+        .order_by(AssetModel.display_order.asc())
+    )
 
 
 @router.post(
@@ -90,6 +150,8 @@ def create_session(db: Session = Depends(get_db), user_id=Depends(get_current_us
         active_platform_id=None,
         generation_round=0,
         latest_result_version=0,
+        detail_generation_round=0,
+        detail_latest_result_version=0,
     )
     db.add(model)
     db.commit()
@@ -116,9 +178,13 @@ def get_session_snapshot(session_id: str, db: Session = Depends(get_db), user_id
         "analysis_snapshot": session.analysis_snapshot,
         "confirmed_copy": session.confirmed_copy,
         "strategy_preview": session.strategy_preview,
+        "detail_strategy_preview": session.detail_strategy_preview,
         "latest_generate_job_id": session.latest_generate_job_id,
+        "latest_detail_generate_job_id": session.latest_detail_generate_job_id,
         "generation_round": session.generation_round,
         "latest_result_version": session.latest_result_version,
+        "detail_generation_round": session.detail_generation_round,
+        "detail_latest_result_version": session.detail_latest_result_version,
     }
     return success_response(data)
 
@@ -258,6 +324,128 @@ def list_session_images(
             for img in images
         ]
     })
+
+
+@router.post(
+    "/{session_id}/detail-pages/style-images",
+    response_model=APIResponse[UploadDetailStyleImageData],
+    summary="上传详情页风格图",
+    description="向指定 session 上传详情页风格/字体参考图。支持 jpeg/png/webp，最多 4 张。",
+    operation_id="uploadDetailStyleImage",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+async def upload_detail_style_image(
+    session_id: str,
+    file: UploadFile = File(..., description="要上传的风格参考图文件。"),
+    display_order: int = Form(..., description="显示顺序。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    current_images = list_active_detail_style_images(db, session_id)
+    if len(current_images) >= MAX_DETAIL_STYLE_IMAGES:
+        raise AppError("too_many_images", http_status=400)
+
+    content = await file.read()
+    if len(content) > MAX_IMAGE_BYTES:
+        raise AppError("file_too_large", http_status=400)
+    if file.content_type not in ALLOWED_MIME:
+        raise AppError("unsupported_file_type", http_status=400)
+
+    storage = LocalStorageAdapter()
+    source_url, width, height, mime_type, file_size = storage.save_upload(
+        session_id=session_id,
+        original_name=file.filename or "style.jpg",
+        content=content,
+    )
+    model = DetailStyleImageModel(
+        session_id=session.id,
+        display_order=display_order,
+        source_url=source_url,
+        width=width,
+        height=height,
+        mime_type=mime_type,
+        file_size=file_size,
+        is_deleted=False,
+    )
+    db.add(model)
+    db.commit()
+
+    images = list_active_detail_style_images(db, session_id)
+    return success_response(
+        {
+            "image_id": model.id,
+            "session_id": session.id,
+            "uploaded_images": [
+                {
+                    "image_id": item.id,
+                    "display_order": item.display_order,
+                    "url": item.source_url,
+                }
+                for item in images
+            ],
+        }
+    )
+
+
+@router.get(
+    "/{session_id}/detail-pages/style-images",
+    response_model=APIResponse[DetailStyleImagesData],
+    summary="列出详情页风格图",
+    description="返回当前 session 下的所有有效详情页风格图。",
+    operation_id="listDetailStyleImages",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def list_detail_style_images(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    get_session_or_404(db, session_id, str(user_id))
+    images = list_active_detail_style_images(db, session_id)
+    return success_response(
+        {
+            "images": [
+                {
+                    "image_id": img.id,
+                    "display_order": img.display_order,
+                    "url": img.source_url,
+                    "width": img.width,
+                    "height": img.height,
+                    "mime_type": img.mime_type,
+                    "file_size": img.file_size,
+                }
+                for img in images
+            ]
+        }
+    )
+
+
+@router.delete(
+    "/{session_id}/detail-pages/style-images/{image_id}",
+    response_model=APIResponse[DeleteDetailStyleImageData],
+    summary="删除详情页风格图",
+    description="逻辑删除指定 session 下的一张详情页风格图。",
+    operation_id="deleteDetailStyleImage",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def delete_detail_style_image(
+    session_id: str,
+    image_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    get_session_or_404(db, session_id, str(user_id))
+    image = (
+        db.query(DetailStyleImageModel)
+        .filter(DetailStyleImageModel.id == image_id, DetailStyleImageModel.session_id == session_id)
+        .one_or_none()
+    )
+    if not image:
+        raise AppError("invalid_request", "style image not found", 404)
+    image.is_deleted = True
+    db.commit()
+    return success_response({"image_id": image_id, "deleted": True})
 
 
 @router.post(
@@ -540,6 +728,44 @@ def build_strategy(
 
 
 @router.post(
+    "/{session_id}/detail-pages/strategy/preview",
+    response_model=APIResponse[DetailStrategyPreviewData],
+    summary="生成详情页策略预览",
+    description="同步构建详情页策略预览。固定输出 8 个 Amazon detail page panel 规划，并持久化到 session.detail_strategy_preview。",
+    operation_id="buildDetailPageStrategyPreview",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def build_detail_strategy(
+    session_id: str,
+    req: DetailStrategyPreviewRequest | None = None,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    if not session.confirmed_copy:
+        raise AppError("invalid_session_status", "copy not ready", 400)
+    if not session.active_platform_id:
+        raise AppError("invalid_platform", "active platform required", 400)
+
+    payload = req.model_dump() if req is not None else {"planner_instruction": None}
+    product_images = list_active_session_images(db, session.id)
+    if not product_images:
+        raise AppError("missing_required_images", http_status=400)
+    style_images = list_active_detail_style_images(db, session.id)
+
+    preview = build_detail_strategy_preview(
+        session.confirmed_copy,
+        product_images=product_images,
+        style_images=style_images,
+        analysis_snapshot=session.analysis_snapshot or {},
+        planner_instruction=payload.get("planner_instruction"),
+    )
+    session.detail_strategy_preview = preview
+    db.commit()
+    return success_response({"session_id": session.id, "detail_strategy_preview": preview})
+
+
+@router.post(
     "/{session_id}/prompts/preview",
     response_model=APIResponse[PromptPreviewData],
     summary="预览 Prompt",
@@ -571,16 +797,7 @@ def preview_prompts(
 
     latest_assets: list[dict] = []
     if req.include_latest_assets and session.latest_result_version > 0:
-        assets = (
-            db.query(AssetModel)
-            .filter(
-                AssetModel.session_id == session.id,
-                AssetModel.version_no == session.latest_result_version,
-                AssetModel.status == "ready",
-            )
-            .order_by(AssetModel.display_order.asc())
-            .all()
-        )
+        assets = _main_gallery_assets_query(db, session.id, session.latest_result_version).all()
         latest_assets = [
             {
                 "asset_id": asset.id,
@@ -605,6 +822,63 @@ def preview_prompts(
             "model": settings.whatai_image_model,
             "image_size": "1024x1024",
             "reference_manifest": strategy_preview.get("reference_manifest", []),
+            "prompts": prompts,
+            "latest_assets": latest_assets,
+        }
+    )
+
+
+@router.post(
+    "/{session_id}/detail-pages/prompts/preview",
+    response_model=APIResponse[DetailPromptPreviewData],
+    summary="预览详情页 Prompt",
+    description="按当前 session 的 detail_strategy_preview 生成 8 个详情页 panel 的 prompt 预览，可选带出最近一版真实执行快照。",
+    operation_id="previewDetailPagePrompts",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def preview_detail_prompts(
+    session_id: str,
+    req: PromptPreviewRequest,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    detail_strategy_preview = _effective_detail_strategy_preview(session, db)
+    prompts = build_detail_prompt_previews(
+        confirmed_copy=session.confirmed_copy or {},
+        strategy_preview=detail_strategy_preview,
+        instruction=req.instruction,
+    )
+
+    latest_assets: list[dict] = []
+    if req.include_latest_assets and session.detail_latest_result_version > 0:
+        assets = _detail_page_assets_query(db, session.id, session.detail_latest_result_version).all()
+        latest_assets = [
+            {
+                "asset_id": asset.id,
+                "asset_kind": asset.asset_kind,
+                "version_no": asset.version_no,
+                "panel_id": asset.asset_role,
+                "display_order": asset.display_order,
+                "prompt_snapshot": asset.prompt_snapshot,
+                "edit_instruction": asset.edit_instruction,
+                "generation_snapshot": asset.generation_snapshot,
+            }
+            for asset in assets
+        ]
+
+    settings = get_settings()
+    return success_response(
+        {
+            "session_id": session.id,
+            "active_platform_id": session.active_platform_id,
+            "use_case": detail_strategy_preview.get("use_case", DETAIL_PAGE_USE_CASE),
+            "aspect_ratio": detail_strategy_preview.get("aspect_ratio", DETAIL_PAGE_ASPECT_RATIO),
+            "panel_count": detail_strategy_preview.get("panel_count", DETAIL_PAGE_PANEL_COUNT),
+            "model": settings.whatai_image_model,
+            "image_size": DETAIL_PAGE_IMAGE_SIZE,
+            "product_reference_manifest": detail_strategy_preview.get("product_reference_manifest", []),
+            "style_reference_manifest": detail_strategy_preview.get("style_reference_manifest", []),
             "prompts": prompts,
             "latest_assets": latest_assets,
         }
@@ -671,6 +945,70 @@ def generate_gallery(
     return success_response(response_data)
 
 
+@router.post(
+    "/{session_id}/detail-pages/generations",
+    response_model=APIResponse[DetailGenerationJobData],
+    summary="触发详情页生成",
+    description="为当前 session 创建 generate_detail_page 任务。固定生成 8 张 21:9 panel 图和 1 张竖向拼接长图。支持 `Idempotency-Key`。",
+    operation_id="generateDetailPage",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def generate_detail_page(
+    session_id: str,
+    req: GenerateGalleryRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    if not session.confirmed_copy:
+        raise AppError("invalid_session_status", "copy not ready", 400)
+    if not session.active_platform_id:
+        raise AppError("invalid_platform", "active platform required", 400)
+    if not list_active_session_images(db, session.id):
+        raise AppError("missing_required_images", http_status=400)
+
+    payload = req.model_dump()
+
+    idem_record = None
+    if idempotency_key:
+        hit, cached, idem_record = check_or_create_idempotency(
+            db,
+            str(user_id),
+            f"POST /sessions/{session_id}/detail-pages/generations",
+            idempotency_key,
+            payload,
+        )
+        if hit:
+            return success_response(cached)
+
+    ensure_no_running_generation_jobs(db, session.id, str(user_id))
+    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+
+    job = create_job(
+        db,
+        session_id=session.id,
+        user_id=str(user_id),
+        job_type="generate_detail_page",
+        input_payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    session.latest_detail_generate_job_id = job.id
+    response_data = {
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "status": job.status,
+        "session_id": session.id,
+        "detail_generation_round": session.detail_generation_round + 1,
+    }
+    if idem_record is not None:
+        idem_record.response_payload = response_data
+
+    db.commit()
+    dispatch_job(job.id, queue="q.generation")
+    return success_response(response_data)
+
+
 @router.get(
     "/{session_id}/results",
     response_model=APIResponse[ResultsData],
@@ -687,16 +1025,7 @@ def get_results(
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
     target_version = version or session.latest_result_version
-    assets = (
-        db.query(AssetModel)
-        .filter(
-            AssetModel.session_id == session.id,
-            AssetModel.version_no == target_version,
-            AssetModel.status == "ready",
-        )
-        .order_by(AssetModel.display_order.asc())
-        .all()
-    )
+    assets = _main_gallery_assets_query(db, session.id, target_version).all()
     return success_response(
         {
             "session_id": session.id,
@@ -718,6 +1047,77 @@ def get_results(
                 }
                 for asset in assets
             ],
+        }
+    )
+
+
+@router.get(
+    "/{session_id}/detail-pages/results",
+    response_model=APIResponse[DetailResultsData],
+    summary="获取详情页结果",
+    description="按 session 返回某一详情页版本的 ready 资产列表。不传 version 时默认返回 `detail_latest_result_version`。",
+    operation_id="getDetailPageResults",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def get_detail_page_results(
+    session_id: str,
+    version: int | None = Query(default=None, description="可选详情页结果版本号。为空时返回最近一版。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    target_version = version or session.detail_latest_result_version
+    assets = _detail_page_assets_query(db, session.id, target_version).all()
+    panel_plan_by_id = {
+        item["panel_id"]: item
+        for item in (session.detail_strategy_preview or {}).get("panel_plan", [])
+        if isinstance(item, dict) and item.get("panel_id")
+    }
+    panels = [asset for asset in assets if asset.asset_kind == "panel"]
+    stitched_asset = next((asset for asset in assets if asset.asset_kind == "stitched"), None)
+
+    return success_response(
+        {
+            "session_id": session.id,
+            "status": session.status,
+            "detail_generation_round": session.detail_generation_round,
+            "detail_latest_result_version": session.detail_latest_result_version,
+            "use_case": DETAIL_PAGE_USE_CASE,
+            "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+            "summary": {
+                "total_count": len(assets),
+                "ready_count": len(assets),
+                "panel_count": len(panels),
+            },
+            "panels": [
+                {
+                    "asset_id": asset.id,
+                    "panel_id": asset.asset_role,
+                    "panel_label": (panel_plan_by_id.get(asset.asset_role) or {}).get("panel_label"),
+                    "status": asset.status,
+                    "display_order": asset.display_order,
+                    "image_url": asset.image_url,
+                    "thumbnail_url": asset.thumbnail_url,
+                    "width": asset.width,
+                    "height": asset.height,
+                    "version_no": asset.version_no,
+                }
+                for asset in panels
+            ],
+            "stitched_asset": (
+                {
+                    "asset_id": stitched_asset.id,
+                    "status": stitched_asset.status,
+                    "display_order": stitched_asset.display_order,
+                    "image_url": stitched_asset.image_url,
+                    "thumbnail_url": stitched_asset.thumbnail_url,
+                    "width": stitched_asset.width,
+                    "height": stitched_asset.height,
+                    "version_no": stitched_asset.version_no,
+                }
+                if stitched_asset is not None
+                else None
+            ),
         }
     )
 
@@ -847,21 +1247,42 @@ def download_results(
 ):
     session = get_session_or_404(db, session_id, str(user_id))
     target_version = version or session.latest_result_version
-    assets = (
-        db.query(AssetModel)
-        .filter(
-            and_(
-                AssetModel.session_id == session.id,
-                AssetModel.version_no == target_version,
-                AssetModel.status == "ready",
-            )
-        )
-        .order_by(AssetModel.display_order.asc())
-        .all()
-    )
+    assets = _main_gallery_assets_query(db, session.id, target_version).all()
     zip_path = build_zip_for_assets(session.id, target_version, [{"image_url": a.image_url} for a in assets])
     return FileResponse(
         path=zip_path,
         media_type="application/zip",
         filename=f"session_{session.id}_v{target_version}.zip",
+    )
+
+
+@router.get(
+    "/{session_id}/detail-pages/download",
+    summary="下载详情页结果 ZIP",
+    description="将指定详情页结果版本的 ready 资产打包为 ZIP 并下载。不传 version 时默认下载最近一版详情页结果。",
+    operation_id="downloadDetailPageResults",
+    responses={
+        200: {"description": "ZIP 文件下载流。", "content": {"application/zip": {}}},
+        **OPENAPI_ERROR_RESPONSES,
+    },
+)
+def download_detail_page_results(
+    session_id: str,
+    version: int | None = Query(default=None, description="可选详情页结果版本号。为空时下载最近一版。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+):
+    session = get_session_or_404(db, session_id, str(user_id))
+    target_version = version or session.detail_latest_result_version
+    assets = _detail_page_assets_query(db, session.id, target_version).all()
+    zip_path = build_zip_for_assets(
+        session.id,
+        target_version,
+        [{"image_url": asset.image_url} for asset in assets],
+        file_prefix="detail_page_results",
+    )
+    return FileResponse(
+        path=zip_path,
+        media_type="application/zip",
+        filename=f"session_{session.id}_detail_page_v{target_version}.zip",
     )

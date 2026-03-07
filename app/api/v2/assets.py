@@ -37,6 +37,8 @@ def regenerate_asset(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     asset = get_asset_or_404(db, asset_id)
+    if getattr(asset, "asset_family", "main_gallery") != "main_gallery":
+        raise AppError("invalid_request", "detail page assets do not support regenerate", 400)
     session = get_session_or_404(db, asset.session_id, str(user_id))
     if session.latest_result_version <= 0:
         raise AppError("invalid_session_status", "results not ready", 400)

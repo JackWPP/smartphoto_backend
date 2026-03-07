@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.models.asset import AssetModel
+from app.models.detail_style_image import DetailStyleImageModel
 from app.models.job import JobModel
 from app.models.job_event import JobEventModel
 from app.models.session import SessionModel
@@ -38,6 +39,15 @@ def list_active_session_images(db: Session, session_id: str) -> list[SessionImag
         db.query(SessionImageModel)
         .filter(and_(SessionImageModel.session_id == session_id, SessionImageModel.is_deleted.is_(False)))
         .order_by(SessionImageModel.display_order.asc())
+        .all()
+    )
+
+
+def list_active_detail_style_images(db: Session, session_id: str) -> list[DetailStyleImageModel]:
+    return (
+        db.query(DetailStyleImageModel)
+        .filter(and_(DetailStyleImageModel.session_id == session_id, DetailStyleImageModel.is_deleted.is_(False)))
+        .order_by(DetailStyleImageModel.display_order.asc())
         .all()
     )
 

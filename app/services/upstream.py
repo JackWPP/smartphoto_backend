@@ -149,6 +149,99 @@ class WhataiClient:
             }
         return by_role
 
+    def plan_detail_page_panels(
+        self,
+        *,
+        confirmed_copy: dict[str, Any],
+        product_manifest: list[dict[str, Any]],
+        style_manifest: list[dict[str, Any]],
+        product_grid: LoadedReferenceImage,
+        style_grid: LoadedReferenceImage | None,
+        planner_instruction: str | None,
+        analysis_snapshot: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not self.settings.whatai_api_key:
+            return []
+
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "You are SmartPhoto's Amazon detail page planner. "
+                    "Image 1 is the product multi-angle grid. "
+                    "Image 2 is the optional style/font reference grid. "
+                    "Return JSON only with top-level key panel_plan. "
+                    "panel_plan must be an array of exactly 8 items. "
+                    "Each item must contain: panel_id, panel_label, planner_prompt_base, copy_lines, layout_notes, "
+                    "product_reference_ids, style_reference_ids. "
+                    "Visible copy should be concise and suitable for English Amazon detail page panels. "
+                    f"Confirmed copy: {json.dumps(confirmed_copy, ensure_ascii=False)}. "
+                    f"Product manifest: {json.dumps(product_manifest, ensure_ascii=False)}. "
+                    f"Style manifest: {json.dumps(style_manifest, ensure_ascii=False)}. "
+                    f"Reference summary: {json.dumps((analysis_snapshot or {}).get('reference_summary') or {}, ensure_ascii=False)}. "
+                    f"Extra planner instruction: {planner_instruction or 'None'}."
+                ),
+            },
+            {
+                "type": "text",
+                "text": "Image 1 is the product multi-angle grid.",
+            },
+            {"type": "image_url", "image_url": {"url": product_grid.to_data_uri()}},
+        ]
+        if style_grid is not None:
+            content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": "Image 2 is the style/font reference grid.",
+                    },
+                    {"type": "image_url", "image_url": {"url": style_grid.to_data_uri()}},
+                ]
+            )
+
+        payload = {
+            "model": self.settings.whatai_chat_model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.4,
+        }
+        response = self._post_chat_json(payload, "upstream_llm_error")
+        parsed = self._parse_json_object(self._extract_text(response))
+        if not isinstance(parsed, dict):
+            return []
+        panel_plan = parsed.get("panel_plan")
+        if not isinstance(panel_plan, list):
+            return []
+
+        valid_product_ids = {str(item["image_id"]) for item in product_manifest if item.get("image_id")}
+        valid_style_ids = {str(item["image_id"]) for item in style_manifest if item.get("image_id")}
+        normalized: list[dict[str, Any]] = []
+        for item in panel_plan:
+            if not isinstance(item, dict):
+                continue
+            panel_id = str(item.get("panel_id") or "").strip()
+            if not panel_id:
+                continue
+            normalized.append(
+                {
+                    "panel_id": panel_id,
+                    "panel_label": str(item.get("panel_label") or "").strip(),
+                    "planner_prompt_base": str(item.get("planner_prompt_base") or "").strip(),
+                    "copy_lines": [str(value).strip() for value in item.get("copy_lines", []) if str(value).strip()],
+                    "layout_notes": str(item.get("layout_notes") or "").strip(),
+                    "product_reference_ids": [
+                        image_id
+                        for image_id in [str(value).strip() for value in item.get("product_reference_ids", [])]
+                        if image_id in valid_product_ids
+                    ],
+                    "style_reference_ids": [
+                        image_id
+                        for image_id in [str(value).strip() for value in item.get("style_reference_ids", [])]
+                        if image_id in valid_style_ids
+                    ],
+                }
+            )
+        return normalized
+
     def regenerate_copy(
         self,
         current_copy: dict[str, Any],

@@ -12,7 +12,9 @@
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
 | Strategy Builder | 生成 `strategy_preview`、`reference_manifest`、`prompt_plan` 和可执行 `asset_plan` | `build_strategy_preview` |
+| Detail Page Planner | 生成 `detail_strategy_preview`、商品/风格参考 manifest 和 8 个 panel 规划 | `build_detail_strategy_preview` |
 | Prompt Composer | 按 role 输出结构化 prompt blocks 与最终 `final_prompt` | `compose_prompt` |
+| Detail Prompt Composer | 按 panel 输出带字详情页 prompt blocks 与最终 `final_prompt` | `compose_detail_panel_prompt` |
 | Image Generation Agent | 基于参考图调用图片上游接口，产出图片字节 | `WhataiClient.generate_image` |
 | Storage/Versioning Agent | 持久化原图/结果图/缩略图，维护版本与父子关系 | `LocalStorageAdapter` + `AssetModel` |
 | Prompt Debug Agent | 只读预览当前 prompt、参考图引用和最近一次真实执行快照 | `POST /sessions/{id}/prompts/preview` |
@@ -29,6 +31,9 @@
   - 分发到 `q.analysis` / `q.copy` / `q.generation`
 - 失败处理：返回 `40002/40003/40901/40902` 等
 - 重试策略：由调用端按幂等策略重试
+- 详情页补充：
+  - `POST /sessions/{id}/detail-pages/generations` 创建 `generate_detail_page`
+  - 与主图 generation 共用同一套并发锁与冲突码 `40901/40902`
 
 ### 3.2 Analysis Agent
 - 输入：session 可用图片 + active_platform（可空）
@@ -100,6 +105,27 @@
   - 若校验失败，只对白底图内部追加更强白底约束再尝试 1 次
   - 若二次仍失败，整 job 直接 `job_failed`，不产出 `partial_succeeded`
 
+### 3.5.1 Detail Page Planner + Detail Prompt Composer
+- 输入：copy、商品图、可选风格图、可选 `planner_instruction`、可选本轮 `instruction`
+- 输出：
+  - `detail_strategy_preview`
+  - 8 个 panel prompt
+  - 8 张 `detail_page/panel` 资产
+  - 1 张 `detail_page/stitched` 资产
+- 状态责任：
+  - 不改写主图 `status/current_step`
+  - 独立维护 `detail_generation_round/detail_latest_result_version/latest_detail_generate_job_id`
+- 当前实现约束：
+  - `use_case` 固定为 `amazon_detail`
+  - `aspect_ratio` 固定为 `21:9`
+  - `panel_count` 固定为 `8`
+  - 未上传风格图时，回退使用 `style_choice/style_custom`
+  - 生图默认使用 1 张商品 grid；有风格图时追加 1 张 style/font grid
+- Job / 事件语义：
+  - `job_type = generate_detail_page`
+  - 事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_succeeded|job_failed`
+  - `asset_ready` 会产出 9 次：8 次 panel + 1 次 stitched
+
 ### 3.6 Storage/Versioning Agent
 - 输入：图片字节、session_id、round/version、role/order
 - 输出：`image_url`、`thumbnail_url`、图片元数据
@@ -108,6 +134,10 @@
   - `version_no` 单调递增
   - 单图重生成写 `parent_asset_id`
   - 被替代图标记为 `superseded`
+- 详情页补充：
+  - `assets.asset_family` 区分 `main_gallery | detail_page`
+  - `assets.asset_kind` 区分 `panel | stitched`
+  - 主图与详情页各自维护独立版本号，不互相覆盖
 
 ### 3.7 Event & Lock Agent
 - 输入：job 生命周期与任务上下文
@@ -117,6 +147,7 @@
   - 同 session 同时最多 1 个生图任务
   - 同 user 同时最多 1 个生图任务
   - Redis 不可用时降级到 DB 检查
+  - 详情页 generation 也参与同一套互斥，不允许和主图 generation 并行
 
 ## 4. 三类 regenerate 语义对比
 | 类型 | 入口 | 作用范围 | round_no | version_no | parent_asset_id |
