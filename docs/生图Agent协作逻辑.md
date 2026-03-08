@@ -73,6 +73,7 @@
 - 失败处理：上游失败 `50202`，任务写 `job_failed`
 - 重试策略：
   - 当前主图组默认优先走 `/v1/images/edits`，把参考图以 multipart 形式上传到上游
+  - `/images/edits` 当前传 `aspect_ratio`；`/images/generations` 才传 `size`
   - `/images/edits` 若在提交阶段出现传输层断连，会先做请求级重试；若仍失败，只对当前单张图做内部重试
   - 当上游返回 `task_id` 时，会基于同一个 `task_id` 轮询结果接口拿最终图片链接
   - 图片下载遇到传输层异常时，会做请求级重试

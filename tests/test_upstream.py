@@ -348,13 +348,80 @@ def test_generate_image_uses_multipart_edits_with_reference_images(monkeypatch):
         Path("front.jpg"),
         b"front-image",
     )
-    result = client.generate_image("prompt", reference_images=[image])
+    result = client.generate_image("prompt", aspect_ratio="4:5", reference_images=[image])
 
     assert result == b"image-bytes"
     assert captured["path"] == "/images/edits"
     assert captured["data"]["prompt"] == "prompt"
+    assert captured["data"]["aspect_ratio"] == "4:5"
+    assert "size" not in captured["data"]
     assert captured["files"][0][0] == "image"
     assert captured["files"][0][1][0] == "front.jpg"
+
+
+def test_generate_image_uses_21_9_aspect_ratio_for_detail_edits(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    captured: dict[str, object] = {}
+
+    def fake_request_multipart_json_with_retry(**kwargs):
+        captured.update(kwargs)
+        return {"data": [{"url": "https://example.com/out.jpg"}]}
+
+    monkeypatch.setattr(client, "_request_multipart_json_with_retry", fake_request_multipart_json_with_retry)
+    monkeypatch.setattr(client, "_get_bytes_with_retry", lambda *_args, **_kwargs: b"detail-image-bytes")
+
+    image = LoadedReferenceImage(
+        "detail-grid",
+        "front",
+        1,
+        "/storage/detail-grid.jpg",
+        1792,
+        768,
+        "image/jpeg",
+        100,
+        "detail-grid.jpg",
+        Path("detail-grid.jpg"),
+        b"detail-grid-image",
+    )
+
+    result = client.generate_image("detail prompt", aspect_ratio="21:9", reference_images=[image])
+
+    assert result == b"detail-image-bytes"
+    assert captured["data"]["aspect_ratio"] == "21:9"
+
+
+def test_generate_image_rejects_invalid_edit_aspect_ratio(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    called = {"count": 0}
+
+    def fake_request_multipart_json_with_retry(**_kwargs):
+        called["count"] += 1
+        return {"data": [{"url": "https://example.com/out.jpg"}]}
+
+    monkeypatch.setattr(client, "_request_multipart_json_with_retry", fake_request_multipart_json_with_retry)
+
+    image = LoadedReferenceImage(
+        "img-front",
+        "front",
+        1,
+        "/storage/front.jpg",
+        100,
+        100,
+        "image/jpeg",
+        100,
+        "front.jpg",
+        Path("front.jpg"),
+        b"front-image",
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        client.generate_image("prompt", aspect_ratio="1792x768", reference_images=[image])
+
+    assert exc_info.value.key == "upstream_image_error"
+    assert "invalid edit aspect_ratio" in exc_info.value.message
+    assert called["count"] == 0
 
 
 def test_request_multipart_json_with_retry_marks_transport_errors_retryable(monkeypatch):
@@ -382,7 +449,7 @@ def test_request_multipart_json_with_retry_marks_transport_errors_retryable(monk
         client._request_multipart_json_with_retry(
             base_url="https://api.whatai.cc/v1",
             path="/images/edits",
-            data={"model": "nano-banana-2-2k", "prompt": "test", "size": "1024x1024"},
+            data={"model": "nano-banana-2-2k", "prompt": "test", "aspect_ratio": "1:1"},
             files=[],
             headers={"Authorization": "Bearer test"},
             error_key="upstream_image_error",

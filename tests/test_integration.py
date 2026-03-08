@@ -126,6 +126,7 @@ def test_prompt_preview_returns_structured_prompts_and_latest_snapshots(client):
     assert all(item["prompt_snapshot"] for item in latest_assets)
     assert all(item["generation_snapshot"] for item in latest_assets)
     assert all(item["reference_image_ids"] for item in latest_assets)
+    assert all(item["generation_snapshot"]["aspect_ratio"] == "1:1" for item in latest_assets)
     assert {item["role"] for item in latest_assets} == {"hero", "white_bg", "selling_point", "scene", "detail"}
 
 
@@ -185,6 +186,15 @@ def test_detail_page_full_pipeline_keeps_main_gallery_untouched(client):
     assert detail_results["summary"]["panel_count"] == 8
     assert len(detail_results["panels"]) == 8
     assert detail_results["stitched_asset"] is not None
+
+    detail_prompt_preview = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/prompts/preview",
+        json={"instruction": "整体更高级", "include_latest_assets": True},
+    )
+    assert detail_prompt_preview.status_code == 200
+    detail_latest_assets = detail_prompt_preview.json()["data"]["latest_assets"]
+    assert len([item for item in detail_latest_assets if item["asset_kind"] == "panel"]) == 8
+    assert all(item["generation_snapshot"]["aspect_ratio"] == "21:9" for item in detail_latest_assets if item["asset_kind"] == "panel")
 
     session_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     assert session_snapshot["latest_result_version"] == 0
