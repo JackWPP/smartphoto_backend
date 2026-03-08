@@ -8,7 +8,7 @@ from app.db.session import SessionLocal
 from app.models.job import JobModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
-from app.services.pipeline import _render_single_asset, run_analysis_job
+from app.services.pipeline import _render_single_asset, _render_single_detail_panel, run_analysis_job
 from app.services.reference_images import LoadedReferenceImage
 from app.workers.tasks import execute_job
 
@@ -187,3 +187,108 @@ def test_render_single_asset_retries_retryable_upstream_image_error(monkeypatch)
 
     assert calls["count"] == 2
     assert rendered["image_bytes"] == b"image-bytes"
+
+
+def test_render_single_asset_passes_aspect_ratio_to_edit_generation(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_prompt",
+        lambda **_kwargs: {
+            "final_prompt": "prompt",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+        },
+    )
+
+    class DummyClient:
+        def __init__(self):
+            self.settings = SimpleNamespace(whatai_api_key="test-key")
+
+        def generate_image(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return b"image-bytes"
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    rendered = _render_single_asset(
+        confirmed_copy={"product_name": "空气净化器"},
+        strategy_preview={"planner_instruction": None},
+        plan_item={"role": "hero", "display_order": 1, "aspect_ratio": "4:5"},
+        instruction=None,
+        loaded_reference_images=[
+            LoadedReferenceImage(
+                "img-front",
+                "front",
+                1,
+                "/storage/front.jpg",
+                100,
+                100,
+                "image/jpeg",
+                100,
+                "front.jpg",
+                Path("front.jpg"),
+                b"front-image",
+            )
+        ],
+    )
+
+    assert rendered["image_bytes"] == b"image-bytes"
+    assert captured["kwargs"]["aspect_ratio"] == "4:5"
+    assert captured["kwargs"]["reference_images"][0].image_id == "img-front"
+    assert rendered["generation_snapshot"]["aspect_ratio"] == "4:5"
+
+
+def test_render_single_detail_panel_passes_21_9_aspect_ratio(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_detail_panel_prompt",
+        lambda **_kwargs: {
+            "final_prompt": "detail prompt",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+        },
+    )
+
+    class DummyClient:
+        def generate_image(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return b"detail-bytes"
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    grid = LoadedReferenceImage(
+        "detail-product-grid",
+        "front",
+        1,
+        "/storage/detail-grid.jpg",
+        1792,
+        768,
+        "image/jpeg",
+        100,
+        "detail-grid.jpg",
+        Path("detail-grid.jpg"),
+        b"detail-grid-image",
+    )
+
+    rendered = _render_single_detail_panel(
+        confirmed_copy={"product_name": "空气净化器"},
+        strategy_preview={"planner_instruction": None, "aspect_ratio": "21:9", "use_case": "amazon_detail"},
+        plan_item={
+            "panel_id": "panel_01_cover",
+            "panel_label": "首屏总览",
+            "display_order": 1,
+            "product_reference_ids": ["img-front"],
+            "style_reference_ids": ["style-1"],
+        },
+        instruction=None,
+        reference_grids=[grid],
+    )
+
+    assert rendered["image_bytes"] == b"detail-bytes"
+    assert captured["kwargs"]["aspect_ratio"] == "21:9"
+    assert captured["kwargs"]["reference_images"][0].image_id == "detail-product-grid"
+    assert rendered["generation_snapshot"]["aspect_ratio"] == "21:9"

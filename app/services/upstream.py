@@ -23,6 +23,22 @@ class WhataiClient:
     IMAGE_TASK_POLL_ATTEMPTS = 24
     IMAGE_TASK_POLL_INTERVAL_SECONDS = 20
     IMAGE_EDIT_REQUEST_ATTEMPTS = 4
+    IMAGE_EDIT_ALLOWED_ASPECT_RATIOS = {
+        "1:1",
+        "1:4",
+        "1:8",
+        "2:3",
+        "3:2",
+        "3:4",
+        "4:1",
+        "4:3",
+        "4:5",
+        "5:4",
+        "8:1",
+        "9:16",
+        "16:9",
+        "21:9",
+    }
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -265,13 +281,19 @@ class WhataiClient:
         prompt: str,
         size: str = "1024x1024",
         *,
+        aspect_ratio: str | None = None,
         reference_images: list[LoadedReferenceImage] | None = None,
     ) -> bytes:
         if not self.settings.whatai_api_key:
             return self._fake_image(prompt)
 
         if reference_images:
-            response_json = self._submit_image_edit(prompt, size, reference_images, "upstream_image_error")
+            response_json = self._submit_image_edit(
+                prompt,
+                aspect_ratio,
+                reference_images,
+                "upstream_image_error",
+            )
         else:
             payload = {
                 "model": self.settings.whatai_image_model,
@@ -351,17 +373,35 @@ class WhataiClient:
     def _submit_image_edit(
         self,
         prompt: str,
-        size: str,
+        aspect_ratio: str | None,
         reference_images: list[LoadedReferenceImage],
         error_key: str,
     ) -> dict[str, Any]:
+        normalized_aspect_ratio = str(aspect_ratio or "").strip()
+        if normalized_aspect_ratio not in self.IMAGE_EDIT_ALLOWED_ASPECT_RATIOS:
+            raise AppError(
+                error_key,
+                (
+                    "invalid edit aspect_ratio: "
+                    f"{normalized_aspect_ratio or '<missing>'}; allowed values are "
+                    f"{sorted(self.IMAGE_EDIT_ALLOWED_ASPECT_RATIOS)}"
+                ),
+                502,
+            )
         headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
         files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:2]]
         data = {
             "model": self.settings.whatai_image_model,
             "prompt": prompt,
-            "size": size,
+            "aspect_ratio": normalized_aspect_ratio,
         }
+        logger.info(
+            "Submitting upstream image edit: model=%s endpoint=%s aspect_ratio=%s reference_count=%s",
+            self.settings.whatai_image_model,
+            "/v1/images/edits",
+            normalized_aspect_ratio,
+            len(files),
+        )
         return self._request_multipart_json_with_retry(
             base_url=self._normalized_base_url(),
             path="/images/edits",

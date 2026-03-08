@@ -421,7 +421,8 @@ def _render_single_asset(
     role = str(plan_item["role"])
     display_order = int(plan_item["display_order"])
     planner_instruction = str(strategy_preview.get("planner_instruction") or "") or None
-    image_size = _resolve_image_size(str(plan_item.get("aspect_ratio") or "1:1"))
+    aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
+    image_size = _resolve_image_size(aspect_ratio)
     reference_images = select_reference_images_for_role(loaded_reference_images, role)
     prompt_payload = compose_prompt(
         confirmed_copy=confirmed_copy,
@@ -435,6 +436,7 @@ def _render_single_asset(
         client=client,
         prompt=prompt_payload["final_prompt"],
         image_size=image_size,
+        aspect_ratio=aspect_ratio,
         reference_images=reference_images,
         role=role,
         display_order=display_order,
@@ -457,6 +459,7 @@ def _render_single_asset(
                 client=client,
                 prompt=retry_prompt_payload["final_prompt"],
                 image_size=image_size,
+                aspect_ratio=aspect_ratio,
                 reference_images=reference_images,
                 role=role,
                 display_order=display_order,
@@ -479,6 +482,7 @@ def _render_single_asset(
         "reference_slots": [image.slot_type for image in reference_images],
         "upstream_endpoint": "/v1/images/edits" if reference_images else "/v1/images/generations",
         "planner_instruction": planner_instruction,
+        "aspect_ratio": aspect_ratio,
         "size": image_size,
         "planner_source": prompt_payload.get("planner_source"),
         "white_bg_validation": validation_result,
@@ -668,6 +672,7 @@ def _generate_image_with_asset_retry(
     client: WhataiClient,
     prompt: str,
     image_size: str,
+    aspect_ratio: str,
     reference_images: list,
     role: str,
     display_order: int,
@@ -678,6 +683,7 @@ def _generate_image_with_asset_retry(
             return client.generate_image(
                 prompt,
                 image_size,
+                aspect_ratio=aspect_ratio,
                 reference_images=reference_images,
             )
         except AppError as exc:
@@ -768,6 +774,7 @@ def _render_single_detail_panel(
     panel_id = str(plan_item["panel_id"])
     display_order = int(plan_item["display_order"])
     planner_instruction = str(strategy_preview.get("planner_instruction") or "") or None
+    aspect_ratio = str(strategy_preview.get("aspect_ratio") or DETAIL_PAGE_ASPECT_RATIO)
     prompt_payload = compose_detail_panel_prompt(
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
@@ -780,6 +787,7 @@ def _render_single_detail_panel(
         client=client,
         prompt=prompt_payload["final_prompt"],
         image_size=DETAIL_PAGE_IMAGE_SIZE,
+        aspect_ratio=aspect_ratio,
         reference_images=reference_grids,
         role=panel_id,
         display_order=display_order,
@@ -788,8 +796,9 @@ def _render_single_detail_panel(
         "asset_family": "detail_page",
         "asset_kind": "panel",
         "use_case": strategy_preview.get("use_case"),
-        "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+        "aspect_ratio": aspect_ratio,
         "image_size": DETAIL_PAGE_IMAGE_SIZE,
+        "size": DETAIL_PAGE_IMAGE_SIZE,
         "panel_label": plan_item.get("panel_label"),
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
