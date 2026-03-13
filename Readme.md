@@ -1,103 +1,87 @@
 # SmartPhoto Backend v2
 
-## 项目定位
-SmartPhoto Backend v2 是一个围绕前端 6 步流程设计的后端系统，核心目标是：
-- 把分析、文案重写、生图、重生成全部纳入 Job 异步体系
-- 让 API 层与 Worker 层解耦，支持多实例扩展
-- 让结果图具备版本可追溯能力（`round_no` + `version_no`）
+SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像生成后端系统，专门面向跨境电商商品展示图的自动化生成设计。它承载了从参考图片分析、文案提炼、生图策略制定到最终多角色商品图和详情页生成的完整 6 步前端工作流。
 
-当前文档以**代码实现为真相**，并显式记录与 SPEC 的差距。
+## 项目定位与核心特性
+
+- **完整 6 步流的后端中枢**：将商品图分析、文案自动重写、生图策略编排、异步并行生图、局部重生成全部纳入 Job 体系。
+- **解耦的异步执行层**：API 路由层与 Worker 层完全解耦，支持高并发多实例扩展运行。
+- **细粒度版本控制与追溯**：生成的每个资产（Asset）及最终产出长图都具备严格的（`round_no` + `version_no`）版本管理和完整父子追溯能力。
+- **并发与幂等保护**：通过 HTTP 侧的 `Idempotency-Key`、DB 全局锁与 Redis 分布式锁三重保护提供企业级的可靠性。
+- **多资产族（Family）隔离**：支持`主图库(main_gallery)`和`详情页(detail_page)`的独立闭环生成及管理。
+
+## 架构选型
+
+- **Web 框架**: FastAPI
+- **任务队列**: Celery + Redis
+- **持久化层**: PostgreSQL + SQLAlchemy (ORM)
+- **数据库迁移**: Alembic
+- **API 集成层**: `httpx` (封装 `WhataiClient`)
+- **存储介质**: 本地文件系统（通过 `StorageAdapter` 抽象层实现，可平滑迁移至 S3）
 
 ## 实现状态一览
-| 层级 | 状态 | 说明 |
-|---|---|---|
-| P0 主链路 | 已实现 | 上传、分析、平台选择、copy、策略预览、生图、结果、下载 |
-| 详情页独立生成 | 已实现 | `detail-pages` 独立策略预览、Prompt 调试、8 张 panel + 长图生成、结果、下载 |
-| 重生成能力 | 已实现 | `global_edit`、`regenerate_gallery`、`regenerate_asset` |
-| 并发与幂等 | 已实现 | `Idempotency-Key` + DB 并发检查 + Redis 锁 |
-| Auth/JWT | 延后到 P1 | 当前使用固定测试用户上下文 |
-| success validator | 未实现 | 当前版本明确不做 |
 
-## 文档索引
-- [API 联调指南](docs/API_联调指南.md)
-- [OpenAPI 导出（Apifox 可导入）](docs/openapi/smartphoto_backend_openapi.json)
-- [生图 Agent 协作逻辑](docs/生图Agent协作逻辑.md)
-- [运行与排障手册](docs/运行与排障手册.md)
-- [开发约束与维护规则](AGENTS.md)
-- [原始业务规格](SmartPhoto_Backend_SPEC_v2%20(1).md)
+| 核心特性 | 当前状态 | 补充说明 |
+|---|---|---|
+| **主图生成闭环** | ✅ 已实现 | 上传、分析、平台策略计算、prompt提炼与修改、主图并发生成、下载 |
+| **详情页生成闭环** | ✅ 已实现 | 独立的样式参考、面板（Panel）版式编排、生成与全图无缝拼接下载 |
+| **重生成修图能力** | ✅ 已实现 | 整组重新生成(`regenerate_gallery`) / 局部单图重生成(`regenerate_asset`) / 批量属性修改(`global_edit`) |
+| **并发与防重幂等** | ✅ 已实现 | 基于 DB/Redis 的锁及 `Idempotency-Key` 校验机制 |
+| **认证与权限 (Auth)** | 🚧 延后至 P1 | 当前采用固定的开发测试上下文，降低开发接入成本 |
+| **合规与风控校验** | ❌ 未实现 | 当前版本中属于平台非核心诉求，主动剥离不实现 |
+
+---
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 环境准备与依赖安装
+需要 Python 3.10+, PostgreSQL 和 Redis。
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-### 2. 启动基础设施
+### 2. 启动中间件基础设施 (Docker Compose)
+如果本地未安装 Postgres 或 Redis，可以通过 docker 一键启动。
 ```bash
 ./scripts/dev-up.sh
 ```
 
-### 3. 配置环境变量
+### 3. 配置核心环境变量
+通过 `.env` 对接真实的 LLM 和 Image Generation 上游接口。
 ```bash
 cp .env.example .env
-# 按需填写 WHATAI_API_KEY
-# WHATAI_API_BASE 默认使用 https://api.whatai.cc
+# [必须修改] 配置真实的 API KEY，例如: 
+# WHATAI_API_KEY=sk-xxxxxx
+# WHATAI_API_BASE=https://api.whatai.cc
 ```
 
-### 4. 初始化数据库
+### 4. 数据库自动化迁移
+初始化数据库元数据与建表。
 ```bash
 alembic upgrade head
 ```
 
-### 5. 启动服务
+### 5. 启动服务 (API + Celery Worker)
+通过单独的终端分别启动。`dev-*` 脚本启动前均内置了自动迁移检查避免缺列。
 ```bash
+# 启动 FastAPI 接入口 (127.0.0.1:8000)
 ./scripts/dev-api.sh
+
+# 启动 Celery Worker 处理端
 ./scripts/dev-worker.sh
 ```
 
-说明：`dev-api.sh` 和 `dev-worker.sh` 启动前会自动执行一次 `alembic upgrade head`，避免代码升级后因漏跑迁移导致运行时缺列。
+## API 联调与排障手册索引
 
-## 真实运行前检查清单
-- Postgres 和 Redis 已启动（`docker compose ps`）
-- `.env` 中 `DATABASE_URL`、`REDIS_URL`、`STORAGE_ROOT` 正确
-- `alembic upgrade head` 已执行（或通过启动脚本自动补齐）
-- API 进程与 Worker 进程都在运行
-- 若需真实上游：`WHATAI_API_KEY` 已配置且可用
+遇到对接和运行问题，可以在这几份设计文档中找到完整答案，本系统严格贯彻**以代码为第一解释权，文档和逻辑强对齐**的原则。
 
-## 联调入口
-- API 前缀：`/api/v2`
-- 健康检查：`GET /healthz`
-- OpenAPI：`GET /openapi.json`
-- 核心流程入口：
-  - `POST /sessions`
-  - `POST /sessions/{id}/analysis`
-  - `POST /sessions/{id}/generations`
-  - `POST /sessions/{id}/detail-pages/generations`
-  - `GET /jobs/{job_id}` + `GET /jobs/{job_id}/events`
-
-## OpenAPI / Apifox
-导出命令：
-```bash
-./.venv/bin/python scripts/export_openapi.py
-```
-
-导出产物：
-- `docs/openapi/smartphoto_backend_openapi.json`
-
-导入 Apifox：
-1. 在 Apifox 选择导入 OpenAPI/Swagger
-2. 选择 `docs/openapi/smartphoto_backend_openapi.json`
-3. 导入后将环境 Base URL 配置为你的 API 地址，例如 `http://127.0.0.1:8000`
-
-## 已知限制（当前实现）
-- `/auth/register|login|me` 尚未实现（P1）
-- `build_strategy` 当前是同步落库，不走 Worker 队列
-- `analyze_images` / `regenerate_copy` 当前仍返回占位结果（即使配置 key）
-- `global_edit` 的 `scope=selected` 已接收参数，但当前实现仍按整组处理
-- 详情页当前仅实现独立首次生成，不包含详情页 `global_edit` / 单 panel 重生成
-- 未实现 `partial_succeeded` / `canceled` 的实际产出流程
-
-详细差距请看 [API 联调指南](docs/API_联调指南.md) 的“实现 vs SPEC 差距清单”。
+- 🚀 [API 接口字段字典、错误码与联调指南](./docs/API_联调指南.md)
+- 🧠 [生图 Agent 工作流架构与长程协作逻辑分析](./docs/生图Agent协作逻辑.md)
+- ⚙️ [主线生图与调度系统技术深度解构报告](./docs/生图架构核心技术报告.md)
+- 🤝 [甲方框架手册项目对齐说明（对外版）](./docs/甲方框架手册_项目对齐说明_对外版.md)
+- 🧾 [甲方框架手册项目对齐说明（内部评估版）](./docs/甲方框架手册_项目对齐说明_内部评估版.md)
+- 🛠 [项目运行、本地报错诊断与常见运维排障手册](./docs/运行与排障手册.md)
+- 📦 [开发规范约束与贡献者约定](./AGENTS.md)
+- 💾 `OpenAPI` JSON 规范定义可以直接在根目录脚本 `scripts/export_openapi.py` 导出。
