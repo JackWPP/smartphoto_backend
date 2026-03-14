@@ -26,6 +26,7 @@ app = FastAPI(
         {"name": "sessions", "description": "主业务流程接口，覆盖 Step 1 到 Step 6。"},
         {"name": "jobs", "description": "异步任务状态查询与 SSE 事件流。"},
         {"name": "assets", "description": "单图级别的重生成接口。"},
+        {"name": "prompt-presets", "description": "Prompt 仓库、风格预设与模板管理。"},
     ],
 )
 app.include_router(v2_router, prefix=settings.api_prefix)

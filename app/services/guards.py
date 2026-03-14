@@ -4,7 +4,14 @@ from app.core.errors import AppError
 from app.models.job import JobModel
 from app.services.state_machine import RUNNING_JOB_STATES
 
-GENERATION_JOB_TYPES = {"generate_gallery", "regenerate_gallery", "global_edit", "regenerate_asset", "generate_detail_page"}
+GENERATION_JOB_TYPES = {
+    "generate_gallery",
+    "regenerate_gallery",
+    "global_edit",
+    "regenerate_asset",
+    "generate_detail_page",
+    "regenerate_detail_panel",
+}
 
 
 def ensure_no_running_generation_jobs(db: Session, session_id: str, user_id: str) -> None:
