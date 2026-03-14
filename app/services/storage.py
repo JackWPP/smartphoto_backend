@@ -1,4 +1,5 @@
 import io
+import mimetypes
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,7 +14,15 @@ class LocalStorageAdapter:
         self.root = self.settings.storage_root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def save_upload(self, session_id: str, original_name: str, content: bytes) -> tuple[str, int, int, str, int]:
+    def save_upload(
+        self,
+        session_id: str,
+        original_name: str,
+        content: bytes,
+        *,
+        allow_non_image: bool = False,
+        mime_type_hint: str | None = None,
+    ) -> tuple[str, int, int, str, int]:
         ext = Path(original_name).suffix.lower() or ".jpg"
         file_name = f"{uuid4()}{ext}"
         rel_path = Path("sessions") / session_id / "uploads" / file_name
@@ -21,9 +30,15 @@ class LocalStorageAdapter:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_bytes(content)
 
-        with Image.open(io.BytesIO(content)) as img:
-            width, height = img.size
-            mime_type = Image.MIME.get(img.format, "image/jpeg")
+        try:
+            with Image.open(io.BytesIO(content)) as img:
+                width, height = img.size
+                mime_type = Image.MIME.get(img.format, mime_type_hint or "image/jpeg")
+        except Exception:  # noqa: BLE001
+            if not allow_non_image:
+                raise
+            guessed_mime = mime_type_hint or mimetypes.guess_type(original_name)[0] or "application/octet-stream"
+            width, height, mime_type = 0, 0, guessed_mime
 
         return self._to_url(rel_path), width, height, mime_type, len(content)
 

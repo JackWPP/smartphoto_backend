@@ -21,6 +21,7 @@ class JobModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     input_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     result_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    timing_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     priority: Mapped[int] = mapped_column(Integer, default=5)

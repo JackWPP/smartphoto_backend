@@ -13,6 +13,11 @@ ROLE_REFERENCE_SLOT_PREFERENCES = {
     "selling_point": ["front", "angle45"],
     "scene": ["front", "angle45"],
     "detail": ["front", "side", "angle45"],
+    "primary_kv": ["front", "angle45"],
+    "reason_why": ["front", "angle45"],
+    "proof_authority": ["front", "angle45", "side"],
+    "benefit_scene_or_compare": ["front", "angle45", "side"],
+    "closing_selling_point": ["front", "side", "angle45"],
 }
 
 

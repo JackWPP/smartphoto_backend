@@ -1,4 +1,5 @@
 from functools import lru_cache
+import json
 from pathlib import Path
 
 from pydantic import Field
@@ -25,8 +26,31 @@ class Settings(BaseSettings):
     whatai_api_key: str = ""
     whatai_chat_model: str = "gpt-4.1-mini"
     whatai_image_model: str = "gpt-image-1"
+    whatai_parameter_model: str = "gemini-2.5-flash"
 
     generation_lock_ttl_seconds: int = Field(default=600, ge=30)
+    main_generation_concurrency: int = Field(default=4, ge=1, le=12)
+    detail_generation_concurrency: int = Field(default=6, ge=1, le=16)
+    generation_submit_concurrency: int = Field(default=6, ge=1, le=16)
+    image_task_timeout_seconds: int = Field(default=450, ge=60, le=1800)
+    image_poll_profile: str = Field(default='[{"interval_seconds":5,"attempts":6},{"interval_seconds":10,"attempts":12},{"interval_seconds":15,"attempts":20}]')
+
+    def parsed_image_poll_profile(self) -> list[dict[str, int]]:
+        try:
+            value = json.loads(self.image_poll_profile)
+        except json.JSONDecodeError:
+            value = None
+        if not isinstance(value, list):
+            return [{"interval_seconds": 5, "attempts": 6}, {"interval_seconds": 10, "attempts": 12}, {"interval_seconds": 15, "attempts": 20}]
+        normalized: list[dict[str, int]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            interval_seconds = int(item.get("interval_seconds") or 0)
+            attempts = int(item.get("attempts") or 0)
+            if interval_seconds > 0 and attempts > 0:
+                normalized.append({"interval_seconds": interval_seconds, "attempts": attempts})
+        return normalized or [{"interval_seconds": 5, "attempts": 6}, {"interval_seconds": 10, "attempts": 12}, {"interval_seconds": 15, "attempts": 20}]
 
 
 @lru_cache

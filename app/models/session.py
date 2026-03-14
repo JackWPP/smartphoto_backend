@@ -16,11 +16,13 @@ class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     active_platform_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     analysis_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    parameter_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     confirmed_copy: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     strategy_preview: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     detail_strategy_preview: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     latest_analysis_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    latest_parameter_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     latest_copy_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     latest_strategy_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     latest_generate_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

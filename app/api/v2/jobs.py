@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -24,6 +25,15 @@ router = APIRouter(tags=["jobs"])
 )
 def get_job_status(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = get_job_or_404(db, job_id)
+    timing_snapshot = dict(job.timing_snapshot or {})
+    current_stage = timing_snapshot.get("current_stage") or {}
+    current_stage_elapsed_ms = None
+    started_at = current_stage.get("started_at")
+    if started_at and not current_stage.get("ended_at"):
+        started_at_dt = datetime.fromisoformat(started_at)
+        if started_at_dt.tzinfo is None:
+            started_at_dt = started_at_dt.replace(tzinfo=timezone.utc)
+        current_stage_elapsed_ms = int((datetime.now(timezone.utc) - started_at_dt).total_seconds() * 1000)
     data = {
         "job_id": job.id,
         "job_type": job.job_type,
@@ -31,6 +41,13 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)) -> dict:
         "progress": job.progress,
         "stage": job.stage,
         "estimated_seconds": None,
+        "queued_at": job.queued_at.isoformat() if job.queued_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "queue_wait_ms": timing_snapshot.get("queue_wait_ms"),
+        "total_duration_ms": timing_snapshot.get("total_duration_ms"),
+        "current_stage_elapsed_ms": current_stage_elapsed_ms,
+        "stage_timings": timing_snapshot.get("stage_timings") or [],
         "error_code": job.error_code,
         "error_message": job.error_message,
     }

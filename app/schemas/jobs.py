@@ -12,6 +12,13 @@ class JobStatusData(BaseModel):
     progress: int = Field(description="进度百分比。", examples=[80])
     stage: str | None = Field(default=None, description="当前阶段。")
     estimated_seconds: int | None = Field(default=None, description="预估剩余秒数。当前未实现。")
+    queued_at: str | None = Field(default=None, description="进入队列时间。")
+    started_at: str | None = Field(default=None, description="任务开始时间。")
+    finished_at: str | None = Field(default=None, description="任务完成时间。")
+    queue_wait_ms: int | None = Field(default=None, description="排队耗时。")
+    total_duration_ms: int | None = Field(default=None, description="总耗时。")
+    current_stage_elapsed_ms: int | None = Field(default=None, description="当前阶段已耗时。")
+    stage_timings: list[dict[str, Any]] = Field(default_factory=list, description="各阶段耗时。")
     error_code: str | None = Field(default=None, description="失败时的业务错误码。")
     error_message: str | None = Field(default=None, description="失败时的错误消息。")
 
