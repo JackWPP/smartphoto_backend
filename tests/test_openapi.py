@@ -9,7 +9,9 @@ def test_openapi_contains_key_paths_and_operation_ids():
 
     assert spec["info"]["version"] == "2.0.0"
     assert "/api/v2/sessions/{session_id}/prompts/preview" in spec["paths"]
+    assert "/api/v2/sessions/{session_id}/detail-pages/generations" in spec["paths"]
     assert spec["paths"]["/api/v2/sessions/{session_id}/prompts/preview"]["post"]["operationId"] == "previewPrompts"
+    assert spec["paths"]["/api/v2/sessions/{session_id}/detail-pages/generations"]["post"]["operationId"] == "generateDetailPage"
     assert spec["paths"]["/api/v2/assets/{asset_id}/regenerate"]["post"]["operationId"] == "regenerateAsset"
 
 

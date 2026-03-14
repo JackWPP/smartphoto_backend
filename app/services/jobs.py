@@ -12,6 +12,12 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def create_job(
     db: Session,
     session_id: str,
@@ -20,6 +26,7 @@ def create_job(
     input_payload: dict | None = None,
     idempotency_key: str | None = None,
 ) -> JobModel:
+    queued_at = now_utc()
     job = JobModel(
         session_id=session_id,
         user_id=user_id,
@@ -29,8 +36,15 @@ def create_job(
         stage=None,
         input_payload=input_payload,
         result_payload=None,
+        timing_snapshot={
+            "queued_at": queued_at.isoformat(),
+            "stage_timings": [],
+            "queue_wait_ms": None,
+            "total_duration_ms": None,
+            "current_stage": None,
+        },
         idempotency_key=idempotency_key,
-        queued_at=now_utc(),
+        queued_at=queued_at,
     )
     db.add(job)
     db.flush()
@@ -57,6 +71,11 @@ def update_job_status(
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> None:
+    now = now_utc()
+    snapshot = dict(job.timing_snapshot or {})
+    snapshot.setdefault("stage_timings", [])
+    current_stage = snapshot.get("current_stage")
+
     job.status = status
     if progress is not None:
         job.progress = progress
@@ -68,6 +87,42 @@ def update_job_status(
     job.error_message = error_message
 
     if status == "running" and job.started_at is None:
-        job.started_at = now_utc()
+        job.started_at = now
+        if job.queued_at is not None:
+            snapshot["queue_wait_ms"] = int((_as_utc(job.started_at) - _as_utc(job.queued_at)).total_seconds() * 1000)
+
+    if stage is not None:
+        if current_stage and current_stage.get("stage") != stage and not current_stage.get("ended_at"):
+            started_at = current_stage.get("started_at")
+            if started_at:
+                started_at_dt = datetime.fromisoformat(started_at)
+                started_at_dt = _as_utc(started_at_dt)
+                current_stage["ended_at"] = now.isoformat()
+                current_stage["duration_ms"] = int((now - started_at_dt).total_seconds() * 1000)
+                snapshot["stage_timings"].append(current_stage)
+            current_stage = None
+        if current_stage is None and stage:
+            current_stage = {
+                "stage": stage,
+                "started_at": now.isoformat(),
+                "ended_at": None,
+                "duration_ms": None,
+            }
+            snapshot["current_stage"] = current_stage
+
     if status in {"succeeded", "failed", "canceled", "partial_succeeded"}:
-        job.finished_at = now_utc()
+        job.finished_at = now
+        if current_stage and not current_stage.get("ended_at"):
+            started_at = current_stage.get("started_at")
+            if started_at:
+                started_at_dt = datetime.fromisoformat(started_at)
+                started_at_dt = _as_utc(started_at_dt)
+                current_stage["ended_at"] = now.isoformat()
+                current_stage["duration_ms"] = int((now - started_at_dt).total_seconds() * 1000)
+                snapshot["stage_timings"].append(current_stage)
+        snapshot["current_stage"] = None
+        if job.started_at is not None:
+            snapshot["total_duration_ms"] = int((_as_utc(job.finished_at) - _as_utc(job.started_at)).total_seconds() * 1000)
+        snapshot["finished_at"] = job.finished_at.isoformat()
+
+    job.timing_snapshot = snapshot

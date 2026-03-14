@@ -3,10 +3,15 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.models.asset import AssetModel
+from app.models.detail_style_image import DetailStyleImageModel
 from app.models.job import JobModel
 from app.models.job_event import JobEventModel
+from app.models.parameter_attachment import ParameterAttachmentModel
+from app.models.prompt_preset import PromptPresetModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
+from app.models.session_prompt_override import SessionPromptOverrideModel
+from app.models.strategy_reference_image import StrategyReferenceImageModel
 
 
 def get_session_or_404(db: Session, session_id: str, user_id: str | None = None) -> SessionModel:
@@ -40,6 +45,52 @@ def list_active_session_images(db: Session, session_id: str) -> list[SessionImag
         .order_by(SessionImageModel.display_order.asc())
         .all()
     )
+
+
+def list_active_detail_style_images(db: Session, session_id: str) -> list[DetailStyleImageModel]:
+    return (
+        db.query(DetailStyleImageModel)
+        .filter(and_(DetailStyleImageModel.session_id == session_id, DetailStyleImageModel.is_deleted.is_(False)))
+        .order_by(DetailStyleImageModel.display_order.asc())
+        .all()
+    )
+
+
+def list_active_parameter_attachments(db: Session, session_id: str) -> list[ParameterAttachmentModel]:
+    return (
+        db.query(ParameterAttachmentModel)
+        .filter(and_(ParameterAttachmentModel.session_id == session_id, ParameterAttachmentModel.is_deleted.is_(False)))
+        .order_by(ParameterAttachmentModel.display_order.asc())
+        .all()
+    )
+
+
+def list_active_strategy_reference_images(db: Session, session_id: str) -> list[StrategyReferenceImageModel]:
+    return (
+        db.query(StrategyReferenceImageModel)
+        .filter(and_(StrategyReferenceImageModel.session_id == session_id, StrategyReferenceImageModel.is_deleted.is_(False)))
+        .order_by(StrategyReferenceImageModel.display_order.asc())
+        .all()
+    )
+
+
+def list_session_prompt_overrides(db: Session, session_id: str, *, asset_family: str = "main_gallery") -> list[SessionPromptOverrideModel]:
+    return (
+        db.query(SessionPromptOverrideModel)
+        .filter(
+            SessionPromptOverrideModel.session_id == session_id,
+            SessionPromptOverrideModel.asset_family == asset_family,
+        )
+        .order_by(SessionPromptOverrideModel.slot_id.asc())
+        .all()
+    )
+
+
+def get_prompt_preset_or_404(db: Session, preset_id: str) -> PromptPresetModel:
+    preset = db.query(PromptPresetModel).filter(PromptPresetModel.id == preset_id).one_or_none()
+    if not preset:
+        raise AppError("invalid_request", "prompt preset not found", 404)
+    return preset
 
 
 def get_latest_job_by_type(db: Session, session_id: str, job_type: str) -> JobModel | None:

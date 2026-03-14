@@ -119,6 +119,30 @@
 - 常见错误：`40004` `40402`
 - 幂等：`POST /copy/regenerate` 支持 `Idempotency-Key`
 
+### Step 4.5 参数附件与参数提取
+- 参数附件接口：
+  - `POST /sessions/{session_id}/parameter-attachments`
+  - `GET /sessions/{session_id}/parameter-attachments`
+  - `DELETE /sessions/{session_id}/parameter-attachments/{attachment_id}`
+  - 支持图片与 PDF；不相关内容会在后续提取结果中返回 `relevance_status=invalid`
+- 参数提取接口：
+  - `POST /sessions/{session_id}/parameters/extract`
+  - `GET /sessions/{session_id}/parameters`
+  - `PUT /sessions/{session_id}/parameters`
+- 当前实现行为：
+  - 提取 job_type 为 `extract_parameters`
+  - `parameter_snapshot` 至少包含：
+    - `relevance_status`
+    - `rejection_reason`
+    - `hero_scene`
+    - `core_selling_points`
+    - `key_parameters`
+    - `product_advantages`
+    - `feature_highlights`
+- 补充说明：
+  - 提取结果是“可用抽取 + 人工可改”，不会强承诺复杂 OCR 高精度
+  - 保存参数结果后会使 Step 5 策略预览失效，需要重新 build strategy
+
 ### Step 5 策略预览
 - 前置状态：
   - `confirmed_copy` 已保存
@@ -126,13 +150,23 @@
 - 接口：`POST /sessions/{session_id}/strategy/preview`
 - 请求体：
   - `planner_instruction: string | null`
+  - `slot_preferences: [{slot_id, expression_mode, locked}]`
+- 主图文字 override 接口：
+  - `GET /sessions/{session_id}/strategy/overrides`
+  - `PUT /sessions/{session_id}/strategy/overrides`
+  - 用于保存 `copy_blocks_override/raw_prompt_override/expression_mode_override/applied_preset_id/locked`
 - 当前实现行为：
   - 立即同步生成预览并落库
   - 创建 `build_strategy` job 记录，但不进队列
-  - Step 5 当前会结合 `confirmed_copy + active_platform_id + session 图片 + analysis.reference_summary` 做一轮角色级 prompt planner
-  - `asset_plan` 当前固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
+  - Step 5 当前会结合 `confirmed_copy + active_platform_id + session 图片 + analysis.reference_summary` 做一轮槽位级 prompt planner
+  - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”：
+    - 默认平台仍输出 5 张：`hero` `white_bg` `selling_point` `scene` `detail`
+    - 阿里系（`1688` / `taobao` / `alibaba_intl`）输出 5 个阿里槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
   - 每个 `asset_plan` 项都包含 prompt 可驱动元数据：
     - `role`
+    - `slot_id`
+    - `slot_label`
+    - `slot_family`
     - `display_order`
     - `role_label`
     - `goal`
@@ -140,8 +174,23 @@
     - `text_policy`
     - `composition_hint`
     - `aspect_ratio`
+    - `expression_mode`
+    - `expression_label`
+    - `expression_reason`
+    - `candidate_expression_modes`
+    - `copy_blocks`
+    - `copy_policy`
+    - `layout_policy`
+    - `proof_policy`
+    - `requires_white_bg_validation`
+    - `platform_rule_pack`
   - 同步返回并落库：
+    - `platform_rule_pack`
+    - `platform_overlay`
+    - `slot_preferences`
+    - `input_hash`
     - `reference_manifest`
+    - `strategy_reference_manifest`
       - `image_id`
       - `slot_type`
       - `display_order`
@@ -152,7 +201,17 @@
       - `file_size`
     - `prompt_plan`
       - `role`
+      - `slot_id`
+      - `slot_label`
+      - `slot_family`
       - `display_order`
+      - `expression_mode`
+      - `expression_label`
+      - `copy_blocks`
+      - `raw_prompt_override`
+      - `applied_preset_id`
+      - `platform_overlay`
+      - `platform_rule_pack`
       - `reference_image_ids`
       - `reference_slots`
       - `must_keep`
@@ -163,6 +222,8 @@
       - `fidelity_rule`
       - `final_prompt_base`
       - `planner_source`
+      - `rule_modules_used`
+      - `resolved_constraints`
       - `white_bg_mode`
 - 成功后：状态写为 `strategy_ready`
 - 常见错误：`40002` `40003`
@@ -182,6 +243,9 @@
   - 返回 `model`、`image_size`、`reference_manifest`、`prompts`、`latest_assets`
   - `prompts` 按当前 `asset_plan` 顺序返回，每项包含：
     - `role`
+    - `slot_id`
+    - `slot_label`
+    - `slot_family`
     - `display_order`
     - `role_label`
     - `aspect_ratio`
@@ -197,6 +261,12 @@
     - `must_avoid`
     - `planner_source`
     - `planner_base`
+    - `copy_blocks`
+    - `expression_mode`
+    - `expression_label`
+    - `rule_modules_used`
+    - `platform_overlay`
+    - `resolved_constraints`
     - `final_prompt`
   - `blocks` 当前固定为：
     - `goal`
@@ -211,6 +281,7 @@
     - `asset_id`
     - `version_no`
     - `role`
+    - `slot_id`
     - `display_order`
     - `prompt_snapshot`
     - `edit_instruction`
@@ -218,8 +289,136 @@
     - `reference_image_ids`
     - `upstream_endpoint`
     - `planner_instruction`
+    - `expression_mode`
+    - `rule_pack_id`
+    - `raw_prompt_override`
+    - `applied_preset_id`
+
+### Prompt 仓库与风格预设
+- 接口：
+  - `GET /prompt-presets`
+  - `POST /prompt-presets`
+  - `PUT /prompt-presets/{preset_id}`
+  - `POST /prompt-presets/{preset_id}/archive`
+  - `POST /prompt-presets/{preset_id}/clone`
+- 当前实现行为：
+  - 系统会自动 seed 一批内置预设到数据库
+  - `preset_type` 当前支持：
+    - `style`
+    - `slot_recipe`
+    - `raw_prompt`
+  - 调试台当前支持：
+    - Step 4 套用风格预设
+    - Step 5 把单槽位 override 显式保存为模板
 - 常见错误：`40002` `40003`
 - 并发/幂等：无 Idempotency-Key
+
+### 详情页独立生成出口
+- 定位：
+  - 与主图 `/generations` 分开
+  - 由前端开关决定本次走主图还是详情页
+  - 详情页生成不会触发主图 5 张策略预览和生图
+- 前置状态：
+  - `confirmed_copy` 已保存
+  - `active_platform_id` 已设置
+  - 至少 1 张商品图
+- 详情页风格图接口：
+  - `POST /sessions/{session_id}/detail-pages/style-images`
+  - `GET /sessions/{session_id}/detail-pages/style-images`
+  - `DELETE /sessions/{session_id}/detail-pages/style-images/{image_id}`
+  - 当前只接收 `display_order`，不要求 `slot_type`
+  - 最多 4 张，可为空
+- 详情页策略预览：
+  - 接口：`POST /sessions/{session_id}/detail-pages/strategy/preview`
+  - 请求体：
+    - `planner_instruction: string | null`
+    - `panel_preferences: [{slot_id, panel_type, display_order, locked}]`
+  - 同步落库到 `session.detail_strategy_preview`
+  - 固定返回：
+    - `use_case = amazon_detail`
+    - `aspect_ratio = 21:9`
+    - `panel_count = 8`
+    - `detail_rule_pack`
+    - `product_reference_manifest`
+    - `style_reference_manifest`
+    - `panel_plan`
+  - `panel_plan` 每项至少包含：
+    - `slot_id`
+    - `panel_id`
+    - `panel_label`
+    - `display_order`
+    - `panel_type`
+    - `panel_type_label`
+    - `panel_type_reason`
+    - `candidate_panel_types`
+    - `layout_template`
+    - `copy_policy`
+    - `planner_prompt_base`
+    - `copy_lines`
+    - `layout_notes`
+    - `planner_source`
+    - `product_reference_ids`
+    - `style_reference_ids`
+    - `rule_modules_used`
+  - 未上传风格图时，planner 自动退回 `style_choice + style_custom`
+  - 详情页 override 接口：
+    - `GET /sessions/{session_id}/detail-pages/strategy/overrides`
+    - `PUT /sessions/{session_id}/detail-pages/strategy/overrides`
+    - override 字段与主图一致，但作用域固定为 `asset_family=detail_page`
+- 详情页 Prompt 预览：
+  - 接口：`POST /sessions/{session_id}/detail-pages/prompts/preview`
+  - 请求体：
+    - `instruction: string | null`
+    - `include_latest_assets: boolean`
+  - 返回：
+    - `use_case`
+    - `aspect_ratio`
+    - `panel_count`
+    - `image_size = 1792x768`
+    - `product_reference_manifest`
+    - `style_reference_manifest`
+    - `prompts`
+    - `latest_assets`
+  - `prompts` 固定按 8 个 panel 顺序返回，每项包含：
+    - `panel_id`
+    - `slot_id`
+    - `panel_label`
+    - `display_order`
+    - `blocks`
+    - `copy_blocks`
+    - `raw_prompt_override`
+    - `applied_preset_id`
+    - `panel_type`
+    - `panel_type_reason`
+    - `layout_template`
+    - `product_reference_ids`
+    - `style_reference_ids`
+    - `product_reference_images_used`
+    - `style_reference_images_used`
+    - `planner_source`
+    - `planner_base`
+    - `rule_modules_used`
+    - `final_prompt`
+- 详情页生成/结果/下载：
+  - 首次生成：`POST /sessions/{session_id}/detail-pages/generations`
+  - 结果查询：`GET /sessions/{session_id}/detail-pages/results`
+  - 下载：`GET /sessions/{session_id}/detail-pages/download`
+  - `job_type`：`generate_detail_page`
+  - 单 panel 重生：`POST /assets/{asset_id}/regenerate`
+    - 当 `asset_family=detail_page` 且 `asset_kind=panel` 时，会转成 `job_type=regenerate_detail_panel`
+  - 固定产出：
+    - 8 张 `panel`
+    - 1 张竖向拼接长图 `stitched`
+  - 独立版本字段：
+    - `detail_generation_round`
+    - `detail_latest_result_version`
+  - 主图版本字段 `generation_round/latest_result_version` 不会被详情页生成改写
+  - 并发保护：
+    - 详情页与主图共用 generation 并发锁
+    - 冲突仍返回 `40901`
+  - 幂等：
+    - `POST /detail-pages/generations` 支持 `Idempotency-Key`
+    - 相同 key + 相同 payload 命中幂等；不同 payload 返回 `40902`
 
 ### Step 6 生成/结果/重生成/下载
 - 前置状态：
@@ -232,21 +431,42 @@
   - 整组重生成：`POST /sessions/{session_id}/results/regenerate`
   - 单图重生成：`POST /assets/{asset_id}/regenerate`
   - 下载：`GET /sessions/{session_id}/download`
+- 首次生成请求体补充：
+  - `instruction: string | null`
+  - `slot_ids: string[]`
+    - 为空时生成整组
+    - 传入时只生成指定槽位，适合单张调试
 - 结果集字段补充：
+  - `requested_version`
+  - `available_versions`
+  - `version_summaries`
   - `assets[].role`
+  - `assets[].slot_id`
+  - `assets[].expression_mode`
+  - `assets[].rule_pack_id`
   - `assets[].status`
   - `assets[].display_order`
   - `assets[].version_no`
+  - `assets[].render_total_ms`
 - 版本规则：
   - `generate_gallery` / `global_edit` / `regenerate_gallery`：`round_no + 1` 且 `version_no + 1`
   - `regenerate_asset`：`version_no + 1`，`round_no` 保持当前轮次，且写 `parent_asset_id`
 - 当前实现补充：
-  - 主图组默认按 `hero -> white_bg -> selling_point -> scene -> detail` 生成
-  - 每个 role 默认会从 session 图片中选最多 2 张参考图，并优先走 `/v1/images/edits`
+  - 任何 `version_no` 都按不可变快照保留，历史版本允许回看与下载
+  - `regenerate_asset` 会物化成完整新版本：新图 + carry-forward 旧版本其余图
+  - 主图组会先批量提交全部上游异步任务，再集中轮询，再并发下载结果
+  - 默认平台按 `hero -> white_bg -> selling_point -> scene -> detail` 生成
+  - 阿里系平台按 `primary_kv -> reason_why -> proof_authority -> benefit_scene_or_compare -> closing_selling_point` 生成
+  - 每个槽位默认会从 session 图片中选最多 2 张参考图，并优先走 `/v1/images/edits`
   - 参考图优先级：`front > angle45 > side > extra`
-  - `detail` 默认优先 `front + side`，其余角色默认优先 `front + angle45`
-  - 生图执行最大并发数固定为 `2`
-  - `white_bg` 走独立白底分支；若白底校验失败，仅对白底图内部再尝试 1 次，不重跑整组
+  - `detail`/`proof_authority` 默认优先 `front + side`，其余槽位默认优先 `front + angle45`
+  - 并发与轮询改为配置化：
+    - `generation_submit_concurrency`
+    - `main_generation_concurrency`
+    - `detail_generation_concurrency`
+    - `image_poll_profile`
+    - `image_task_timeout_seconds`
+  - 白底校验改为能力标记驱动：仅 `requires_white_bg_validation=true` 的槽位会触发白底校验与单槽位补提
   - 实际提交给上游的快照会落到 `assets.generation_snapshot`
 - 并发保护：
   - 同 session 或同 user 同时只允许 1 个运行中生图任务
@@ -258,6 +478,14 @@
 ### 3.1 轮询状态
 - 接口：`GET /jobs/{job_id}`
 - 用途：展示 `status/progress/stage/error_code/error_message`
+- 当前还会返回：
+  - `queued_at`
+  - `started_at`
+  - `finished_at`
+  - `queue_wait_ms`
+  - `total_duration_ms`
+  - `current_stage_elapsed_ms`
+  - `stage_timings`
 
 ### 3.2 SSE 事件
 - 接口：`GET /jobs/{job_id}/events`
@@ -271,7 +499,8 @@ data: {"event":"job_succeeded","job_id":"..."}
 ```
 - 补充说明：
   - 生图链路当前改为异步提交 WhatAI 任务后轮询结果，因此单次接口抖动不一定意味着上游未生成
-  - 图片任务结果当前按同一 `task_id` 约每 20 秒轮询一次，最长约 8 分钟；前端若见到 job 长时间停在 `generating`，不应立刻重复触发生图
+  - 图片任务结果当前按 `image_poll_profile` 自适应轮询，默认是 `5s x 6 + 10s x 12 + 15s x 20`，总窗口约 7.5 分钟
+  - 主图与详情页分别走 `q.generation.main` / `q.generation.detail`
   - Prompt 预览建议走独立的 `POST /sessions/{id}/prompts/preview`，不要从 `GET /results` 推导 prompt
 
 ### 3.3 前端消费建议
@@ -285,9 +514,10 @@ data: {"event":"job_succeeded","job_id":"..."}
 2. `build_strategy` 当前为同步执行，不走 Worker 队列。
 3. `regenerate_copy` 仍返回占位重写结果，尚未解析上游真实输出。
 4. `global_edit` 的 `scope=selected` 参数已接收，但执行时仍按整组处理。
-5. 当前未实现“风格参考图单独上传”“ComfyUI 节点级调试信息”“详情页长图工作流”。
+5. 当前已实现“风格参考图单独上传 + 详情页独立首次生成 + 动态 panel_type 推荐/覆盖”，但未实现详情页 `global_edit`、单 panel 重生成、ComfyUI 节点级调试信息。
 6. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
 7. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
+8. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
 
 ## 5. 联调最短路径
 1. `POST /sessions`
@@ -301,3 +531,12 @@ data: {"event":"job_succeeded","job_id":"..."}
 9. `GET /jobs/{job_id}` 或 `GET /jobs/{job_id}/events`
 10. `GET /sessions/{id}/results`
 11. `GET /sessions/{id}/download`
+
+详情页最短路径（可替代 6~11）：
+1. `POST /sessions/{id}/detail-pages/style-images`（可选）
+2. `POST /sessions/{id}/detail-pages/strategy/preview`
+3. `POST /sessions/{id}/detail-pages/prompts/preview`（可选）
+4. `POST /sessions/{id}/detail-pages/generations`
+5. `GET /jobs/{job_id}` 或 `GET /jobs/{job_id}/events`
+6. `GET /sessions/{id}/detail-pages/results`
+7. `GET /sessions/{id}/detail-pages/download`

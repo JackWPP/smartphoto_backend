@@ -18,13 +18,15 @@ app = FastAPI(
     version="2.0.0",
     description=(
         "SmartPhoto Backend v2 OpenAPI。"
-        "系统围绕前端 6 步流程设计，覆盖 session 创建、图片上传、分析、平台选择、copy 编辑、策略预览、Prompt 调试、整组生图、结果查询、下载、重生成。"
+        "系统围绕前端 6 步流程设计，覆盖 session 创建、图片上传、分析、平台选择、copy 编辑、策略预览、Prompt 调试、"
+        "主图整组生图、详情页独立生成、结果查询、下载、重生成。"
     ),
     openapi_tags=[
         {"name": "platforms", "description": "平台能力与默认配置。"},
         {"name": "sessions", "description": "主业务流程接口，覆盖 Step 1 到 Step 6。"},
         {"name": "jobs", "description": "异步任务状态查询与 SSE 事件流。"},
         {"name": "assets", "description": "单图级别的重生成接口。"},
+        {"name": "prompt-presets", "description": "Prompt 仓库、风格预设与模板管理。"},
     ],
 )
 app.include_router(v2_router, prefix=settings.api_prefix)

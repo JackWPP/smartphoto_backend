@@ -16,7 +16,12 @@ class AssetModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     parent_asset_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("assets.id"), nullable=True)
 
     platform_id: Mapped[str] = mapped_column(String(64), index=True)
+    asset_family: Mapped[str] = mapped_column(String(32), default="main_gallery", index=True)
+    asset_kind: Mapped[str] = mapped_column(String(32), default="panel", index=True)
     asset_role: Mapped[str] = mapped_column(String(64))
+    slot_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    expression_mode: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    rule_pack_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     display_order: Mapped[int] = mapped_column(Integer)
 
     image_url: Mapped[str] = mapped_column(String(1024))
