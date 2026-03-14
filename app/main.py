@@ -27,6 +27,8 @@ app = FastAPI(
     ),
     openapi_tags=[
         {"name": "platforms", "description": "平台能力与默认配置。"},
+        {"name": "auth", "description": "前台用户注册、登录、刷新、退出与当前用户信息。"},
+        {"name": "account", "description": "用户中心、资产历史、站内通知、安全与额度台账。"},
         {"name": "sessions", "description": "主业务流程接口，覆盖 Step 1 到 Step 6。"},
         {"name": "jobs", "description": "异步任务状态查询与 SSE 事件流。"},
         {"name": "assets", "description": "单图级别的重生成接口。"},
@@ -39,6 +41,7 @@ app = FastAPI(
         {"name": "admin-prompt-presets", "description": "后台 Prompt 模板管理。"},
         {"name": "admin-rule-packs", "description": "后台规则包管理与发布。"},
         {"name": "admin-audit", "description": "后台审计日志。"},
+        {"name": "admin-users", "description": "后台用户、订单与额度管理。"},
     ],
 )
 app.include_router(v2_router, prefix=settings.api_prefix)

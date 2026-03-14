@@ -17,7 +17,6 @@ from app.models.asset import AssetModel
 from app.models.detail_style_image import DetailStyleImageModel
 from app.models.job import JobModel
 from app.models.parameter_attachment import ParameterAttachmentModel
-from app.models.prompt_preset import PromptPresetModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
 from app.models.session_prompt_override import SessionPromptOverrideModel
@@ -36,12 +35,14 @@ from app.services.jobs import append_job_event, update_job_status
 from app.services.locking import release_locks
 from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy, merge_parameter_snapshot_into_copy
 from app.services.prompts import compose_prompt
+from app.services.repo import list_visible_prompt_presets_by_ids
 from app.services.reference_images import load_reference_images, select_reference_images_for_role
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import LocalStorageAdapter
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
+from app.services.user_accounts import create_job_completion_notification, refresh_session_search_cache, update_session_last_generated_at
 from app.services.white_bg import strengthen_white_bg_instruction, validate_white_background
 
 COPY_TARGETS = {"headline", "selling_points", "usage_scenes", "specs"}
@@ -110,9 +111,10 @@ def _session_prompt_overrides(db: Session, session_id: str) -> list[dict[str, An
         .all()
     )
     preset_ids = [override.applied_preset_id for override in overrides if override.applied_preset_id]
-    presets_by_id: dict[str, PromptPresetModel] = {}
+    session = _require_session(db, session_id)
+    presets_by_id: dict[str, Any] = {}
     if preset_ids:
-        presets = db.query(PromptPresetModel).filter(PromptPresetModel.id.in_(preset_ids)).all()
+        presets = list_visible_prompt_presets_by_ids(db, preset_ids, user_id=session.user_id)
         presets_by_id = {preset.id: preset for preset in presets}
     return [
         serialize_session_override(
@@ -129,7 +131,8 @@ def _resolved_copy_for_session(db: Session, session: SessionModel) -> dict[str, 
         copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
     preset_id = copy_data.get("style_preset_id")
     if preset_id:
-        preset = db.query(PromptPresetModel).filter(PromptPresetModel.id == preset_id).one_or_none()
+        presets = list_visible_prompt_presets_by_ids(db, [str(preset_id)], user_id=session.user_id)
+        preset = presets[0] if presets else None
         if preset is not None:
             copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
             if not copy_data.get("style_choice"):
@@ -261,6 +264,7 @@ def run_analysis_job(db: Session, job_id: str) -> None:
 
     session.analysis_snapshot = snapshot
     session.confirmed_copy = _apply_analysis_defaults_to_copy(session.confirmed_copy, snapshot)
+    refresh_session_search_cache(session)
 
     ensure_session_transition(session.status, "analyzed")
     session.status = "analyzed"
@@ -649,6 +653,8 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         session.latest_generate_job_id = job.id
         session.status = "completed"
         session.current_step = 6
+        update_session_last_generated_at(session)
+        refresh_session_search_cache(session)
 
         result_payload = {
             "asset_ids": [asset.id for asset in created_assets],
@@ -657,6 +663,13 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         }
         update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
         append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+        create_job_completion_notification(
+            db,
+            user_id=session.user_id,
+            session_id=session.id,
+            job_type=job.job_type,
+            succeeded=True,
+        )
     except AppError as exc:
         update_job_status(
             db,
@@ -1290,6 +1303,8 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
         session.detail_generation_round = round_no
         session.detail_latest_result_version = version_no
         session.latest_detail_generate_job_id = job.id
+        update_session_last_generated_at(session)
+        refresh_session_search_cache(session)
 
         update_job_status(
             db,
@@ -1305,6 +1320,13 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             },
         )
         append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+        create_job_completion_notification(
+            db,
+            user_id=session.user_id,
+            session_id=session.id,
+            job_type=job.job_type,
+            succeeded=True,
+        )
     finally:
         release_locks(lock_keys)
 

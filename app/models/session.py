@@ -1,4 +1,6 @@
-from sqlalchemy import Integer, String
+from datetime import datetime
+
+from sqlalchemy import DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -32,3 +34,8 @@ class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     latest_result_version: Mapped[int] = mapped_column(Integer, default=0)
     detail_generation_round: Mapped[int] = mapped_column(Integer, default=0)
     detail_latest_result_version: Mapped[int] = mapped_column(Integer, default=0)
+
+    product_name_cache: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    brand_name_cache: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    style_tag_cache: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    last_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
