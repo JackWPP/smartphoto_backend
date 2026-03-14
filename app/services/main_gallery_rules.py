@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from app.services.platforms import PlatformProfile, get_platform_or_none
+from app.services.rule_packs import load_published_rule_pack_config
 
 
 DEFAULT_MAIN_RULE_PACK_ID = "default_main_gallery_v2"
@@ -433,10 +436,27 @@ def get_main_rule_pack_id(platform_id: str) -> str:
     return profile.main_rule_pack_id if profile else DEFAULT_MAIN_RULE_PACK_ID
 
 
-def get_main_gallery_slot_blueprints(platform_id: str) -> list[dict[str, Any]]:
+def get_main_gallery_slot_blueprints(platform_id: str, *, db: Session | None = None) -> list[dict[str, Any]]:
     rule_pack_id = get_main_rule_pack_id(platform_id)
-    slot_blueprints = MAIN_GALLERY_SLOT_PRESETS.get(rule_pack_id, MAIN_GALLERY_SLOT_PRESETS[DEFAULT_MAIN_RULE_PACK_ID])
-    return [{**item, "platform_rule_pack": rule_pack_id} for item in slot_blueprints]
+    rule_pack, version, config = load_published_rule_pack_config(
+        asset_family="main_gallery",
+        rule_pack_key=rule_pack_id,
+        platform_id=platform_id,
+        db=db,
+    )
+    slot_blueprints = (config or {}).get("slot_plan") or MAIN_GALLERY_SLOT_PRESETS.get(
+        rule_pack_id,
+        MAIN_GALLERY_SLOT_PRESETS[DEFAULT_MAIN_RULE_PACK_ID],
+    )
+    return [
+        {
+            **item,
+            "platform_rule_pack": rule_pack.id if rule_pack is not None else rule_pack_id,
+            "platform_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else rule_pack_id,
+            "platform_rule_pack_version": version.version_no if version is not None else 1,
+        }
+        for item in slot_blueprints
+    ]
 
 
 def recommend_expression_mode(
@@ -587,8 +607,10 @@ def build_copy_blocks(
 def resolve_slot_preferences(
     platform_id: str,
     incoming: list[dict[str, Any]] | None,
+    *,
+    db: Session | None = None,
 ) -> dict[str, dict[str, Any]]:
-    valid_slots = {item["slot_id"] for item in get_main_gallery_slot_blueprints(platform_id)}
+    valid_slots = {item["slot_id"] for item in get_main_gallery_slot_blueprints(platform_id, db=db)}
     resolved: dict[str, dict[str, Any]] = {}
     for item in incoming or []:
         if not isinstance(item, dict):

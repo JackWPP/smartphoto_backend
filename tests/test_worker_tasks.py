@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.errors import AppError
-from app.db.session import SessionLocal
+from app.db import session as db_session
 from app.models.job import JobModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
@@ -19,7 +19,7 @@ from app.workers.tasks import execute_job
 
 
 def test_execute_job_retries_retryable_llm_error(monkeypatch, setup_database):
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         session = SessionModel(user_id="u1", status="images_uploaded", current_step=1, selected_platform_ids=["temu"])
         db.add(session)
         db.flush()
@@ -56,7 +56,7 @@ def test_execute_job_retries_retryable_llm_error(monkeypatch, setup_database):
     with pytest.raises(DummyRetry):
         execute_job.run(job_id)
 
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         job = db.query(JobModel).filter(JobModel.id == job_id).one()
         assert job.status == "running"
         assert job.stage == "retrying"
@@ -64,7 +64,7 @@ def test_execute_job_retries_retryable_llm_error(monkeypatch, setup_database):
 
 
 def test_run_analysis_job_tolerates_scalar_analysis_sections(monkeypatch, setup_database):
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         session = SessionModel(user_id="u1", status="images_uploaded", current_step=1, selected_platform_ids=["temu"])
         db.add(session)
         db.flush()
@@ -126,7 +126,7 @@ def test_run_analysis_job_tolerates_scalar_analysis_sections(monkeypatch, setup_
 
     monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
 
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         run_analysis_job(db, job_id)
         session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
         job = db.query(JobModel).filter(JobModel.id == job_id).one()
@@ -134,8 +134,105 @@ def test_run_analysis_job_tolerates_scalar_analysis_sections(monkeypatch, setup_
         assert session.status == "analyzed"
         assert session.confirmed_copy["product_name"] == "便携榨汁杯"
         assert session.confirmed_copy["headline"] == "鲜榨更方便"
+        assert session.confirmed_copy["hero_scene"] == ""
+        assert session.confirmed_copy["key_parameters"]
         assert session.confirmed_copy["style_choice"] == "现代简约"
         assert job.status == "succeeded"
+
+
+def test_run_analysis_job_backfills_existing_empty_copy(monkeypatch, setup_database):
+    with db_session.SessionLocal() as db:
+        session = SessionModel(
+            user_id="u1",
+            status="images_uploaded",
+            current_step=1,
+            selected_platform_ids=["temu"],
+            confirmed_copy={
+                "product_name": "",
+                "category": "",
+                "hero_scene": "",
+                "core_selling_points": [],
+                "key_parameters": [],
+                "product_advantages": [],
+                "style_preset_id": None,
+                "style_custom": "",
+            },
+        )
+        db.add(session)
+        db.flush()
+        image = SessionImageModel(
+            session_id=session.id,
+            slot_type="front",
+            display_order=1,
+            source_url="/storage/front.jpg",
+            width=100,
+            height=100,
+            mime_type="image/jpeg",
+            file_size=100,
+            is_deleted=False,
+        )
+        db.add(image)
+
+        job = JobModel(
+            session_id=session.id,
+            user_id="u1",
+            job_type="analysis",
+            status="queued",
+            progress=0,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+        session_id = session.id
+
+    monkeypatch.setattr(
+        "app.services.pipeline.load_reference_images",
+        lambda *_args, **_kwargs: [
+            LoadedReferenceImage(
+                "img-front",
+                "front",
+                1,
+                "/storage/front.jpg",
+                100,
+                100,
+                "image/jpeg",
+                100,
+                "front.jpg",
+                Path("front.jpg"),
+                b"front-image",
+            )
+        ],
+    )
+
+    class DummyClient:
+        def analyze_images(self, *_args, **_kwargs):
+            return {
+                "recognized_product": {"product_name": "圆柱空气净化器", "category": "家电"},
+                "copy_draft": {
+                    "headline": "高效体验，稳定品质",
+                    "selling_points": "360环形进风｜低噪运行",
+                    "usage_scenes": "客厅净化",
+                    "specs": "CADR 220m3/h",
+                },
+                "suggested_styles": ["科技感"],
+                "key_parameters": [{"key": "cadr", "label": "CADR", "value": "220", "unit": "m3/h"}],
+                "reference_summary": {"must_keep": "保持结构一致"},
+            }
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    with db_session.SessionLocal() as db:
+        run_analysis_job(db, job_id)
+        session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
+
+        assert session.confirmed_copy["product_name"] == "圆柱空气净化器"
+        assert session.confirmed_copy["category"] == "家电"
+        assert session.confirmed_copy["hero_scene"] == "客厅净化"
+        assert session.confirmed_copy["core_selling_points"] == ["360环形进风", "低噪运行"]
+        assert session.confirmed_copy["key_parameters"][0]["label"] == "CADR"
+        assert session.confirmed_copy["style_choice"] == "科技感"
 
 
 def test_render_single_asset_retries_retryable_upstream_image_error(monkeypatch):

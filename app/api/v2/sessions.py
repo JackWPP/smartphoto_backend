@@ -77,12 +77,17 @@ from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
 from app.services.jobs import append_job_event, create_job, update_job_status
 from app.services.locking import acquire_generation_locks
-from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
+from app.services.parameter_snapshot import (
+    apply_parameter_snapshot_to_copy,
+    merge_parameter_snapshot_into_copy,
+    parameter_snapshot_to_copy_fields,
+)
 from app.services.platforms import get_platform_or_none
 from app.services.prompts import build_prompt_previews
 from app.services.prompt_repo import list_prompt_presets
 from app.services.repo import (
     get_prompt_preset_or_404,
+    get_prompt_preset_or_none,
     get_job_or_404,
     get_session_or_404,
     list_active_detail_style_images,
@@ -113,8 +118,9 @@ def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
         raise AppError("invalid_platform", "active platform required", 400)
     return normalize_strategy_preview(
         session.strategy_preview,
-        session.confirmed_copy,
+        _resolved_copy_for_session(session, db),
         session.active_platform_id,
+        db=db,
         prompt_overrides=_serialized_session_overrides(db, session.id),
         parameter_snapshot=session.parameter_snapshot or {},
     )
@@ -128,7 +134,8 @@ def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> di
 
     return normalize_detail_strategy_preview(
         session.detail_strategy_preview,
-        merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+        _resolved_copy_for_session(session, db),
+        db=db,
         product_images=list_active_session_images(db, session.id),
         style_images=list_active_detail_style_images(db, session.id),
         analysis_snapshot=session.analysis_snapshot or {},
@@ -145,6 +152,7 @@ def _main_gallery_assets_query(db: Session, session_id: str, version_no: int):
             AssetModel.version_no == version_no,
             AssetModel.asset_family == "main_gallery",
             AssetModel.status == "ready",
+            AssetModel.visibility_status == "visible",
         )
         .order_by(AssetModel.display_order.asc())
     )
@@ -158,6 +166,7 @@ def _detail_page_assets_query(db: Session, session_id: str, version_no: int):
             AssetModel.version_no == version_no,
             AssetModel.asset_family == "detail_page",
             AssetModel.status == "ready",
+            AssetModel.visibility_status == "visible",
         )
         .order_by(AssetModel.display_order.asc())
     )
@@ -169,6 +178,7 @@ def _available_versions(db: Session, session_id: str, *, asset_family: str) -> l
         .filter(
             AssetModel.session_id == session_id,
             AssetModel.asset_family == asset_family,
+            AssetModel.visibility_status == "visible",
         )
         .distinct()
         .order_by(AssetModel.version_no.desc())
@@ -187,6 +197,7 @@ def _version_summaries(db: Session, session_id: str, *, asset_family: str) -> li
                 AssetModel.session_id == session_id,
                 AssetModel.asset_family == asset_family,
                 AssetModel.version_no == version_no,
+                AssetModel.visibility_status == "visible",
             )
             .all()
         )
@@ -215,6 +226,34 @@ def _serialized_session_overrides(db: Session, session_id: str, *, asset_family:
         )
         for override in overrides
     ]
+
+
+def _copy_response_payload(session: SessionModel, db: Session) -> dict:
+    copy_data = _resolved_copy_for_session(session, db)
+    return {
+        "product_name": copy_data.get("product_name", ""),
+        "category": copy_data.get("category", ""),
+        "hero_scene": copy_data.get("hero_scene", ""),
+        "core_selling_points": copy_data.get("core_selling_points", []),
+        "key_parameters": copy_data.get("key_parameters", []),
+        "product_advantages": copy_data.get("product_advantages", []),
+        "style_preset_id": copy_data.get("style_preset_id"),
+        "style_custom": copy_data.get("style_custom", ""),
+        "style_choice": copy_data.get("style_choice", ""),
+    }
+
+
+def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
+    copy_data = normalize_copy_payload(session.confirmed_copy)
+    if session.parameter_snapshot:
+        copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
+    preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"))
+    if preset is not None:
+        copy_data["style_preset_id"] = preset.id
+        copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
+        if not copy_data.get("style_choice"):
+            copy_data["style_choice"] = preset.name
+    return normalize_copy_payload(copy_data)
 
 
 def _invalidate_strategy_inputs(session: SessionModel) -> None:
@@ -918,6 +957,13 @@ def extract_parameters(
             "job_type": job.job_type,
             "status": job.status,
             "session_id": session.id,
+            "overwrite_mode": "replace_all",
+            "applied_copy_fields": [
+                "hero_scene",
+                "core_selling_points",
+                "key_parameters",
+                "product_advantages",
+            ],
         }
     )
 
@@ -935,7 +981,14 @@ def get_parameters(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    return success_response({"session_id": session.id, "parameter_snapshot": session.parameter_snapshot or {}})
+    return success_response(
+        {
+            "session_id": session.id,
+            "parameter_snapshot": session.parameter_snapshot or {},
+            "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "overwrite_mode": "replace_all",
+        }
+    )
 
 
 @router.put(
@@ -953,10 +1006,18 @@ def put_parameters(
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
     session.parameter_snapshot = payload or {}
+    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
     session.strategy_preview = None
     session.detail_strategy_preview = None
     db.commit()
-    return success_response({"session_id": session.id, "parameter_snapshot": session.parameter_snapshot or {}})
+    return success_response(
+        {
+            "session_id": session.id,
+            "parameter_snapshot": session.parameter_snapshot or {},
+            "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "overwrite_mode": "replace_all",
+        }
+    )
 
 
 @router.put(
@@ -1008,8 +1069,7 @@ def put_platform_selection(
 )
 def get_copy_form(session_id: str, db: Session = Depends(get_db), user_id=Depends(get_current_user_id)) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    copy_data = normalize_copy_payload(session.confirmed_copy)
-    return success_response(copy_data)
+    return success_response(_copy_response_payload(session, db))
 
 
 @router.put(
@@ -1027,7 +1087,16 @@ def put_copy_form(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    session.confirmed_copy = normalize_copy_payload(req.model_dump())
+    payload = normalize_copy_payload(req.model_dump())
+    preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"))
+    if payload.get("style_preset_id") and preset is None:
+        raise AppError("invalid_request", "style preset not found", 404)
+    payload["resolved_style_preset"] = serialize_prompt_preset(preset) if preset is not None else None
+    if preset is not None and not payload.get("style_choice"):
+        payload["style_choice"] = preset.name
+    session.confirmed_copy = normalize_copy_payload(payload)
+    session.strategy_preview = None
+    session.detail_strategy_preview = None
     if session.status in {"platform_selected", "copy_ready", "analyzed"}:
         session.status = "copy_ready"
     session.current_step = max(session.current_step, 4)
@@ -1149,8 +1218,9 @@ def build_strategy(
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
     preview = build_strategy_preview(
-        session.confirmed_copy,
+        _resolved_copy_for_session(session, db),
         session.active_platform_id,
+        db=db,
         session_images=images,
         analysis_snapshot=session.analysis_snapshot or {},
         parameter_snapshot=session.parameter_snapshot or {},
@@ -1204,7 +1274,8 @@ def build_detail_strategy(
     style_images = list_active_detail_style_images(db, session.id)
 
     preview = build_detail_strategy_preview(
-        merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+        _resolved_copy_for_session(session, db),
+        db=db,
         product_images=product_images,
         style_images=style_images,
         analysis_snapshot=session.analysis_snapshot or {},
@@ -1285,8 +1356,9 @@ def put_strategy_overrides(
     db.flush()
     if session.confirmed_copy and session.active_platform_id:
         preview = build_strategy_preview(
-            session.confirmed_copy,
+            _resolved_copy_for_session(session, db),
             session.active_platform_id,
+            db=db,
             session_images=list_active_session_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
             parameter_snapshot=session.parameter_snapshot or {},
@@ -1373,7 +1445,8 @@ def put_detail_strategy_overrides(
     db.flush()
     if session.confirmed_copy and session.active_platform_id:
         preview = build_detail_strategy_preview(
-            merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+            _resolved_copy_for_session(session, db),
+            db=db,
             product_images=list_active_session_images(db, session.id),
             style_images=list_active_detail_style_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
@@ -1408,11 +1481,13 @@ def preview_prompts(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
+    resolved_copy = _resolved_copy_for_session(session, db)
     strategy_preview = _effective_strategy_preview(session, db)
     if not strategy_preview.get("reference_manifest"):
         strategy_preview = build_strategy_preview(
-            session.confirmed_copy or {},
+            resolved_copy,
             session.active_platform_id or "temu",
+            db=db,
             session_images=list_active_session_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
             parameter_snapshot=session.parameter_snapshot or {},
@@ -1422,7 +1497,7 @@ def preview_prompts(
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
         )
     prompts = build_prompt_previews(
-        confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        confirmed_copy=resolved_copy,
         strategy_preview=strategy_preview,
         instruction=req.instruction,
     )
@@ -1456,6 +1531,12 @@ def preview_prompts(
         {
             "session_id": session.id,
             "active_platform_id": session.active_platform_id,
+            "hero_scene": resolved_copy.get("hero_scene", ""),
+            "core_selling_points": resolved_copy.get("core_selling_points", []),
+            "key_parameters": resolved_copy.get("key_parameters", []),
+            "product_advantages": resolved_copy.get("product_advantages", []),
+            "style_preset_id": resolved_copy.get("style_preset_id"),
+            "style_custom": resolved_copy.get("style_custom", ""),
             "model": settings.whatai_image_model,
             "image_size": "1024x1024",
             "reference_manifest": strategy_preview.get("reference_manifest", []),
@@ -1480,11 +1561,13 @@ def preview_detail_prompts(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
+    resolved_copy = _resolved_copy_for_session(session, db)
     detail_strategy_preview = _effective_detail_strategy_preview(session, db)
     prompts = build_detail_prompt_previews(
-        confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        confirmed_copy=resolved_copy,
         strategy_preview=detail_strategy_preview,
         instruction=req.instruction,
+        db=db,
     )
 
     latest_assets: list[dict] = []
@@ -1514,6 +1597,12 @@ def preview_detail_prompts(
             "use_case": detail_strategy_preview.get("use_case", DETAIL_PAGE_USE_CASE),
             "aspect_ratio": detail_strategy_preview.get("aspect_ratio", DETAIL_PAGE_ASPECT_RATIO),
             "panel_count": detail_strategy_preview.get("panel_count", DETAIL_PAGE_PANEL_COUNT),
+            "hero_scene": resolved_copy.get("hero_scene", ""),
+            "core_selling_points": resolved_copy.get("core_selling_points", []),
+            "key_parameters": resolved_copy.get("key_parameters", []),
+            "product_advantages": resolved_copy.get("product_advantages", []),
+            "style_preset_id": resolved_copy.get("style_preset_id"),
+            "style_custom": resolved_copy.get("style_custom", ""),
             "model": settings.whatai_image_model,
             "image_size": DETAIL_PAGE_IMAGE_SIZE,
             "product_reference_manifest": detail_strategy_preview.get("product_reference_manifest", []),

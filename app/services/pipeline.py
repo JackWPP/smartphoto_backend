@@ -34,13 +34,13 @@ from app.services.detail_pages import (
 )
 from app.services.jobs import append_job_event, update_job_status
 from app.services.locking import release_locks
-from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
+from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy, merge_parameter_snapshot_into_copy
 from app.services.prompts import compose_prompt
 from app.services.reference_images import load_reference_images, select_reference_images_for_role
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import LocalStorageAdapter
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview
-from app.services.strategy_overrides import serialize_session_override
+from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
 from app.services.white_bg import strengthen_white_bg_instruction, validate_white_background
 
@@ -123,6 +123,20 @@ def _session_prompt_overrides(db: Session, session_id: str) -> list[dict[str, An
     ]
 
 
+def _resolved_copy_for_session(db: Session, session: SessionModel) -> dict[str, Any]:
+    copy_data = normalize_copy_payload(session.confirmed_copy or {})
+    if session.parameter_snapshot:
+        copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
+    preset_id = copy_data.get("style_preset_id")
+    if preset_id:
+        preset = db.query(PromptPresetModel).filter(PromptPresetModel.id == preset_id).one_or_none()
+        if preset is not None:
+            copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
+            if not copy_data.get("style_choice"):
+                copy_data["style_choice"] = preset.name
+    return normalize_copy_payload(copy_data)
+
+
 def _snapshot_section(snapshot: dict, key: str, *, text_key: str | None = None) -> dict:
     value = snapshot.get(key)
     if isinstance(value, dict):
@@ -171,6 +185,48 @@ def _attachment_markdown(path, mime_type: str) -> str:
         return ""
 
 
+def _analysis_defaults_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    draft = _snapshot_section(snapshot, "copy_draft", text_key="headline")
+    recognized_product = _snapshot_section(snapshot, "recognized_product", text_key="product_name")
+    suggested_styles = _snapshot_string_list(snapshot, "suggested_styles")
+    return normalize_copy_payload(
+        {
+            "product_name": recognized_product.get("product_name", ""),
+            "category": recognized_product.get("category", ""),
+            "headline": draft.get("headline", ""),
+            "hero_scene": draft.get("usage_scenes", "") or "",
+            "core_selling_points": _snapshot_string_list(draft, "selling_points"),
+            "selling_points": draft.get("selling_points", ""),
+            "usage_scenes": draft.get("usage_scenes", ""),
+            "specs": draft.get("specs", ""),
+            "product_advantages": [],
+            "style_preset_id": None,
+            "style_choice": suggested_styles[0] if suggested_styles else "",
+            "style_custom": "",
+            "key_parameters": snapshot.get("key_parameters", [])
+            if isinstance(snapshot.get("key_parameters"), list)
+            else [],
+        }
+    )
+
+
+def _apply_analysis_defaults_to_copy(
+    confirmed_copy: dict[str, Any] | None,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = normalize_copy_payload(confirmed_copy or {})
+    defaults = _analysis_defaults_from_snapshot(snapshot)
+
+    for field in ("product_name", "category", "headline", "hero_scene", "selling_points", "usage_scenes", "specs", "style_choice"):
+        if not normalized.get(field) and defaults.get(field):
+            normalized[field] = defaults[field]
+    for field in ("core_selling_points", "key_parameters", "product_advantages"):
+        if not normalized.get(field) and defaults.get(field):
+            normalized[field] = defaults[field]
+
+    return normalize_copy_payload(normalized)
+
+
 def run_analysis_job(db: Session, job_id: str) -> None:
     client = WhataiClient()
     job = _require_job(db, job_id)
@@ -204,23 +260,7 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 80, "stage": "finalizing"})
 
     session.analysis_snapshot = snapshot
-    if not session.confirmed_copy:
-        draft = _snapshot_section(snapshot, "copy_draft", text_key="headline")
-        recognized_product = _snapshot_section(snapshot, "recognized_product", text_key="product_name")
-        suggested_styles = _snapshot_string_list(snapshot, "suggested_styles")
-        session.confirmed_copy = normalize_copy_payload({
-            "product_name": recognized_product.get("product_name", ""),
-            "category": recognized_product.get("category", ""),
-            "headline": draft.get("headline", ""),
-            "selling_points": draft.get("selling_points", ""),
-            "usage_scenes": draft.get("usage_scenes", ""),
-            "specs": draft.get("specs", ""),
-            "style_choice": suggested_styles[0] if suggested_styles else "",
-            "style_custom": "",
-            "key_parameters": snapshot.get("key_parameters", [])
-            if isinstance(snapshot.get("key_parameters"), list)
-            else [],
-        })
+    session.confirmed_copy = _apply_analysis_defaults_to_copy(session.confirmed_copy, snapshot)
 
     ensure_session_transition(session.status, "analyzed")
     session.status = "analyzed"
@@ -270,15 +310,18 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
         )
 
     snapshot = client.extract_parameters(
-        confirmed_copy=session.confirmed_copy or {},
+        confirmed_copy=_resolved_copy_for_session(db, session),
         active_platform_id=session.active_platform_id,
         image_attachments=loaded_images,
         file_attachments=file_attachments,
     )
 
     session.parameter_snapshot = snapshot
+    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, snapshot, overwrite=True)
     session.latest_parameter_job_id = job.id
     session.current_step = max(session.current_step, 3)
+    session.strategy_preview = None
+    session.detail_strategy_preview = None
 
     update_job_status(
         db,
@@ -286,7 +329,16 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
         status="succeeded",
         progress=100,
         stage="done",
-        result_payload={"parameter_snapshot": snapshot},
+        result_payload={
+            "parameter_snapshot": snapshot,
+            "applied_copy_fields": {
+                "hero_scene": session.confirmed_copy.get("hero_scene", ""),
+                "core_selling_points": session.confirmed_copy.get("core_selling_points", []),
+                "key_parameters": session.confirmed_copy.get("key_parameters", []),
+                "product_advantages": session.confirmed_copy.get("product_advantages", []),
+            },
+            "overwrite_mode": "replace_all",
+        },
     )
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
 
@@ -336,6 +388,7 @@ def _prepare_assets_plan(job: JobModel, strategy_preview: dict, session: Session
         plan = build_strategy_preview(
             session.confirmed_copy or {},
             session.active_platform_id or "temu",
+            db=db,
             parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=(strategy_preview or {}).get("planner_instruction"),
             slot_preferences=(strategy_preview or {}).get("slot_preferences") or [],
@@ -368,6 +421,7 @@ def _mark_superseded_assets(
         AssetModel.version_no == version_no,
         AssetModel.asset_family == asset_family,
         AssetModel.status == "ready",
+        AssetModel.visibility_status == "visible",
     )
     if not include_all and asset_ids:
         query = query.filter(AssetModel.id.in_(list(asset_ids)))
@@ -389,6 +443,7 @@ def _version_assets(
             AssetModel.version_no == version_no,
             AssetModel.asset_family == asset_family,
             AssetModel.status == "ready",
+            AssetModel.visibility_status == "visible",
         )
         .order_by(AssetModel.display_order.asc())
         .all()
@@ -436,6 +491,10 @@ def _clone_asset_for_version(
         edit_instruction=edit_instruction,
         generation_snapshot=snapshot,
         status="ready",
+        visibility_status=source_asset.visibility_status,
+        archived_at=source_asset.archived_at,
+        archived_by=source_asset.archived_by,
+        archive_reason=source_asset.archive_reason,
     )
 
 
@@ -491,7 +550,7 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                 carry_forward_sources.append(asset)
 
         rendered_assets = _render_assets_concurrently(
-            confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+            confirmed_copy=_resolved_copy_for_session(db, session),
             strategy_preview=effective_strategy_preview,
             plan=plan,
             instruction=instruction,
@@ -619,9 +678,11 @@ def _ensure_generation_strategy_preview(db: Session, session: SessionModel, sess
     existing_preview = session.strategy_preview or {}
     prompt_overrides = _session_prompt_overrides(db, session.id)
     strategy_reference_images = _strategy_reference_images(db, session.id)
+    resolved_copy = _resolved_copy_for_session(db, session)
     rebuilt = build_strategy_preview(
-        session.confirmed_copy or {},
+        resolved_copy,
         session.active_platform_id or "temu",
+        db=db,
         session_images=session_images,
         analysis_snapshot=session.analysis_snapshot or {},
         parameter_snapshot=session.parameter_snapshot or {},
@@ -632,8 +693,9 @@ def _ensure_generation_strategy_preview(db: Session, session: SessionModel, sess
     )
     effective_strategy_preview = normalize_strategy_preview(
         existing_preview,
-        session.confirmed_copy or {},
+        resolved_copy,
         session.active_platform_id or "temu",
+        db=db,
         prompt_overrides=prompt_overrides,
         parameter_snapshot=session.parameter_snapshot or {},
     )
@@ -880,6 +942,9 @@ def _finalize_main_rendered_asset(
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
+        "style_preset_id": confirmed_copy.get("style_preset_id"),
+        "resolved_style_preset": confirmed_copy.get("resolved_style_preset"),
+        "style_custom": confirmed_copy.get("style_custom"),
         "reference_image_ids": [image.image_id for image in reference_images],
         "reference_slots": [image.slot_type for image in reference_images],
         "upstream_endpoint": render_spec["submission"].get("upstream_endpoint"),
@@ -982,6 +1047,9 @@ def _render_single_asset(
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
+        "style_preset_id": confirmed_copy.get("style_preset_id"),
+        "resolved_style_preset": confirmed_copy.get("resolved_style_preset"),
+        "style_custom": confirmed_copy.get("style_custom"),
         "reference_image_ids": [image.image_id for image in reference_images],
         "reference_slots": [image.slot_type for image in reference_images],
         "upstream_endpoint": "/v1/images/edits" if reference_images else "/v1/images/generations",
@@ -1062,7 +1130,8 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 carry_forward_sources.append(asset)
 
         rendered_panels = _render_detail_panels_concurrently(
-            confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+            db=db,
+            confirmed_copy=_resolved_copy_for_session(db, session),
             strategy_preview=effective_strategy_preview,
             plan=plan,
             instruction=payload.get("instruction"),
@@ -1362,9 +1431,11 @@ def _ensure_detail_strategy_preview(
     style_images: list[DetailStyleImageModel],
 ) -> dict:
     prompt_overrides = _session_prompt_overrides(db, session.id)
+    resolved_copy = _resolved_copy_for_session(db, session)
     effective_strategy_preview = normalize_detail_strategy_preview(
         session.detail_strategy_preview,
-        merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        resolved_copy,
+        db=db,
         product_images=session_images,
         style_images=style_images,
         analysis_snapshot=session.analysis_snapshot or {},
@@ -1372,7 +1443,8 @@ def _ensure_detail_strategy_preview(
         prompt_overrides=prompt_overrides,
     )
     rebuilt = build_detail_strategy_preview(
-        merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        resolved_copy,
+        db=db,
         product_images=session_images,
         style_images=style_images,
         analysis_snapshot=session.analysis_snapshot or {},
@@ -1392,6 +1464,7 @@ def _ensure_detail_strategy_preview(
 
 def _render_detail_panels_concurrently(
     *,
+    db: Session | None = None,
     confirmed_copy: dict[str, object],
     strategy_preview: dict[str, object],
     plan: list[dict[str, object]],
@@ -1405,6 +1478,7 @@ def _render_detail_panels_concurrently(
     settings = get_settings()
     render_specs = [
         _prepare_detail_render_spec(
+            db=db,
             confirmed_copy=confirmed_copy,
             strategy_preview=strategy_preview,
             plan_item=plan_item,
@@ -1438,6 +1512,7 @@ def _render_detail_panels_concurrently(
 
 def _prepare_detail_render_spec(
     *,
+    db: Session | None = None,
     confirmed_copy: dict[str, object],
     strategy_preview: dict[str, object],
     plan_item: dict[str, object],
@@ -1454,6 +1529,7 @@ def _prepare_detail_render_spec(
         panel_id=panel_id,
         instruction=instruction,
         panel_plan_item=plan_item,
+        db=db,
     )
     return {
         "submission_id": f"detail:{slot_id}:{display_order}",
@@ -1463,6 +1539,7 @@ def _prepare_detail_render_spec(
         "display_order": display_order,
         "aspect_ratio": aspect_ratio,
         "image_size": DETAIL_PAGE_IMAGE_SIZE,
+        "confirmed_copy": confirmed_copy,
         "plan_item": plan_item,
         "prompt_payload": prompt_payload,
         "reference_images": reference_grids,
@@ -1476,6 +1553,7 @@ def _finalize_detail_rendered_panel(
 ) -> dict[str, object]:
     plan_item = render_spec["plan_item"]
     prompt_payload = render_spec["prompt_payload"]
+    confirmed_copy = render_spec.get("confirmed_copy") or {}
     generation_snapshot = {
         "asset_family": "detail_page",
         "asset_kind": "panel",
@@ -1489,6 +1567,9 @@ def _finalize_detail_rendered_panel(
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
+        "style_preset_id": confirmed_copy.get("style_preset_id"),
+        "resolved_style_preset": confirmed_copy.get("resolved_style_preset"),
+        "style_custom": confirmed_copy.get("style_custom"),
         "product_reference_image_ids": [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)],
         "style_reference_image_ids": [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)],
         "reference_grid_ids": [grid.image_id for grid in render_spec["reference_images"]],
@@ -1516,6 +1597,7 @@ def _finalize_detail_rendered_panel(
 
 def _render_single_detail_panel(
     *,
+    db: Session | None = None,
     confirmed_copy: dict[str, object],
     strategy_preview: dict[str, object],
     plan_item: dict[str, object],
@@ -1533,6 +1615,7 @@ def _render_single_detail_panel(
         panel_id=panel_id,
         instruction=instruction,
         panel_plan_item=plan_item,
+        db=db,
     )
     client = WhataiClient()
     started_at = time.perf_counter()
@@ -1558,6 +1641,9 @@ def _render_single_detail_panel(
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
+        "style_preset_id": confirmed_copy.get("style_preset_id"),
+        "resolved_style_preset": confirmed_copy.get("resolved_style_preset"),
+        "style_custom": confirmed_copy.get("style_custom"),
         "product_reference_image_ids": [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)],
         "style_reference_image_ids": [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)],
         "reference_grid_ids": [grid.image_id for grid in reference_grids],

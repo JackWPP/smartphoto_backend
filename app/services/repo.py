@@ -93,6 +93,12 @@ def get_prompt_preset_or_404(db: Session, preset_id: str) -> PromptPresetModel:
     return preset
 
 
+def get_prompt_preset_or_none(db: Session, preset_id: str | None) -> PromptPresetModel | None:
+    if not preset_id:
+        return None
+    return db.query(PromptPresetModel).filter(PromptPresetModel.id == preset_id).one_or_none()
+
+
 def get_latest_job_by_type(db: Session, session_id: str, job_type: str) -> JobModel | None:
     return (
         db.query(JobModel)

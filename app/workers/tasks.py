@@ -1,7 +1,7 @@
 from celery import shared_task
 
 from app.core.errors import AppError
-from app.db.session import SessionLocal
+from app.db import session as db_session
 from app.services.jobs import append_job_event, update_job_status
 from app.services.pipeline import (
     run_analysis_job,
@@ -52,7 +52,7 @@ def _mark_job_failed(db, job, error_code: str, error_message: str) -> None:
 
 @shared_task(bind=True, name="app.workers.tasks.execute_job", max_retries=3)
 def execute_job(self, job_id: str) -> None:
-    db = SessionLocal()
+    db = db_session.SessionLocal()
     job = None
     try:
         from app.models.job import JobModel

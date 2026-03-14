@@ -67,6 +67,7 @@ def regenerate_asset(
             session.strategy_preview,
             session.confirmed_copy or {},
             session.active_platform_id or asset.platform_id,
+            db=db,
             prompt_overrides=[
                 serialize_session_override(override)
                 for override in list_session_prompt_overrides(db, session.id, asset_family="main_gallery")
@@ -108,6 +109,7 @@ def regenerate_asset(
         detail_preview = normalize_detail_strategy_preview(
             session.detail_strategy_preview,
             merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+            db=db,
             product_images=list_active_session_images(db, session.id),
             style_images=list_active_detail_style_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},

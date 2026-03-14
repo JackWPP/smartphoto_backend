@@ -1,4 +1,6 @@
-from sqlalchemy import ForeignKey, Integer, String, Uuid
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -36,3 +38,7 @@ class AssetModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     generation_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     status: Mapped[str] = mapped_column(String(32), default="ready", index=True)
+    visibility_status: Mapped[str] = mapped_column(String(32), default="visible", index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    archive_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)

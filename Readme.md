@@ -13,6 +13,7 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 - **多资产族（Family）隔离**：支持`主图库(main_gallery)`和`详情页(detail_page)`的独立闭环生成及管理。
 - **批量异步提速链路**：主图和详情页都采用“批量提交上游任务 -> 集中轮询 -> 并发下载”的执行方式，默认拆分 `q.generation.main` / `q.generation.detail` 两个队列。
 - **Step 3 参数附件链路**：支持说明书/参数图/PDF 上传、鲁棒参数提取和策略参考图补充输入。
+- **独立后台管理能力**：支持 `/api/admin/v1` 管理接口、SQLite 管理员账号库、审计日志、资产归档、模板与规则包后台化。
 
 ## 架构选型
 
@@ -89,3 +90,17 @@ alembic upgrade head
 - 🛠 [项目运行、本地报错诊断与常见运维排障手册](./docs/运行与排障手册.md)
 - 📦 [开发规范约束与贡献者约定](./AGENTS.md)
 - 💾 `OpenAPI` JSON 规范定义可以直接在根目录脚本 `scripts/export_openapi.py` 导出。
+
+## 后台管理
+
+- 后台 API：`/api/admin/v1`
+- 初始化管理员账号：
+```bash
+./.venv/bin/python scripts/create_admin_user.py --username admin --password secret123 --display-name 管理员
+```
+- 启动后台前端：
+```bash
+cd adminfront
+npm install
+npm run dev
+```
