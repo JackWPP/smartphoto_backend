@@ -104,3 +104,45 @@ class AdminRulePackUpdateRequest(BaseModel):
     platform_id: str | None = None
     config_snapshot: dict[str, Any] | None = None
     is_active: bool | None = None
+
+
+class AdminUserListItem(BaseModel):
+    user_id: str
+    email: str
+    display_name: str
+    status: str
+    wallet_balance: int
+    session_count: int
+    created_at: str | None = None
+    last_login_at: str | None = None
+
+
+class AdminUserListData(BaseModel):
+    items: list[AdminUserListItem]
+    total: int
+
+
+class AdminUserDetailData(BaseModel):
+    user: dict[str, Any]
+    wallet: dict[str, Any]
+    recent_orders: list[dict[str, Any]]
+    recent_transactions: list[dict[str, Any]]
+    stats: dict[str, Any]
+
+
+class AdminCreateOrderRequest(BaseModel):
+    plan_name: str
+    amount: int = 0
+    currency: str = "CNY"
+    credits_delta: int
+    source: str = "manual_grant"
+    status: str = "paid"
+    note: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminWalletAdjustRequest(BaseModel):
+    credits_delta: int
+    note: str | None = None
+    source: str = "manual_adjust"
+    payload: dict[str, Any] = Field(default_factory=dict)

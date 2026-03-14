@@ -21,6 +21,7 @@ ERRORS = {
     "session_not_found": ErrorDef(40401, "session_not_found"),
     "job_not_found": ErrorDef(40402, "job_not_found"),
     "asset_not_found": ErrorDef(40403, "asset_not_found"),
+    "user_not_found": ErrorDef(40404, "user_not_found"),
     "job_already_running": ErrorDef(40901, "job_already_running"),
     "duplicate_idempotency_key": ErrorDef(40902, "duplicate_idempotency_key"),
     "copy_validation_failed": ErrorDef(42201, "copy_validation_failed"),

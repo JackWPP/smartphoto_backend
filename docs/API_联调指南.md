@@ -555,7 +555,40 @@ data: {"event":"job_succeeded","job_id":"..."}
   - Job 轮询兜底（SSE 中断或网络抖动）
   - Prompt Debug 面板单独调 `POST /sessions/{id}/prompts/preview`，避免结果接口变重
 
-### 3.4 后台管理接口
+### 3.4 前台用户鉴权与账户中心
+- 鉴权前缀：`/api/v2/auth`
+- 登录注册接口：
+  - `POST /auth/register`
+  - `POST /auth/login`
+  - `POST /auth/refresh`
+  - `POST /auth/logout`
+  - `GET /auth/me`
+- 鉴权规则：
+  - 业务接口默认走 `Authorization: Bearer <access_token>`
+  - 刷新令牌使用 `HttpOnly` Cookie：`user_refresh_token`
+  - `dev` 环境默认允许 `ALLOW_DEV_AUTH_BYPASS=true`，未带 token 时回落到固定开发用户；联调前建议关闭
+  - `/platforms`、`/healthz`、`/openapi.json` 保持公开，其余 `/api/v2` 默认要求登录或 dev bypass
+- 账户中心接口：
+  - `GET /account/overview`
+  - `GET|PUT /account/profile`
+  - `GET /account/assets`
+  - `GET /account/notifications`
+  - `POST /account/notifications/{id}/read`
+  - `POST /account/notifications/read-all`
+  - `POST /account/security/change-password`
+  - `GET|PUT /account/settings`
+  - `GET /account/purchases`
+  - `GET /account/wallet`
+  - `GET /account/wallet/transactions`
+- 资产历史接口说明：
+  - 返回按 `session` 聚合的卡片，不按单 asset 平铺
+  - 支持筛选参数：`q` `platform_id` `image_type` `style_tag` `brand_name` `page` `page_size`
+  - `image_type` 当前支持：`original` `main` `detail` `white_bg`
+- 安全收口说明：
+  - `GET /jobs/{job_id}` 与 `GET /jobs/{job_id}/events` 已按当前登录用户做归属校验
+  - `prompt-presets` 当前只返回“系统模板 + 当前用户模板”；系统模板对用户侧只读
+
+### 3.5 后台管理接口
 - 管理前缀：`/api/admin/v1`
 - 后台登录接口：
   - `POST /auth/login`
@@ -572,20 +605,20 @@ data: {"event":"job_succeeded","job_id":"..."}
   - `GET|POST|PUT /prompt-presets` / `POST /prompt-presets/{id}/archive|clone`
   - `GET|POST|PUT /rule-packs` / `GET /rule-packs/{id}` / `POST /rule-packs/{id}/publish|clone|archive`
   - `GET /audit-logs`
+  - `GET /users` / `GET /users/{id}` / `POST /users/{id}/orders` / `POST /users/{id}/wallet/adjust`
 - 资产归档语义：
   - 用户侧 `/api/v2/sessions/{id}/results|download` 默认隐藏 `visibility_status=archived` 资产
   - 后台侧可按 `visibility_status` 查看全部资产
 
 ## 4. 实现 vs SPEC 差距清单（集中维护）
-1. 业务前台鉴权接口（`/api/v2/auth/register` `/api/v2/auth/login` `/api/v2/auth/me`）未实现，当前用户侧仍固定测试用户；后台管理已实现独立 `/api/admin/v1/auth/*`。
-2. `build_strategy` 当前为同步执行，不走 Worker 队列。
-3. `regenerate_copy` 仍返回占位重写结果，尚未解析上游真实输出。
-4. `global_edit` 的 `scope=selected` 参数已接收，但执行时仍按整组处理。
-5. 当前已实现“风格参考图单独上传 + 详情页独立首次生成 + 动态 panel_type 推荐/覆盖”，但未实现详情页 `global_edit`、单 panel 重生成、ComfyUI 节点级调试信息。
-6. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
-7. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
-8. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
-9. `adminfront/` 已提供最小可用后台，更偏运营/排障工作台，不是完整设计系统化的正式 B 端产品。
+1. `build_strategy` 当前为同步执行，不走 Worker 队列。
+2. `regenerate_copy` 仍返回占位重写结果，尚未解析上游真实输出。
+3. `global_edit` 的 `scope=selected` 参数已接收，但执行时仍按整组处理。
+4. 当前已实现“风格参考图单独上传 + 详情页独立首次生成 + 动态 panel_type 推荐/覆盖”，但未实现详情页 `global_edit`、单 panel 重生成、ComfyUI 节点级调试信息。
+5. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
+6. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
+7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
+8. `adminfront/` 已提供最小可用后台，更偏运营/排障工作台，不是完整设计系统化的正式 B 端产品。
 
 ## 5. 联调最短路径
 1. `POST /sessions`

@@ -10,6 +10,7 @@ from app.services.pipeline import (
     run_generate_family_job,
     run_regenerate_copy_job,
 )
+from app.services.user_accounts import create_job_completion_notification
 
 RETRYABLE_UPSTREAM_KEYS = {"upstream_llm_error"}
 
@@ -48,6 +49,22 @@ def _mark_job_failed(db, job, error_code: str, error_message: str) -> None:
         error_message=error_message,
     )
     append_job_event(db, job.id, "job_failed", {"event": "job_failed", "error": error_message})
+    if job.job_type in {
+        "generate_gallery",
+        "regenerate_gallery",
+        "global_edit",
+        "regenerate_asset",
+        "generate_detail_page",
+        "regenerate_detail_panel",
+    }:
+        create_job_completion_notification(
+            db,
+            user_id=job.user_id,
+            session_id=job.session_id,
+            job_type=job.job_type,
+            succeeded=False,
+            error_message=error_message,
+        )
 
 
 @shared_task(bind=True, name="app.workers.tasks.execute_job", max_retries=3)

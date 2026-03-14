@@ -1,6 +1,9 @@
 from functools import lru_cache
+import importlib.util
 import json
 from pathlib import Path
+import sys
+import warnings
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,6 +26,14 @@ class Settings(BaseSettings):
 
     test_user_id: str = "00000000-0000-0000-0000-000000000001"
     tasks_eager: bool = False
+    allow_dev_auth_bypass: bool = True
+    user_jwt_secret: str = "smartphoto-user-dev-secret"
+    user_access_token_exp_minutes: int = Field(default=120, ge=5, le=1440)
+    user_refresh_token_exp_days: int = Field(default=14, ge=1, le=180)
+    auth_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
+    auth_rate_limit_login_max: int = Field(default=10, ge=1, le=200)
+    auth_rate_limit_register_max: int = Field(default=5, ge=1, le=200)
+    auth_rate_limit_refresh_max: int = Field(default=20, ge=1, le=200)
     admin_jwt_secret: str = "smartphoto-admin-dev-secret"
     admin_access_token_exp_minutes: int = Field(default=120, ge=5, le=1440)
     admin_refresh_token_exp_days: int = Field(default=14, ge=1, le=180)
@@ -58,8 +69,58 @@ class Settings(BaseSettings):
         return normalized or [{"interval_seconds": 5, "attempts": 6}, {"interval_seconds": 10, "attempts": 12}, {"interval_seconds": 15, "attempts": 20}]
 
 
+def _module_exists(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+
+def ensure_project_venv_site_packages() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    py_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    candidates = [
+        project_root / ".venv" / "lib" / py_version / "site-packages",
+        project_root / ".venv" / "Lib" / "site-packages",
+    ]
+    for candidate in candidates:
+        candidate_str = str(candidate)
+        if candidate.exists() and candidate_str not in sys.path:
+            sys.path.append(candidate_str)
+
+
+def resolve_database_url(url: str) -> str:
+    normalized = (url or "").strip()
+    if not normalized:
+        return normalized
+
+    if normalized.startswith("postgresql://"):
+        if _module_exists("psycopg"):
+            return normalized.replace("postgresql://", "postgresql+psycopg://", 1)
+        if _module_exists("psycopg2"):
+            return normalized.replace("postgresql://", "postgresql+psycopg2://", 1)
+        return normalized
+
+    if normalized.startswith("postgresql+psycopg://") and not _module_exists("psycopg") and _module_exists("psycopg2"):
+        warnings.warn(
+            "Detected PostgreSQL URL with psycopg driver but only psycopg2 is installed; switching driver automatically.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return normalized.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
+
+    if normalized.startswith("postgresql+psycopg2://") and not _module_exists("psycopg2") and _module_exists("psycopg"):
+        warnings.warn(
+            "Detected PostgreSQL URL with psycopg2 driver but only psycopg is installed; switching driver automatically.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return normalized.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+
+    return normalized
+
+
 @lru_cache
 def get_settings() -> Settings:
+    ensure_project_venv_site_packages()
     settings = Settings()
     settings.storage_root.mkdir(parents=True, exist_ok=True)
+    settings.database_url = resolve_database_url(settings.database_url)
     return settings

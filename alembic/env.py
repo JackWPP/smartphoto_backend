@@ -3,13 +3,34 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.core.config import get_settings
+from app.core.config import get_settings, resolve_database_url
 from app.db.base import Base
-from app.models import asset, idempotency, job, job_event, session, session_image  # noqa: F401
+from app.models import (  # noqa: F401
+    asset,
+    credit_transaction,
+    credit_wallet,
+    detail_style_image,
+    idempotency,
+    job,
+    job_event,
+    parameter_attachment,
+    prompt_preset,
+    purchase_order,
+    rule_pack,
+    rule_pack_version,
+    session,
+    session_image,
+    session_prompt_override,
+    strategy_reference_image,
+    user,
+    user_notification,
+    user_refresh_token,
+    user_setting,
+)
 
 config = context.config
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option("sqlalchemy.url", resolve_database_url(settings.database_url))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

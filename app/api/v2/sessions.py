@@ -88,8 +88,9 @@ from app.services.prompt_repo import list_prompt_presets
 from app.services.repo import (
     get_prompt_preset_or_404,
     get_prompt_preset_or_none,
-    get_job_or_404,
+    get_job_for_user_or_404,
     get_session_or_404,
+    list_visible_prompt_presets_by_ids,
     list_active_detail_style_images,
     list_active_parameter_attachments,
     list_active_session_images,
@@ -100,6 +101,7 @@ from app.services.state_machine import ensure_session_transition
 from app.services.storage import LocalStorageAdapter
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
+from app.services.user_accounts import refresh_session_search_cache
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -121,7 +123,7 @@ def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
         _resolved_copy_for_session(session, db),
         session.active_platform_id,
         db=db,
-        prompt_overrides=_serialized_session_overrides(db, session.id),
+        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
         parameter_snapshot=session.parameter_snapshot or {},
     )
 
@@ -140,7 +142,7 @@ def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> di
         style_images=list_active_detail_style_images(db, session.id),
         analysis_snapshot=session.analysis_snapshot or {},
         active_platform_id=session.active_platform_id,
-        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
     )
 
 
@@ -212,12 +214,12 @@ def _version_summaries(db: Session, session_id: str, *, asset_family: str) -> li
     return summaries
 
 
-def _serialized_session_overrides(db: Session, session_id: str, *, asset_family: str = "main_gallery") -> list[dict]:
+def _serialized_session_overrides(db: Session, session_id: str, *, asset_family: str = "main_gallery", user_id: str | None = None) -> list[dict]:
     overrides = list_session_prompt_overrides(db, session_id, asset_family=asset_family)
     preset_ids = [override.applied_preset_id for override in overrides if override.applied_preset_id]
     presets_by_id: dict[str, PromptPresetModel] = {}
     if preset_ids:
-        presets = db.query(PromptPresetModel).filter(PromptPresetModel.id.in_(preset_ids)).all()
+        presets = list_visible_prompt_presets_by_ids(db, preset_ids, user_id=user_id)
         presets_by_id = {preset.id: preset for preset in presets}
     return [
         serialize_session_override(
@@ -247,7 +249,7 @@ def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
     copy_data = normalize_copy_payload(session.confirmed_copy)
     if session.parameter_snapshot:
         copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
-    preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"))
+    preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"), session.user_id)
     if preset is not None:
         copy_data["style_preset_id"] = preset.id
         copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
@@ -1007,6 +1009,7 @@ def put_parameters(
     session = get_session_or_404(db, session_id, str(user_id))
     session.parameter_snapshot = payload or {}
     session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
+    refresh_session_search_cache(session)
     session.strategy_preview = None
     session.detail_strategy_preview = None
     db.commit()
@@ -1088,13 +1091,14 @@ def put_copy_form(
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
     payload = normalize_copy_payload(req.model_dump())
-    preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"))
+    preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"), str(user_id))
     if payload.get("style_preset_id") and preset is None:
         raise AppError("invalid_request", "style preset not found", 404)
     payload["resolved_style_preset"] = serialize_prompt_preset(preset) if preset is not None else None
     if preset is not None and not payload.get("style_choice"):
         payload["style_choice"] = preset.name
     session.confirmed_copy = normalize_copy_payload(payload)
+    refresh_session_search_cache(session)
     session.strategy_preview = None
     session.detail_strategy_preview = None
     if session.status in {"platform_selected", "copy_ready", "analyzed"}:
@@ -1168,7 +1172,7 @@ def get_copy_regenerate_result(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    job = get_job_or_404(db, job_id)
+    job = get_job_for_user_or_404(db, job_id, str(user_id))
     if job.session_id != session.id or job.job_type != "regenerate_copy":
         raise AppError("job_not_found", http_status=404)
 
@@ -1226,7 +1230,7 @@ def build_strategy(
         parameter_snapshot=session.parameter_snapshot or {},
         planner_instruction=payload.get("planner_instruction"),
         slot_preferences=payload.get("slot_preferences") or [],
-        prompt_overrides=_serialized_session_overrides(db, session.id),
+        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
         strategy_reference_images=list_active_strategy_reference_images(db, session.id),
     )
     session.strategy_preview = preview
@@ -1282,7 +1286,7 @@ def build_detail_strategy(
         planner_instruction=payload.get("planner_instruction"),
         panel_preferences=payload.get("panel_preferences") or [],
         active_platform_id=session.active_platform_id,
-        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
     )
     session.detail_strategy_preview = preview
     db.commit()
@@ -1302,7 +1306,7 @@ def get_strategy_overrides(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id)})
+    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id, user_id=session.user_id)})
 
 
 @router.put(
@@ -1342,7 +1346,7 @@ def put_strategy_overrides(
             )
             db.add(record)
         if override.applied_preset_id:
-            get_prompt_preset_or_404(db, override.applied_preset_id)
+            get_prompt_preset_or_404(db, override.applied_preset_id, session.user_id)
         record.copy_blocks_override = override.copy_blocks_override or {}
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
@@ -1364,13 +1368,13 @@ def put_strategy_overrides(
             parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=(session.strategy_preview or {}).get("planner_instruction"),
             slot_preferences=(session.strategy_preview or {}).get("slot_preferences") or [],
-            prompt_overrides=_serialized_session_overrides(db, session.id),
+            prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
         )
         session.strategy_preview = preview
 
     db.commit()
-    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id)})
+    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id, user_id=session.user_id)})
 
 
 @router.get(
@@ -1389,7 +1393,7 @@ def get_detail_strategy_overrides(
     return success_response(
         {
             "session_id": session.id,
-            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page"),
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
         }
     )
 
@@ -1431,7 +1435,7 @@ def put_detail_strategy_overrides(
             )
             db.add(record)
         if override.applied_preset_id:
-            get_prompt_preset_or_404(db, override.applied_preset_id)
+            get_prompt_preset_or_404(db, override.applied_preset_id, session.user_id)
         record.copy_blocks_override = override.copy_blocks_override or {}
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
@@ -1453,7 +1457,7 @@ def put_detail_strategy_overrides(
             planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
             panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
             active_platform_id=session.active_platform_id,
-            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
         )
         session.detail_strategy_preview = preview
 
@@ -1461,7 +1465,7 @@ def put_detail_strategy_overrides(
     return success_response(
         {
             "session_id": session.id,
-            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page"),
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
         }
     )
 
@@ -1493,7 +1497,7 @@ def preview_prompts(
             parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=strategy_preview.get("planner_instruction"),
             slot_preferences=strategy_preview.get("slot_preferences") or [],
-            prompt_overrides=_serialized_session_overrides(db, session.id),
+            prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
         )
     prompts = build_prompt_previews(

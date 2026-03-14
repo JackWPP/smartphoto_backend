@@ -13,6 +13,7 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 - **多资产族（Family）隔离**：支持`主图库(main_gallery)`和`详情页(detail_page)`的独立闭环生成及管理。
 - **批量异步提速链路**：主图和详情页都采用“批量提交上游任务 -> 集中轮询 -> 并发下载”的执行方式，默认拆分 `q.generation.main` / `q.generation.detail` 两个队列。
 - **Step 3 参数附件链路**：支持说明书/参数图/PDF 上传、鲁棒参数提取和策略参考图补充输入。
+- **前台用户与账户中心能力**：支持邮箱密码登录、`/api/v2/account` 账户概览、资产历史、站内通知、密码修改、设置、购买记录与额度台账。
 - **独立后台管理能力**：支持 `/api/admin/v1` 管理接口、SQLite 管理员账号库、审计日志、资产归档、模板与规则包后台化。
 
 ## 架构选型
@@ -32,7 +33,7 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 | **详情页生成闭环** | ✅ 已实现 | 独立的样式参考、14 类 panel_type 推荐/覆盖、8 panel 生成与全图无缝拼接下载 |
 | **重生成修图能力** | ✅ 已实现 | 整组重新生成(`regenerate_gallery`) / 局部单图重生成(`regenerate_asset`) / 批量属性修改(`global_edit`) |
 | **并发与防重幂等** | ✅ 已实现 | 基于 DB/Redis 的锁及 `Idempotency-Key` 校验机制 |
-| **认证与权限 (Auth)** | 🚧 延后至 P1 | 当前采用固定的开发测试上下文，降低开发接入成本 |
+| **认证与权限 (Auth)** | ✅ 已实现 | 支持 `/api/v2/auth/*`、Bearer + Refresh Cookie、dev bypass、本用户资源归属校验 |
 | **合规与风控校验** | ❌ 未实现 | 当前版本中属于平台非核心诉求，主动剥离不实现 |
 
 ---
@@ -60,13 +61,22 @@ cp .env.example .env
 # [必须修改] 配置真实的 API KEY，例如: 
 # WHATAI_API_KEY=sk-xxxxxx
 # WHATAI_API_BASE=https://api.whatai.cc
+# [可选] 用户鉴权相关：
+# USER_JWT_SECRET=change-me
+# ALLOW_DEV_AUTH_BYPASS=true
 ```
 
 ### 4. 数据库自动化迁移
 初始化数据库元数据与建表。
 ```bash
-alembic upgrade head
+cd /home/wppjkw/smartphoto_backend
+./.venv/bin/alembic upgrade head
 ```
+
+说明：
+- 请在项目根目录执行迁移，不要在 `adminfront/` 目录执行 `alembic upgrade head`
+- 若 shell 当前激活的是其他项目的虚拟环境，优先显式使用 `./.venv/bin/alembic`
+- 当前 Alembic 会优先补入本项目 `.venv` 的 site-packages，并自动在 `psycopg` / `psycopg2` 驱动名之间做兼容归一化
 
 ### 5. 启动服务 (API + Celery Worker)
 通过单独的终端分别启动。`dev-*` 脚本启动前均内置了自动迁移检查避免缺列。
@@ -104,3 +114,16 @@ cd adminfront
 npm install
 npm run dev
 ```
+
+## 调试前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+说明：
+- 调试前端已适配 `/api/v2/auth`，首次进入会先尝试 refresh-cookie 恢复登录
+- 登录后会显示账户概览、最近资产、最近通知，并继续复用原有 6 步调试流程
+- Job 事件流与 ZIP 下载已改为带鉴权请求，不再依赖匿名访问
