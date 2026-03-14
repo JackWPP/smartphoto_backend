@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.services.copy_normalization import normalize_copy_text, normalize_key_parameters
+from app.services.copy_normalization import normalize_copy_text, normalize_key_parameters, normalize_string_list
 
 
 class CreateSessionData(BaseModel):
@@ -161,28 +161,44 @@ class PlatformSelectionData(BaseModel):
 class CopyFormSchema(BaseModel):
     product_name: str = Field(description="产品名称。")
     category: str = Field(description="品类。")
-    headline: str = Field(description="主标题。")
-    selling_points: str = Field(description="卖点文案。多行文本。")
-    usage_scenes: str = Field(description="使用场景文案。多行或单行文本。")
-    specs: str = Field(description="规格参数文案。多行或单行文本。")
-    style_choice: str = Field(description="风格选择。")
+    hero_scene: str = Field(default="", description="主图首图场景。")
+    core_selling_points: list[str] = Field(default_factory=list, description="核心卖点列表。")
+    product_advantages: list[str] = Field(default_factory=list, description="产品优势列表。")
+    style_preset_id: str | None = Field(default=None, description="风格预设 ID。")
     style_custom: str = Field(default="", description="自定义风格补充。")
+    style_choice: str = Field(default="", description="旧版风格选择字段，仅兼容读取与 legacy 写入。")
     key_parameters: list[dict[str, Any]] = Field(default_factory=list, description="结构化关键参数列表。")
+    headline: str = Field(default="", description="旧版主标题字段，仅兼容 legacy 写入。")
+    selling_points: str = Field(default="", description="旧版卖点文案字段，仅兼容 legacy 写入。")
+    usage_scenes: str = Field(default="", description="旧版使用场景字段，仅兼容 legacy 写入。")
+    specs: str = Field(default="", description="旧版规格参数字段，仅兼容 legacy 写入。")
 
     @field_validator(
         "product_name",
         "category",
+        "hero_scene",
+        "style_custom",
+        "style_choice",
         "headline",
         "selling_points",
         "usage_scenes",
         "specs",
-        "style_choice",
-        "style_custom",
         mode="before",
     )
     @classmethod
     def _normalize_text_fields(cls, value: Any) -> str:
         return normalize_copy_text(value)
+
+    @field_validator("style_preset_id", mode="before")
+    @classmethod
+    def _normalize_style_preset_id(cls, value: Any) -> str | None:
+        text = normalize_copy_text(value)
+        return text or None
+
+    @field_validator("core_selling_points", "product_advantages", mode="before")
+    @classmethod
+    def _normalize_string_lists(cls, value: Any) -> list[str]:
+        return normalize_string_list(value)
 
     @field_validator("key_parameters", mode="before")
     @classmethod
@@ -190,8 +206,16 @@ class CopyFormSchema(BaseModel):
         return normalize_key_parameters(value)
 
 
-class CopyData(CopyFormSchema):
-    pass
+class CopyData(BaseModel):
+    product_name: str = Field(description="产品名称。")
+    category: str = Field(description="品类。")
+    hero_scene: str = Field(description="主图首图场景。")
+    core_selling_points: list[str] = Field(description="核心卖点列表。")
+    key_parameters: list[dict[str, Any]] = Field(description="结构化关键参数列表。")
+    product_advantages: list[str] = Field(description="产品优势列表。")
+    style_preset_id: str | None = Field(default=None, description="风格预设 ID。")
+    style_custom: str = Field(description="自定义风格补充。")
+    style_choice: str = Field(default="", description="旧版风格选择字段，仅兼容读取。")
 
 
 class CopySaveData(BaseModel):
@@ -321,6 +345,12 @@ class PromptPreviewLatestAsset(BaseModel):
 class PromptPreviewData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     active_platform_id: str | None = Field(default=None, description="当前生效平台。")
+    hero_scene: str = Field(default="", description="当前策略使用的首图场景。")
+    core_selling_points: list[str] = Field(default_factory=list, description="当前策略使用的核心卖点列表。")
+    key_parameters: list[dict[str, Any]] = Field(default_factory=list, description="当前策略使用的核心参数列表。")
+    product_advantages: list[str] = Field(default_factory=list, description="当前策略使用的产品优势列表。")
+    style_preset_id: str | None = Field(default=None, description="当前策略使用的风格预设 ID。")
+    style_custom: str = Field(default="", description="当前策略使用的自定义风格补充。")
     model: str = Field(description="当前图片模型名称。")
     image_size: str = Field(description="当前预览默认输出尺寸。")
     reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用参考图清单。")
@@ -372,6 +402,12 @@ class DetailPromptPreviewData(BaseModel):
     use_case: str = Field(description="固定为 amazon_detail。")
     aspect_ratio: str = Field(description="固定为 21:9。")
     panel_count: int = Field(description="固定为 8。")
+    hero_scene: str = Field(default="", description="当前策略使用的首图场景。")
+    core_selling_points: list[str] = Field(default_factory=list, description="当前策略使用的核心卖点列表。")
+    key_parameters: list[dict[str, Any]] = Field(default_factory=list, description="当前策略使用的核心参数列表。")
+    product_advantages: list[str] = Field(default_factory=list, description="当前策略使用的产品优势列表。")
+    style_preset_id: str | None = Field(default=None, description="当前策略使用的风格预设 ID。")
+    style_custom: str = Field(default="", description="当前策略使用的自定义风格补充。")
     model: str = Field(description="当前图片模型名称。")
     image_size: str = Field(description="当前详情页预览输出尺寸。")
     product_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用商品参考图清单。")
@@ -393,11 +429,41 @@ class ParameterExtractionJobData(BaseModel):
     job_type: str = Field(description="任务类型。", examples=["extract_parameters"])
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
+    overwrite_mode: str = Field(default="replace_all", description="本次提取写回策略。")
+    applied_copy_fields: list[str] = Field(default_factory=list, description="本次提取会覆盖写入的 copy 正式字段。")
 
 
 class ParameterSnapshotData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     parameter_snapshot: dict[str, Any] = Field(description="参数提取结果快照。")
+    applied_copy_fields: dict[str, Any] = Field(default_factory=dict, description="当前参数结果映射到 copy 的正式字段。")
+    overwrite_mode: str = Field(default="replace_all", description="参数结果映射到 copy 的默认策略。")
+
+
+class ParameterSnapshotUpdateRequest(BaseModel):
+    relevance_status: str = Field(default="invalid", description="参数附件与当前商品的相关性状态。")
+    rejection_reason: str = Field(default="", description="当相关性无效时的解释说明。")
+    hero_scene: str = Field(default="", description="提取出的首图场景。")
+    core_selling_points: list[str] = Field(default_factory=list, description="提取出的核心卖点列表。")
+    key_parameters: list[dict[str, Any]] = Field(default_factory=list, description="提取出的结构化关键参数。")
+    product_advantages: list[str] = Field(default_factory=list, description="提取出的产品优势列表。")
+    feature_highlights: list[str] = Field(default_factory=list, description="提取出的附加亮点列表。")
+    source_summary: list[dict[str, Any]] = Field(default_factory=list, description="提取来源摘要。")
+
+    @field_validator("hero_scene", "rejection_reason", mode="before")
+    @classmethod
+    def _normalize_texts(cls, value: Any) -> str:
+        return normalize_copy_text(value)
+
+    @field_validator("core_selling_points", "product_advantages", "feature_highlights", mode="before")
+    @classmethod
+    def _normalize_lists(cls, value: Any) -> list[str]:
+        return normalize_string_list(value)
+
+    @field_validator("key_parameters", mode="before")
+    @classmethod
+    def _normalize_key_parameters(cls, value: Any) -> list[dict[str, Any]]:
+        return normalize_key_parameters(value)
 
 
 class GenerationJobData(BaseModel):

@@ -36,6 +36,7 @@ def compose_prompt(
 
     style = _fallback_text(
         strategy_preview.get("style_summary")
+        or ((confirmed_copy.get("resolved_style_preset") or {}).get("style_summary") if isinstance(confirmed_copy.get("resolved_style_preset"), dict) else "")
         or confirmed_copy.get("style_custom")
         or confirmed_copy.get("style_choice"),
         "简洁高级的电商摄影风格",
@@ -309,6 +310,10 @@ def _collect_strategy_fields_used(
     field_map = {
         "confirmed_copy.product_name": confirmed_copy.get("product_name"),
         "confirmed_copy.headline": confirmed_copy.get("headline"),
+        "confirmed_copy.hero_scene": confirmed_copy.get("hero_scene"),
+        "confirmed_copy.core_selling_points": confirmed_copy.get("core_selling_points"),
+        "confirmed_copy.product_advantages": confirmed_copy.get("product_advantages"),
+        "confirmed_copy.style_preset_id": confirmed_copy.get("style_preset_id"),
         "confirmed_copy.selling_points": confirmed_copy.get("selling_points"),
         "confirmed_copy.usage_scenes": confirmed_copy.get("usage_scenes"),
         "confirmed_copy.specs": confirmed_copy.get("specs"),

@@ -5,6 +5,7 @@ from pathlib import Path
 from PIL import Image
 
 from app.core.errors import AppError
+from app.services.copy_normalization import normalize_key_parameters
 from app.services.reference_images import LoadedReferenceImage, select_reference_images_for_role
 from app.services.strategy import build_strategy_preview
 from app.services.upstream import WhataiClient
@@ -514,6 +515,34 @@ def test_merge_analysis_result_normalizes_scalar_sections():
     assert merged["missing_views"] == ["side", "detail"]
     assert merged["suggested_styles"] == ["现代简约", "清爽明亮"]
     assert merged["key_parameters"][0]["label"] == "300ml"
+
+
+def test_normalize_key_parameters_splits_label_value_and_unit():
+    normalized = normalize_key_parameters(
+        [
+            {
+                "label": "外观形态：圆柱塔式设计",
+                "value": "外观形态：圆柱塔式设计",
+                "unit": "",
+            },
+            "额定功率：35W",
+            {
+                "label": "适用面积",
+                "value": "30㎡",
+                "unit": "",
+            },
+        ]
+    )
+
+    assert normalized[0]["label"] == "外观形态"
+    assert normalized[0]["value"] == "圆柱塔式设计"
+    assert normalized[0]["unit"] == ""
+    assert normalized[1]["label"] == "额定功率"
+    assert normalized[1]["value"] == "35"
+    assert normalized[1]["unit"] == "W"
+    assert normalized[2]["label"] == "适用面积"
+    assert normalized[2]["value"] == "30"
+    assert normalized[2]["unit"] == "㎡"
 
 
 def _image_bytes(image: Image.Image) -> bytes:

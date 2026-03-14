@@ -4,6 +4,8 @@ import hashlib
 import json
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 from app.models.session_image import SessionImageModel
 from app.services.copy_normalization import normalize_copy_payload
 from app.services.main_gallery_rules import (
@@ -33,6 +35,7 @@ def build_strategy_preview(
     confirmed_copy: dict,
     active_platform_id: str,
     *,
+    db: Session | None = None,
     session_images: list[SessionImageModel] | None = None,
     analysis_snapshot: dict[str, Any] | None = None,
     parameter_snapshot: dict[str, Any] | None = None,
@@ -51,7 +54,7 @@ def build_strategy_preview(
     loaded_strategy_reference_images = load_reference_images(strategy_reference_images or []) if strategy_reference_images else []
     reference_manifest = build_reference_manifest(loaded_reference_images)
     strategy_reference_manifest = build_reference_manifest(loaded_strategy_reference_images)
-    resolved_slot_preferences = resolve_slot_preferences(active_platform_id, slot_preferences)
+    resolved_slot_preferences = resolve_slot_preferences(active_platform_id, slot_preferences, db=db)
     resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
     asset_plan = _build_asset_plan(
         active_platform_id=active_platform_id,
@@ -61,6 +64,7 @@ def build_strategy_preview(
         planner_instruction=planner_instruction,
         slot_preferences=resolved_slot_preferences,
         prompt_overrides=resolved_prompt_overrides,
+        db=db,
     )
     prompt_plan = _build_prompt_plan(
         confirmed_copy=normalized_copy,
@@ -77,13 +81,18 @@ def build_strategy_preview(
 
     return {
         "product_name": normalized_copy.get("product_name", ""),
+        "hero_scene": normalized_copy.get("hero_scene", ""),
+        "core_selling_points": normalized_copy.get("core_selling_points", []),
+        "key_parameters": normalized_copy.get("key_parameters", []),
+        "product_advantages": normalized_copy.get("product_advantages", []),
         "core_selling_point": normalized_copy.get("selling_points", ""),
         "core_scene": normalized_copy.get("usage_scenes", ""),
         "core_performance": normalized_copy.get("specs", ""),
         "headline": normalized_copy.get("headline", ""),
-        "style_summary": " + ".join(
-            [v for v in [normalized_copy.get("style_choice"), normalized_copy.get("style_custom")] if v]
-        ),
+        "style_preset_id": normalized_copy.get("style_preset_id"),
+        "resolved_style_preset": normalized_copy.get("resolved_style_preset"),
+        "style_custom": normalized_copy.get("style_custom", ""),
+        "style_summary": _style_summary(normalized_copy),
         "platform_strategy": f"{platform_name} 主图标准，输出 {len(asset_plan)} 张主图",
         "image_count": len(asset_plan),
         "planner_instruction": planner_instruction,
@@ -115,6 +124,7 @@ def normalize_strategy_preview(
     confirmed_copy: dict,
     active_platform_id: str,
     *,
+    db: Session | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
     parameter_snapshot: dict[str, Any] | None = None,
 ) -> dict:
@@ -125,6 +135,7 @@ def normalize_strategy_preview(
     normalized = build_strategy_preview(
         confirmed_copy,
         active_platform_id,
+        db=db,
         planner_instruction=(strategy_preview or {}).get("planner_instruction") if isinstance(strategy_preview, dict) else None,
         slot_preferences=existing_preferences if isinstance(existing_preferences, list) else [],
         prompt_overrides=prompt_overrides,
@@ -156,6 +167,23 @@ def normalize_strategy_preview(
     return normalized
 
 
+def _style_summary(confirmed_copy: dict[str, Any]) -> str:
+    resolved = confirmed_copy.get("resolved_style_preset")
+    parts: list[str] = []
+    if isinstance(resolved, dict):
+        preset_name = str(resolved.get("name") or "").strip()
+        preset_summary = str(resolved.get("style_summary") or "").strip()
+        if preset_name:
+            parts.append(preset_name)
+        if preset_summary:
+            parts.append(preset_summary)
+    for value in [confirmed_copy.get("style_choice"), confirmed_copy.get("style_custom")]:
+        text = str(value or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    return " + ".join(parts)
+
+
 def _build_asset_plan(
     *,
     active_platform_id: str,
@@ -165,9 +193,10 @@ def _build_asset_plan(
     planner_instruction: str | None,
     slot_preferences: dict[str, dict[str, Any]],
     prompt_overrides: dict[str, dict[str, Any]],
+    db: Session | None = None,
 ) -> list[dict[str, Any]]:
     plan: list[dict[str, Any]] = []
-    for display_order, slot in enumerate(get_main_gallery_slot_blueprints(active_platform_id), start=1):
+    for display_order, slot in enumerate(get_main_gallery_slot_blueprints(active_platform_id, db=db), start=1):
         recommended_mode, recommended_reason = recommend_expression_mode(
             platform_id=active_platform_id,
             slot_blueprint=slot,

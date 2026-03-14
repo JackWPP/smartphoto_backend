@@ -1,0 +1,103 @@
+body {
+  margin: 0;
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #111827;
+  color: #f3f4f6;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.login-card {
+  width: 360px;
+  margin: 120px auto;
+  padding: 24px;
+  background: #1f2937;
+  border-radius: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  padding: 20px;
+  border-right: 1px solid rgba(255,255,255,0.08);
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.sidebar button,
+.login-card button {
+  border: 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+}
+
+.sidebar button.active {
+  background: #0ea5e9;
+}
+
+.sidebar .logout {
+  margin-top: 20px;
+  background: #ef4444;
+}
+
+.content {
+  padding: 24px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 24px;
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.list li {
+  padding: 12px;
+  background: #1f2937;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+input, textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: #111827;
+  color: #f9fafb;
+  padding: 10px 12px;
+}
+
+pre {
+  background: #0b1220;
+  border-radius: 12px;
+  padding: 16px;
+  overflow: auto;
+}
+
+.error {
+  color: #fca5a5;
+}

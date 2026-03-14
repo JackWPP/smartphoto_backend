@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from sse_starlette import EventSourceResponse
 
 from app.core.response import success_response
-from app.db.session import SessionLocal, get_db
+from app.db import session as db_session
+from app.db.session import get_db
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.schemas.jobs import JobStatusData
 from app.services.repo import get_job_or_404, list_job_events_after
@@ -75,13 +76,13 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)) -> dict:
     },
 )
 async def stream_job_events(job_id: str) -> EventSourceResponse:
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         get_job_or_404(db, job_id)
 
     async def event_generator():
         last_seq = 0
         while True:
-            with SessionLocal() as db:
+            with db_session.SessionLocal() as db:
                 events = list_job_events_after(db, job_id, last_seq)
                 if events:
                     for evt in events:

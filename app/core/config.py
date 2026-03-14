@@ -12,8 +12,10 @@ class Settings(BaseSettings):
     app_name: str = "smartphoto-backend"
     app_env: str = "dev"
     api_prefix: str = "/api/v2"
+    admin_api_prefix: str = "/api/admin/v1"
 
     database_url: str = "postgresql+psycopg://smartphoto:smartphoto@localhost:5432/smartphoto"
+    admin_database_url: str = "sqlite:///./storage/admin.sqlite3"
     redis_url: str = "redis://localhost:6379/0"
 
     storage_root: Path = Path("./storage")
@@ -21,12 +23,15 @@ class Settings(BaseSettings):
 
     test_user_id: str = "00000000-0000-0000-0000-000000000001"
     tasks_eager: bool = False
+    admin_jwt_secret: str = "smartphoto-admin-dev-secret"
+    admin_access_token_exp_minutes: int = Field(default=120, ge=5, le=1440)
+    admin_refresh_token_exp_days: int = Field(default=14, ge=1, le=180)
 
     whatai_api_base: str = "https://api.whatai.cc"
     whatai_api_key: str = ""
     whatai_chat_model: str = "gpt-4.1-mini"
     whatai_image_model: str = "gpt-image-1"
-    whatai_parameter_model: str = "gemini-2.5-flash"
+    whatai_parameter_model: str = "gemini-3.1-flash-lite-preview"
 
     generation_lock_ttl_seconds: int = Field(default=600, ge=30)
     main_generation_concurrency: int = Field(default=4, ge=1, le=12)

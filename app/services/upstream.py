@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.services.copy_normalization import normalize_key_parameters as normalize_structured_key_parameters
 from app.services.reference_images import LoadedReferenceImage
 
 logger = logging.getLogger(__name__)
@@ -287,13 +288,16 @@ class WhataiClient:
                 "type": "text",
                 "text": (
                     "你是 SmartPhoto 的 Step3 参数抽取器。"
-                    "请判断上传内容是否与当前商品相关，并只返回 JSON 对象。"
-                    "字段必须包含：relevance_status,rejection_reason,hero_scene,core_selling_points,"
-                    "key_parameters,product_advantages,feature_highlights。"
-                    "如果内容无关，relevance_status=invalid，并给出 rejection_reason。"
-                    f"当前平台：{active_platform_id or 'temu'}。"
-                    f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
-                    f"文件附件摘要：{json.dumps(attachment_manifest, ensure_ascii=False)}。"
+                "请判断上传内容是否与当前商品相关，并只返回 JSON 对象。"
+                "字段必须包含：relevance_status,rejection_reason,hero_scene,core_selling_points,"
+                "key_parameters,product_advantages,feature_highlights。"
+                "如果内容无关，relevance_status=invalid，并给出 rejection_reason。"
+                "key_parameters 必须是数组，每项都要拆成 key,label,value,unit。"
+                "label 只放参数名，value 只放参数值，不要把“参数名：参数值”整句同时塞进 label 和 value。"
+                "如果可以识别单位就放到 unit，不能识别时 unit 置空字符串。"
+                f"当前平台：{active_platform_id or 'temu'}。"
+                f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
+                f"文件附件摘要：{json.dumps(attachment_manifest, ensure_ascii=False)}。"
                 ),
             },
             *self._build_chat_image_parts(image_attachments),
@@ -985,25 +989,7 @@ class WhataiClient:
     def _normalize_key_parameters(self, value: Any, fallback: list[Any]) -> list[dict[str, Any]]:
         parsed = self._decode_json_like(value)
         items = parsed if isinstance(parsed, list) else fallback
-        normalized: list[dict[str, Any]] = []
-        for index, item in enumerate(items, start=1):
-            if isinstance(item, dict):
-                normalized.append(item)
-                continue
-            text = str(item).strip()
-            if not text:
-                continue
-            normalized.append(
-                {
-                    "key": f"param_{index}",
-                    "label": text,
-                    "value": text,
-                    "unit": "",
-                    "confidence": None,
-                    "editable": True,
-                }
-            )
-        return normalized
+        return normalize_structured_key_parameters(items)
 
     def _decode_json_like(self, value: Any) -> Any:
         if isinstance(value, str):
