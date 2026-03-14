@@ -43,6 +43,41 @@ ROLE_SPECS: dict[str, dict[str, str]] = {
         "text_policy": "layout_text_optional",
         "composition_hint": "预留详情页图文版式结构，不用于本期主图组",
     },
+    "primary_kv": {
+        "role_label": "首图KV",
+        "goal": "一眼说明产品是什么、解决什么问题并承担点击入口",
+        "background_mode": "clean_studio",
+        "text_policy": "short_copy_required",
+        "composition_hint": "产品主体约占画面一半，预留大标题和短副文案空间",
+    },
+    "reason_why": {
+        "role_label": "理由图",
+        "goal": "解释为什么有效或有什么能力，承接首图点击后的疑问",
+        "background_mode": "feature_dark",
+        "text_policy": "short_copy_required",
+        "composition_hint": "优先做理由卡、机制卡、能力摘要，不做纯白底",
+    },
+    "proof_authority": {
+        "role_label": "佐证图",
+        "goal": "用认证、证书、实验或参数证明最强卖点",
+        "background_mode": "proof_stage",
+        "text_policy": "short_copy_required",
+        "composition_hint": "突出证明性元素，版式更信息化",
+    },
+    "benefit_scene_or_compare": {
+        "role_label": "利益场景/对比图",
+        "goal": "用真实场景或对比优势表达消费者利益点",
+        "background_mode": "real_scene",
+        "text_policy": "short_copy_required",
+        "composition_hint": "场景或对比服务于利益点，不做空洞氛围图",
+    },
+    "closing_selling_point": {
+        "role_label": "尾屏卖点图",
+        "goal": "做卖点矩阵、参数亮点或尾屏总结，完成收束",
+        "background_mode": "clean_feature_bg",
+        "text_policy": "short_copy_required",
+        "composition_hint": "适合卖点矩阵、参数亮点或总结式尾屏",
+    },
 }
 
 

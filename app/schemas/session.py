@@ -47,6 +47,101 @@ class SessionImagesData(BaseModel):
     images: list[SessionImageItem] = Field(description="当前 session 的有效图片列表。")
 
 
+class DetailStyleImageSummary(BaseModel):
+    image_id: str = Field(description="详情页风格图 ID。")
+    display_order: int = Field(description="显示顺序。")
+    url: str = Field(description="图片访问地址。")
+
+
+class DetailStyleImageItem(BaseModel):
+    image_id: str = Field(description="详情页风格图 ID。")
+    display_order: int = Field(description="显示顺序。")
+    url: str = Field(description="图片访问地址。")
+    width: int = Field(description="图片宽度。")
+    height: int = Field(description="图片高度。")
+    mime_type: str = Field(description="MIME 类型。")
+    file_size: int = Field(description="文件大小，单位字节。")
+
+
+class UploadDetailStyleImageData(BaseModel):
+    image_id: str = Field(description="本次新上传的详情页风格图 ID。")
+    session_id: str = Field(description="所属会话 ID。")
+    uploaded_images: list[DetailStyleImageSummary] = Field(description="当前 session 下所有有效详情页风格图。")
+
+
+class DeleteDetailStyleImageData(BaseModel):
+    image_id: str = Field(description="被删除的详情页风格图 ID。")
+    deleted: bool = Field(description="是否删除成功。", examples=[True])
+
+
+class DetailStyleImagesData(BaseModel):
+    images: list[DetailStyleImageItem] = Field(description="当前 session 的详情页风格图列表。")
+
+
+class ParameterAttachmentSummary(BaseModel):
+    attachment_id: str = Field(description="参数附件 ID。")
+    display_order: int = Field(description="显示顺序。")
+    original_name: str = Field(description="原始文件名。")
+    url: str = Field(description="文件访问地址。")
+
+
+class ParameterAttachmentItem(BaseModel):
+    attachment_id: str = Field(description="参数附件 ID。")
+    display_order: int = Field(description="显示顺序。")
+    original_name: str = Field(description="原始文件名。")
+    url: str = Field(description="文件访问地址。")
+    width: int = Field(description="图片宽度；非图片时为 0。")
+    height: int = Field(description="图片高度；非图片时为 0。")
+    mime_type: str = Field(description="MIME 类型。")
+    file_size: int = Field(description="文件大小。")
+
+
+class UploadParameterAttachmentData(BaseModel):
+    attachment_id: str = Field(description="本次新上传的参数附件 ID。")
+    session_id: str = Field(description="所属会话 ID。")
+    uploaded_attachments: list[ParameterAttachmentSummary] = Field(description="当前 session 的参数附件列表。")
+
+
+class DeleteParameterAttachmentData(BaseModel):
+    attachment_id: str = Field(description="被删除的参数附件 ID。")
+    deleted: bool = Field(description="是否删除成功。")
+
+
+class ParameterAttachmentsData(BaseModel):
+    attachments: list[ParameterAttachmentItem] = Field(description="当前 session 的参数附件列表。")
+
+
+class StrategyReferenceImageSummary(BaseModel):
+    image_id: str = Field(description="策略参考图 ID。")
+    display_order: int = Field(description="显示顺序。")
+    url: str = Field(description="图片访问地址。")
+
+
+class StrategyReferenceImageItem(BaseModel):
+    image_id: str = Field(description="策略参考图 ID。")
+    display_order: int = Field(description="显示顺序。")
+    url: str = Field(description="图片访问地址。")
+    width: int = Field(description="图片宽度。")
+    height: int = Field(description="图片高度。")
+    mime_type: str = Field(description="MIME 类型。")
+    file_size: int = Field(description="文件大小。")
+
+
+class UploadStrategyReferenceImageData(BaseModel):
+    image_id: str = Field(description="本次新上传的策略参考图 ID。")
+    session_id: str = Field(description="所属会话 ID。")
+    uploaded_images: list[StrategyReferenceImageSummary] = Field(description="当前 session 的策略参考图列表。")
+
+
+class DeleteStrategyReferenceImageData(BaseModel):
+    image_id: str = Field(description="被删除的策略参考图 ID。")
+    deleted: bool = Field(description="是否删除成功。")
+
+
+class StrategyReferenceImagesData(BaseModel):
+    images: list[StrategyReferenceImageItem] = Field(description="当前 session 的策略参考图列表。")
+
+
 class PlatformSelectionRequest(BaseModel):
     selected_platform_ids: list[str] = Field(
         min_length=1,
@@ -130,12 +225,52 @@ class StrategyPreviewRequest(BaseModel):
         default=None,
         description="Step 5 额外策略指令，例如“白底图更标准，主图更像参考图”。",
     )
+    slot_preferences: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="可选的主图槽位偏好。每项包含 slot_id/expression_mode/locked。",
+    )
 
 
 class StrategyPreviewData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     status: str = Field(description="保存策略预览后的 session 状态。")
     strategy_preview: dict[str, Any] = Field(description="完整策略预览对象，包含 asset_plan/reference_manifest/prompt_plan。")
+
+
+class DetailStrategyPreviewRequest(BaseModel):
+    planner_instruction: str | None = Field(
+        default=None,
+        description="详情页 planner 的额外策略指令，例如“标题更简洁，字体更偏科技感”。",
+    )
+    panel_preferences: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="可选的详情页槽位偏好。每项包含 slot_id/panel_type/display_order/locked。",
+    )
+
+
+class DetailStrategyPreviewData(BaseModel):
+    session_id: str = Field(description="会话 ID。")
+    detail_strategy_preview: dict[str, Any] = Field(
+        description="详情页策略预览对象，包含 use_case/aspect_ratio/panel_count/product_reference_manifest/style_reference_manifest/panel_plan。"
+    )
+
+
+class StrategyOverrideItem(BaseModel):
+    slot_id: str = Field(description="主图槽位 ID。")
+    copy_blocks_override: dict[str, Any] = Field(default_factory=dict, description="文案块 override。")
+    raw_prompt_override: str | None = Field(default=None, description="Raw prompt override。")
+    expression_mode_override: str | None = Field(default=None, description="表达方式 override。")
+    applied_preset_id: str | None = Field(default=None, description="已套用模板 ID。")
+    locked: bool = Field(default=False, description="是否锁定。")
+
+
+class StrategyOverridesRequest(BaseModel):
+    overrides: list[StrategyOverrideItem] = Field(default_factory=list, description="本次提交的槽位 override 列表。")
+
+
+class StrategyOverridesData(BaseModel):
+    session_id: str = Field(description="会话 ID。")
+    overrides: list[StrategyOverrideItem] = Field(description="当前 session 的槽位 override 列表。")
 
 
 class PromptPreviewRequest(BaseModel):
@@ -145,19 +280,31 @@ class PromptPreviewRequest(BaseModel):
 
 class PromptPreviewItem(BaseModel):
     role: str = Field(description="主图角色。")
+    slot_id: str | None = Field(default=None, description="主图槽位 ID。")
+    slot_label: str | None = Field(default=None, description="主图槽位名称。")
+    slot_family: str | None = Field(default=None, description="主图槽位家族。")
     role_label: str | None = Field(default=None, description="角色中文名。")
     display_order: int = Field(description="显示顺序。")
     final_prompt: str = Field(description="最终提交给上游的 prompt。")
     blocks: dict[str, Any] = Field(description="结构化 prompt blocks。")
+    copy_blocks: dict[str, Any] = Field(default_factory=dict, description="该槽位用于图上文字的 copy blocks。")
+    raw_prompt_override: str | None = Field(default=None, description="Raw prompt override。")
+    applied_preset_id: str | None = Field(default=None, description="已套用模板 ID。")
     strategy_fields_used: list[str] = Field(description="本次 prompt 用到的策略字段路径列表。")
     reference_images_used: list[dict[str, Any]] = Field(default_factory=list, description="本次 prompt 计划使用的参考图。")
     planner_source: str | None = Field(default=None, description="prompt planner 来源，rule_based 或 llm。")
+    expression_mode: str | None = Field(default=None, description="当前槽位的表达方式。")
+    expression_label: str | None = Field(default=None, description="表达方式名称。")
+    rule_modules_used: list[str] = Field(default_factory=list, description="本次 prompt 组合到的规则模块列表。")
+    platform_overlay: dict[str, Any] | None = Field(default=None, description="平台 overlay 元数据。")
+    resolved_constraints: list[str] = Field(default_factory=list, description="本次 prompt 的最终约束列表。")
 
 
 class PromptPreviewLatestAsset(BaseModel):
     asset_id: str = Field(description="资产 ID。")
     version_no: int = Field(description="结果版本号。")
     role: str = Field(description="资产角色。")
+    slot_id: str | None = Field(default=None, description="资产所属主图槽位。")
     display_order: int = Field(description="显示顺序。")
     prompt_snapshot: str | None = Field(default=None, description="真实执行时保存的 prompt 文本。")
     edit_instruction: str | None = Field(default=None, description="该次结果的编辑指令。")
@@ -165,6 +312,10 @@ class PromptPreviewLatestAsset(BaseModel):
     reference_image_ids: list[str] = Field(default_factory=list, description="真实执行使用的参考图 ID 列表。")
     upstream_endpoint: str | None = Field(default=None, description="真实调用的上游端点。")
     planner_instruction: str | None = Field(default=None, description="Step 5 planner 指令。")
+    expression_mode: str | None = Field(default=None, description="真实执行的表达方式。")
+    rule_pack_id: str | None = Field(default=None, description="命中的主图规则包 ID。")
+    raw_prompt_override: str | None = Field(default=None, description="真实执行的 Raw prompt override。")
+    applied_preset_id: str | None = Field(default=None, description="真实执行套用的模板 ID。")
 
 
 class PromptPreviewData(BaseModel):
@@ -177,8 +328,76 @@ class PromptPreviewData(BaseModel):
     latest_assets: list[PromptPreviewLatestAsset] = Field(description="最近一版结果的执行快照。")
 
 
+class DetailPromptPreviewItem(BaseModel):
+    panel_id: str = Field(description="详情页 panel ID。")
+    slot_id: str | None = Field(default=None, description="详情页固定槽位 ID。")
+    panel_label: str = Field(description="panel 中文名。")
+    display_order: int = Field(description="显示顺序。")
+    aspect_ratio: str = Field(description="固定为 21:9。")
+    use_case: str = Field(description="固定为 amazon_detail。")
+    final_prompt: str = Field(description="最终提交给上游的 prompt。")
+    blocks: dict[str, Any] = Field(description="结构化 prompt blocks。")
+    copy_blocks: dict[str, Any] = Field(default_factory=dict, description="结构化文案块。")
+    raw_prompt_override: str | None = Field(default=None, description="Raw prompt override。")
+    applied_preset_id: str | None = Field(default=None, description="套用模板 ID。")
+    strategy_fields_used: list[str] = Field(description="本次 prompt 用到的策略字段路径列表。")
+    panel_type: str | None = Field(default=None, description="详情页板块类型。")
+    panel_type_reason: str | None = Field(default=None, description="详情页板块类型推荐理由。")
+    layout_template: str | None = Field(default=None, description="详情页布局模板。")
+    product_reference_ids: list[str] = Field(default_factory=list, description="本次 prompt 使用的商品参考图 ID。")
+    style_reference_ids: list[str] = Field(default_factory=list, description="本次 prompt 使用的风格参考图 ID。")
+    product_reference_images_used: list[dict[str, Any]] = Field(default_factory=list, description="本次 prompt 使用的商品参考图清单。")
+    style_reference_images_used: list[dict[str, Any]] = Field(default_factory=list, description="本次 prompt 使用的风格参考图清单。")
+    planner_source: str | None = Field(default=None, description="panel planner 来源，rule_based 或 llm。")
+    planner_base: str | None = Field(default=None, description="panel 级 planner 基础语义。")
+    rule_modules_used: list[str] = Field(default_factory=list, description="详情页规则模块列表。")
+
+
+class DetailPromptPreviewLatestAsset(BaseModel):
+    asset_id: str = Field(description="资产 ID。")
+    asset_kind: str = Field(description="资产类型，panel 或 stitched。")
+    version_no: int = Field(description="结果版本号。")
+    panel_id: str = Field(description="panel ID；拼接长图固定为 detail_page_long。")
+    slot_id: str | None = Field(default=None, description="详情页固定槽位 ID。")
+    display_order: int = Field(description="显示顺序。")
+    prompt_snapshot: str | None = Field(default=None, description="真实执行时保存的 prompt 文本。")
+    edit_instruction: str | None = Field(default=None, description="该次结果的编辑指令。")
+    generation_snapshot: dict[str, Any] | None = Field(default=None, description="真实执行快照。")
+    panel_type: str | None = Field(default=None, description="真实执行的板块类型。")
+
+
+class DetailPromptPreviewData(BaseModel):
+    session_id: str = Field(description="会话 ID。")
+    active_platform_id: str | None = Field(default=None, description="当前生效平台。")
+    use_case: str = Field(description="固定为 amazon_detail。")
+    aspect_ratio: str = Field(description="固定为 21:9。")
+    panel_count: int = Field(description="固定为 8。")
+    model: str = Field(description="当前图片模型名称。")
+    image_size: str = Field(description="当前详情页预览输出尺寸。")
+    product_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用商品参考图清单。")
+    style_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用详情页风格图清单。")
+    prompts: list[DetailPromptPreviewItem] = Field(description="按 panel 顺序生成的 prompt 预览列表。")
+    latest_assets: list[DetailPromptPreviewLatestAsset] = Field(description="最近一版详情页结果的执行快照。")
+
+
 class GenerateGalleryRequest(BaseModel):
     instruction: str | None = Field(default=None, description="本轮整组生图附加指令。")
+    slot_ids: list[str] = Field(
+        default_factory=list,
+        description="可选的主图槽位列表。为空时生成整组；传值时只生成指定槽位。",
+    )
+
+
+class ParameterExtractionJobData(BaseModel):
+    job_id: str = Field(description="参数提取任务 ID。")
+    job_type: str = Field(description="任务类型。", examples=["extract_parameters"])
+    status: str = Field(description="任务状态。")
+    session_id: str = Field(description="会话 ID。")
+
+
+class ParameterSnapshotData(BaseModel):
+    session_id: str = Field(description="会话 ID。")
+    parameter_snapshot: dict[str, Any] = Field(description="参数提取结果快照。")
 
 
 class GenerationJobData(BaseModel):
@@ -187,6 +406,14 @@ class GenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
     generation_round: int = Field(description="触发后预期进入的轮次。")
+
+
+class DetailGenerationJobData(BaseModel):
+    job_id: str = Field(description="任务 ID。")
+    job_type: str = Field(description="任务类型。", examples=["generate_detail_page"])
+    status: str = Field(description="任务状态。")
+    session_id: str = Field(description="会话 ID。")
+    detail_generation_round: int = Field(description="触发后预期进入的详情页轮次。")
 
 
 class GenericGenerationJobData(BaseModel):
@@ -230,8 +457,14 @@ class SessionSnapshotData(BaseModel):
     selected_platform_ids: list[str] = Field(description="当前选中的平台列表。")
     active_platform_id: str | None = Field(default=None, description="当前生效平台。")
     analysis_snapshot: dict[str, Any] | None = Field(default=None, description="分析结果快照。")
+    parameter_snapshot: dict[str, Any] | None = Field(default=None, description="参数提取结果快照。")
     confirmed_copy: dict[str, Any] | None = Field(default=None, description="当前保存的 copy。")
     strategy_preview: dict[str, Any] | None = Field(default=None, description="当前保存的策略预览。")
+    detail_strategy_preview: dict[str, Any] | None = Field(default=None, description="当前保存的详情页策略预览。")
     latest_generate_job_id: str | None = Field(default=None, description="最近一次生成任务 ID。")
+    latest_detail_generate_job_id: str | None = Field(default=None, description="最近一次详情页生成任务 ID。")
+    latest_parameter_job_id: str | None = Field(default=None, description="最近一次参数提取任务 ID。")
     generation_round: int = Field(description="当前生成轮次。")
     latest_result_version: int = Field(description="最近一版结果版本号。")
+    detail_generation_round: int = Field(description="当前详情页生成轮次。")
+    detail_latest_result_version: int = Field(description="最近一版详情页结果版本号。")

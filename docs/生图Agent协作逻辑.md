@@ -10,10 +10,13 @@
 |---|---|---|
 | Session Orchestrator | 接收请求、做前置状态校验、创建 job、分发任务 | `app/api/v2/sessions.py`, `app/api/v2/assets.py` |
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
+| Parameter Extract Agent | 读取参数附件，产出 `parameter_snapshot` | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
 | Strategy Builder | 生成 `strategy_preview`、`reference_manifest`、`prompt_plan` 和可执行 `asset_plan` | `build_strategy_preview` |
-| Prompt Composer | 按 role 输出结构化 prompt blocks 与最终 `final_prompt` | `compose_prompt` |
-| Image Generation Agent | 基于参考图调用图片上游接口，产出图片字节 | `WhataiClient.generate_image` |
+| Detail Page Planner | 生成 `detail_strategy_preview`、商品/风格参考 manifest 和 8 个 panel 规划 | `build_detail_strategy_preview` |
+| Prompt Composer | 按主图槽位输出结构化 prompt blocks 与最终 `final_prompt` | `compose_prompt` |
+| Detail Prompt Composer | 按 panel slot 输出带字详情页 prompt blocks 与最终 `final_prompt` | `compose_detail_panel_prompt` |
+| Image Generation Agent | 批量提交上游异步任务、集中轮询、并发下载图片字节 | `WhataiClient.submit_image_request/poll_image_tasks/download_image_bytes` |
 | Storage/Versioning Agent | 持久化原图/结果图/缩略图，维护版本与父子关系 | `LocalStorageAdapter` + `AssetModel` |
 | Prompt Debug Agent | 只读预览当前 prompt、参考图引用和最近一次真实执行快照 | `POST /sessions/{id}/prompts/preview` |
 | Event & Lock Agent | 任务事件流、幂等记录、并发锁与冲突控制 | `append_job_event` + idempotency + redis lock |
@@ -26,9 +29,12 @@
 - 状态责任：
   - 校验 session 状态与前置条件
   - 创建 `jobs` 记录（`queued`）
-  - 分发到 `q.analysis` / `q.copy` / `q.generation`
+  - 分发到 `q.analysis` / `q.copy` / `q.generation.main` / `q.generation.detail`
 - 失败处理：返回 `40002/40003/40901/40902` 等
 - 重试策略：由调用端按幂等策略重试
+- 详情页补充：
+  - `POST /sessions/{id}/detail-pages/generations` 创建 `generate_detail_page`
+  - 与主图 generation 共用同一套并发锁与冲突码 `40901/40902`
 
 ### 3.2 Analysis Agent
 - 输入：session 可用图片 + active_platform（可空）
@@ -49,6 +55,16 @@
 - 失败处理：非法字段 `40004`
 - 重试策略：上游网络级异常可进入 Celery 任务重试，最多 3 次
 
+### 3.3.1 Parameter Extract Agent
+- 输入：参数附件（图片/PDF）+ 当前 copy + active_platform
+- 输出：`parameter_snapshot`
+- 状态责任：
+  - 产出 `relevance_status/rejection_reason/hero_scene/core_selling_points/key_parameters/product_advantages/feature_highlights`
+  - 不相关附件返回 `invalid`，但 job 仍可成功完成，供前端展示解释
+- Job 语义：
+  - `job_type = extract_parameters`
+  - 当前复用 `q.analysis` 队列
+
 ### 3.4 Strategy Builder
 - 输入：`confirmed_copy` + `active_platform_id` + session 图片 + 可选 `planner_instruction`
 - 输出：`strategy_preview`（含 `asset_plan`、`reference_manifest`、`prompt_plan`）
@@ -56,20 +72,23 @@
 - 失败处理：copy 或平台缺失返回 `40002/40003`
 - 重试策略：当前为同步接口流程，不走 Worker
 - 额外约束：
-  - 当前固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
-  - 每个 `asset_plan` 项都带 `role_label/goal/background_mode/text_policy/composition_hint/aspect_ratio`
-  - 每个 `prompt_plan` 项都带 `reference_image_ids/must_keep/must_avoid/background_rule/composition_rule/lighting_rule/fidelity_rule/final_prompt_base`
+  - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”
+  - 默认平台固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
+  - 阿里系平台固定输出 5 个槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
+  - 每个 `asset_plan` 项都带 `slot_id/slot_family/expression_mode/copy_blocks/layout_policy/proof_policy/requires_white_bg_validation/platform_rule_pack`
+  - 每个 `prompt_plan` 项都带 `reference_image_ids/must_keep/must_avoid/background_rule/composition_rule/lighting_rule/fidelity_rule/final_prompt_base/rule_modules_used/resolved_constraints`
   - 当前支持在 Step 5 通过 `planner_instruction` 对整组策略做一轮额外优化
 
 ### 3.5 Prompt Composer + Image Generation Agent
-- 输入：copy、strategy、asset_role、可选 instruction、参考图
+- 输入：copy、strategy、slot/role、可选 instruction、参考图
 - 输出：单图结构化 prompt 预览与图片字节
 - 状态变更：job `running`，逐图产出 `asset_ready`
 - 失败处理：上游失败 `50202`，任务写 `job_failed`
 - 重试策略：
   - 当前主图组默认优先走 `/v1/images/edits`，把参考图以 multipart 形式上传到上游
+  - `/images/edits` 当前传 `aspect_ratio`；`/images/generations` 才传 `size`
+  - 主图与详情页都采用“两阶段执行”：先批量提交全部上游异步任务，再集中轮询全部 `task_id`，最后并发下载结果
   - `/images/edits` 若在提交阶段出现传输层断连，会先做请求级重试；若仍失败，只对当前单张图做内部重试
-  - 当上游返回 `task_id` 时，会基于同一个 `task_id` 轮询结果接口拿最终图片链接
   - 图片下载遇到传输层异常时，会做请求级重试
   - 生图链路默认不再因为 `upstream_image_error` 进入 Celery 整任务重试，避免重复消费上游额度
 - 参考图选择规则：
@@ -78,7 +97,9 @@
   - `detail`：优先 `front + side`，没有 `side` 时退回 `angle45`
   - 单个 role 最多引用 2 张参考图
 - 并发规则：
-  - 整组生图内部最大并发数为 `2`
+  - 主图默认并发 `main_generation_concurrency=4`
+  - 详情页默认并发 `detail_generation_concurrency=6`
+  - 上游任务提交默认并发 `generation_submit_concurrency=6`
   - 即使内部并发执行，Asset 最终持久化顺序仍按 `display_order`
 - Prompt 结构：
   - `blocks.goal`
@@ -89,16 +110,44 @@
   - `blocks.selling_points`
   - `blocks.constraints`
   - `blocks.instruction`
-- 一期角色约束：
+- 一期槽位约束：
   - `hero`：主体与第一卖点优先，背景简洁，不做海报拼贴
   - `white_bg`：独立白底分支，纯白无缝背景，单产品完整展示，无人物无道具无场景
   - `selling_point`：只聚焦单一卖点，不依赖图中文字
   - `scene`：强调真实使用场景，环境不抢主体
   - `detail`：强调局部结构、材质和纹理
+  - `primary_kv`：阿里首图，大字利益点 + 小字 supporting，产品主体约占半屏
+  - `reason_why`：理由卡/机制卡/能力摘要，不做纯白无信息背景
+  - `proof_authority`：最强卖点 + 认证/证书/参数/实验等证明性元素
+  - `benefit_scene_or_compare`：消费者利益场景或对比优势
+  - `closing_selling_point`：尾屏总结、卖点矩阵或参数亮点收束
 - 白底分支额外规则：
   - 生成后执行轻量白底校验：边缘白色占比、外环白色占比、主体连通域数量
-  - 若校验失败，只对白底图内部追加更强白底约束再尝试 1 次
+  - 白底校验不再依赖 `role == white_bg`，而依赖 `requires_white_bg_validation=true`
+  - 若校验失败，只对当前槽位内部追加更强白底约束再尝试 1 次
   - 若二次仍失败，整 job 直接 `job_failed`，不产出 `partial_succeeded`
+
+### 3.5.1 Detail Page Planner + Detail Prompt Composer
+- 输入：copy、商品图、可选风格图、可选 `planner_instruction`、可选本轮 `instruction`
+- 输出：
+  - `detail_strategy_preview`
+  - 8 个 panel prompt
+  - 8 张 `detail_page/panel` 资产
+  - 1 张 `detail_page/stitched` 资产
+- 状态责任：
+  - 不改写主图 `status/current_step`
+  - 独立维护 `detail_generation_round/detail_latest_result_version/latest_detail_generate_job_id`
+- 当前实现约束：
+  - `use_case` 固定为 `amazon_detail`
+  - `aspect_ratio` 固定为 `21:9`
+  - `panel_count` 固定为 `8`
+  - `panel_plan` 当前带 `slot_id/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used`
+  - 未上传风格图时，回退使用 `style_choice/style_custom`
+  - 生图默认使用 1 张商品 grid；有风格图时追加 1 张 style/font grid
+- Job / 事件语义：
+  - `job_type = generate_detail_page`
+  - 事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_succeeded|job_failed`
+  - `asset_ready` 会产出 9 次：8 次 panel + 1 次 stitched
 
 ### 3.6 Storage/Versioning Agent
 - 输入：图片字节、session_id、round/version、role/order
@@ -108,6 +157,10 @@
   - `version_no` 单调递增
   - 单图重生成写 `parent_asset_id`
   - 被替代图标记为 `superseded`
+- 详情页补充：
+  - `assets.asset_family` 区分 `main_gallery | detail_page`
+  - `assets.asset_kind` 区分 `panel | stitched`
+  - 主图与详情页各自维护独立版本号，不互相覆盖
 
 ### 3.7 Event & Lock Agent
 - 输入：job 生命周期与任务上下文
@@ -117,6 +170,7 @@
   - 同 session 同时最多 1 个生图任务
   - 同 user 同时最多 1 个生图任务
   - Redis 不可用时降级到 DB 检查
+  - 详情页 generation 也参与同一套互斥，不允许和主图 generation 并行
 
 ## 4. 三类 regenerate 语义对比
 | 类型 | 入口 | 作用范围 | round_no | version_no | parent_asset_id |
@@ -140,16 +194,20 @@ sequenceDiagram
     FE->>API: POST /sessions/{id}/generations
     API->>DB: 创建 job(generate_gallery, queued)
     API->>DB: 写 job_queued
-    API->>W: dispatch q.generation
+    API->>W: dispatch q.generation.main
     W->>DB: job running + job_started
-    W->>U: POST /images/generations?async=true
-    U-->>W: task_id
-    loop 轮询同一个 task_id
+    par 批量提交全部槽位
+        W->>U: POST /images/edits?async=true
+        U-->>W: task_id...
+    end
+    loop 集中轮询全部 task_id
         W->>U: GET /images/tasks/{task_id}
         U-->>W: NOT_START/IN_PROGRESS/SUCCESS
     end
-    W->>U: GET image_url
-    U-->>W: image bytes
+    par 并发下载全部结果
+        W->>U: GET image_url
+        U-->>W: image bytes
+    end
     W->>S: save_generated_image
     S-->>W: image_url + thumbnail_url
     W->>DB: 写 asset + asset_ready
@@ -169,7 +227,7 @@ sequenceDiagram
 
     FE->>API: POST /sessions/{id}/results/global-edit
     API->>DB: 并发检查 + 锁 + 创建 job(global_edit)
-    API->>W: dispatch q.generation
+    API->>W: dispatch q.generation.main
     W->>DB: 旧版本 assets 标记 superseded
     W->>DB: 生成新版本 assets
     W->>DB: version_no + 1, job_succeeded
@@ -185,7 +243,7 @@ sequenceDiagram
 
     FE->>API: POST /assets/{asset_id}/regenerate
     API->>DB: 创建 job(regenerate_asset), 写 parent_asset_id
-    API->>W: dispatch q.generation
+    API->>W: dispatch q.generation.main
     W->>DB: 原 asset 标记 superseded
     W->>DB: 创建新 asset(version+1, parent_asset_id=旧图)
     W->>DB: job_succeeded
@@ -195,10 +253,11 @@ sequenceDiagram
 1. Job 是唯一执行真相：任何生图动作都必须先建 job。
 2. Event 可重放：前端状态应由 job + job_events 驱动。
 3. 版本不可回退：`latest_result_version` 仅向前增长。
-4. 父子可追溯：单图重生成必须保存 `parent_asset_id`。
+4. 父子可追溯：单图重生成必须保存 `parent_asset_id`，carry-forward 资产必须在 `generation_snapshot` 中记录 `source_asset_id/source_version_no`。
 5. 失败可定位：失败必须写 `job_failed` 且带错误信息。
 6. Prompt 可追溯：最终写入 `assets.prompt_snapshot` 的是实际提交给上游的 `final_prompt`。
 7. 引用可追溯：`assets.generation_snapshot` 必须记录 `reference_image_ids/reference_slots/upstream_endpoint/planner_instruction/size`。
+8. 槽位可追溯：主图资产需写 `slot_id/expression_mode/rule_pack_id`；详情页资产需写 `slot_id/panel_type`。
 
 ## 6.1 Prompt Debug 只读接口
 - 入口：`POST /sessions/{session_id}/prompts/preview`

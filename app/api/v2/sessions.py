@@ -9,10 +9,15 @@ from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
 from app.models.asset import AssetModel
+from app.models.detail_style_image import DetailStyleImageModel
+from app.models.parameter_attachment import ParameterAttachmentModel
+from app.models.prompt_preset import PromptPresetModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
+from app.models.session_prompt_override import SessionPromptOverrideModel
+from app.models.strategy_reference_image import StrategyReferenceImageModel
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
-from app.schemas.results import ResultsData
+from app.schemas.results import DetailResultsData, ResultsData
 from app.schemas.session import (
     AnalysisData,
     AnalysisTriggerData,
@@ -23,9 +28,19 @@ from app.schemas.session import (
     CopySaveData,
     CreateSessionData,
     DeleteSessionImageData,
+    DeleteDetailStyleImageData,
+    DetailGenerationJobData,
+    DetailPromptPreviewData,
+    DetailStrategyPreviewData,
+    DetailStrategyPreviewRequest,
+    DetailStyleImagesData,
+    DeleteParameterAttachmentData,
     GenerateGalleryRequest,
     GenerationJobData,
     GenericGenerationJobData,
+    ParameterAttachmentsData,
+    ParameterExtractionJobData,
+    ParameterSnapshotData,
     PlatformSelectionData,
     CopyRegenerateRequest,
     GalleryRegenerateRequest,
@@ -35,42 +50,201 @@ from app.schemas.session import (
     PromptPreviewRequest,
     SessionImagesData,
     SessionSnapshotData,
+    StrategyOverridesData,
+    StrategyOverridesRequest,
+    StrategyReferenceImagesData,
     StrategyPreviewRequest,
     StrategyPreviewData,
+    UploadParameterAttachmentData,
+    UploadDetailStyleImageData,
+    UploadStrategyReferenceImageData,
     UploadSessionImageData,
+    DeleteStrategyReferenceImageData,
 )
 from app.services.copy_normalization import normalize_copy_payload
+from app.services.detail_pages import (
+    DETAIL_PAGE_ASPECT_RATIO,
+    DETAIL_PAGE_IMAGE_SIZE,
+    DETAIL_PAGE_PANEL_COUNT,
+    DETAIL_PAGE_USE_CASE,
+    build_detail_prompt_previews,
+    build_detail_strategy_preview,
+    normalize_detail_strategy_preview,
+)
 from app.services.dispatcher import dispatch_job
 from app.services.download import build_zip_for_assets
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
 from app.services.jobs import append_job_event, create_job, update_job_status
 from app.services.locking import acquire_generation_locks
+from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
 from app.services.platforms import get_platform_or_none
 from app.services.prompts import build_prompt_previews
+from app.services.prompt_repo import list_prompt_presets
 from app.services.repo import (
+    get_prompt_preset_or_404,
     get_job_or_404,
     get_session_or_404,
+    list_active_detail_style_images,
+    list_active_parameter_attachments,
     list_active_session_images,
+    list_active_strategy_reference_images,
+    list_session_prompt_overrides,
 )
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import LocalStorageAdapter
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview
+from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_PARAMETER_MIME = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
 ALLOWED_SLOT = {"front", "angle45", "side", "extra"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_SESSION_IMAGES = 6
+MAX_DETAIL_STYLE_IMAGES = 4
 
 
-def _effective_strategy_preview(session: SessionModel) -> dict:
+def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
     if not session.confirmed_copy:
         raise AppError("invalid_session_status", "copy not ready", 400)
     if not session.active_platform_id:
         raise AppError("invalid_platform", "active platform required", 400)
-    return normalize_strategy_preview(session.strategy_preview, session.confirmed_copy, session.active_platform_id)
+    return normalize_strategy_preview(
+        session.strategy_preview,
+        session.confirmed_copy,
+        session.active_platform_id,
+        prompt_overrides=_serialized_session_overrides(db, session.id),
+        parameter_snapshot=session.parameter_snapshot or {},
+    )
+
+
+def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> dict:
+    if not session.confirmed_copy:
+        raise AppError("invalid_session_status", "copy not ready", 400)
+    if not session.active_platform_id:
+        raise AppError("invalid_platform", "active platform required", 400)
+
+    return normalize_detail_strategy_preview(
+        session.detail_strategy_preview,
+        merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+        product_images=list_active_session_images(db, session.id),
+        style_images=list_active_detail_style_images(db, session.id),
+        analysis_snapshot=session.analysis_snapshot or {},
+        active_platform_id=session.active_platform_id,
+        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+    )
+
+
+def _main_gallery_assets_query(db: Session, session_id: str, version_no: int):
+    return (
+        db.query(AssetModel)
+        .filter(
+            AssetModel.session_id == session_id,
+            AssetModel.version_no == version_no,
+            AssetModel.asset_family == "main_gallery",
+            AssetModel.status == "ready",
+        )
+        .order_by(AssetModel.display_order.asc())
+    )
+
+
+def _detail_page_assets_query(db: Session, session_id: str, version_no: int):
+    return (
+        db.query(AssetModel)
+        .filter(
+            AssetModel.session_id == session_id,
+            AssetModel.version_no == version_no,
+            AssetModel.asset_family == "detail_page",
+            AssetModel.status == "ready",
+        )
+        .order_by(AssetModel.display_order.asc())
+    )
+
+
+def _available_versions(db: Session, session_id: str, *, asset_family: str) -> list[int]:
+    rows = (
+        db.query(AssetModel.version_no)
+        .filter(
+            AssetModel.session_id == session_id,
+            AssetModel.asset_family == asset_family,
+        )
+        .distinct()
+        .order_by(AssetModel.version_no.desc())
+        .all()
+    )
+    return [int(row[0]) for row in rows if row[0] is not None]
+
+
+def _version_summaries(db: Session, session_id: str, *, asset_family: str) -> list[dict]:
+    versions = _available_versions(db, session_id, asset_family=asset_family)
+    summaries: list[dict] = []
+    for version_no in versions:
+        assets = (
+            db.query(AssetModel)
+            .filter(
+                AssetModel.session_id == session_id,
+                AssetModel.asset_family == asset_family,
+                AssetModel.version_no == version_no,
+            )
+            .all()
+        )
+        ready_count = len([asset for asset in assets if asset.status == "ready"])
+        summaries.append(
+            {
+                "version_no": version_no,
+                "asset_count": len(assets),
+                "ready_count": ready_count,
+            }
+        )
+    return summaries
+
+
+def _serialized_session_overrides(db: Session, session_id: str, *, asset_family: str = "main_gallery") -> list[dict]:
+    overrides = list_session_prompt_overrides(db, session_id, asset_family=asset_family)
+    preset_ids = [override.applied_preset_id for override in overrides if override.applied_preset_id]
+    presets_by_id: dict[str, PromptPresetModel] = {}
+    if preset_ids:
+        presets = db.query(PromptPresetModel).filter(PromptPresetModel.id.in_(preset_ids)).all()
+        presets_by_id = {preset.id: preset for preset in presets}
+    return [
+        serialize_session_override(
+            override,
+            preset=presets_by_id.get(override.applied_preset_id) if override.applied_preset_id else None,
+        )
+        for override in overrides
+    ]
+
+
+def _invalidate_strategy_inputs(session: SessionModel) -> None:
+    if isinstance(session.analysis_snapshot, dict):
+        session.analysis_snapshot = {
+            **session.analysis_snapshot,
+            "reanalysis_required": True,
+        }
+    session.parameter_snapshot = None
+    session.strategy_preview = None
+    session.detail_strategy_preview = None
+
+
+def _auto_trigger_reanalysis(db: Session, session: SessionModel, user_id: str) -> str | None:
+    if not session.active_platform_id:
+        return None
+    if session.status not in {"analyzed", "platform_selected", "copy_ready", "strategy_ready", "completed", "failed"}:
+        return None
+    job = create_job(
+        db,
+        session_id=session.id,
+        user_id=user_id,
+        job_type="analysis",
+        input_payload={"reason": "images_changed"},
+        idempotency_key=None,
+    )
+    session.latest_analysis_job_id = job.id
+    session.status = "analyzing"
+    session.current_step = max(session.current_step, 2)
+    return job.id
 
 
 @router.post(
@@ -90,6 +264,8 @@ def create_session(db: Session = Depends(get_db), user_id=Depends(get_current_us
         active_platform_id=None,
         generation_round=0,
         latest_result_version=0,
+        detail_generation_round=0,
+        detail_latest_result_version=0,
     )
     db.add(model)
     db.commit()
@@ -114,11 +290,17 @@ def get_session_snapshot(session_id: str, db: Session = Depends(get_db), user_id
         "selected_platform_ids": session.selected_platform_ids,
         "active_platform_id": session.active_platform_id,
         "analysis_snapshot": session.analysis_snapshot,
+        "parameter_snapshot": session.parameter_snapshot,
         "confirmed_copy": session.confirmed_copy,
         "strategy_preview": session.strategy_preview,
+        "detail_strategy_preview": session.detail_strategy_preview,
         "latest_generate_job_id": session.latest_generate_job_id,
+        "latest_detail_generate_job_id": session.latest_detail_generate_job_id,
+        "latest_parameter_job_id": session.latest_parameter_job_id,
         "generation_round": session.generation_round,
         "latest_result_version": session.latest_result_version,
+        "detail_generation_round": session.detail_generation_round,
+        "detail_latest_result_version": session.detail_latest_result_version,
     }
     return success_response(data)
 
@@ -178,8 +360,14 @@ async def upload_session_image(
         ensure_session_transition("created", "images_uploaded")
         session.status = "images_uploaded"
         session.current_step = 1
+    else:
+        _invalidate_strategy_inputs(session)
+
+    reanalysis_job_id = _auto_trigger_reanalysis(db, session, str(user_id))
 
     db.commit()
+    if reanalysis_job_id:
+        dispatch_job(reanalysis_job_id, queue="q.analysis")
     images = list_active_session_images(db, session_id)
     return success_response(
         {
@@ -223,7 +411,12 @@ def delete_session_image(
         raise AppError("invalid_request", "image not found", 404)
 
     image.is_deleted = True
+    session = get_session_or_404(db, session_id, str(user_id))
+    _invalidate_strategy_inputs(session)
+    reanalysis_job_id = _auto_trigger_reanalysis(db, session, str(user_id))
     db.commit()
+    if reanalysis_job_id:
+        dispatch_job(reanalysis_job_id, queue="q.analysis")
     return success_response({"image_id": image_id, "deleted": True})
 
 
@@ -258,6 +451,374 @@ def list_session_images(
             for img in images
         ]
     })
+
+
+@router.post(
+    "/{session_id}/detail-pages/style-images",
+    response_model=APIResponse[UploadDetailStyleImageData],
+    summary="上传详情页风格图",
+    description="向指定 session 上传详情页风格/字体参考图。支持 jpeg/png/webp，最多 4 张。",
+    operation_id="uploadDetailStyleImage",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+async def upload_detail_style_image(
+    session_id: str,
+    file: UploadFile = File(..., description="要上传的风格参考图文件。"),
+    display_order: int = Form(..., description="显示顺序。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    current_images = list_active_detail_style_images(db, session_id)
+    if len(current_images) >= MAX_DETAIL_STYLE_IMAGES:
+        raise AppError("too_many_images", http_status=400)
+
+    content = await file.read()
+    if len(content) > MAX_IMAGE_BYTES:
+        raise AppError("file_too_large", http_status=400)
+    if file.content_type not in ALLOWED_MIME:
+        raise AppError("unsupported_file_type", http_status=400)
+
+    storage = LocalStorageAdapter()
+    source_url, width, height, mime_type, file_size = storage.save_upload(
+        session_id=session_id,
+        original_name=file.filename or "style.jpg",
+        content=content,
+    )
+    model = DetailStyleImageModel(
+        session_id=session.id,
+        display_order=display_order,
+        source_url=source_url,
+        width=width,
+        height=height,
+        mime_type=mime_type,
+        file_size=file_size,
+        is_deleted=False,
+    )
+    db.add(model)
+    db.commit()
+
+    images = list_active_detail_style_images(db, session_id)
+    return success_response(
+        {
+            "image_id": model.id,
+            "session_id": session.id,
+            "uploaded_images": [
+                {
+                    "image_id": item.id,
+                    "display_order": item.display_order,
+                    "url": item.source_url,
+                }
+                for item in images
+            ],
+        }
+    )
+
+
+@router.get(
+    "/{session_id}/detail-pages/style-images",
+    response_model=APIResponse[DetailStyleImagesData],
+    summary="列出详情页风格图",
+    description="返回当前 session 下的所有有效详情页风格图。",
+    operation_id="listDetailStyleImages",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def list_detail_style_images(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    get_session_or_404(db, session_id, str(user_id))
+    images = list_active_detail_style_images(db, session_id)
+    return success_response(
+        {
+            "images": [
+                {
+                    "image_id": img.id,
+                    "display_order": img.display_order,
+                    "url": img.source_url,
+                    "width": img.width,
+                    "height": img.height,
+                    "mime_type": img.mime_type,
+                    "file_size": img.file_size,
+                }
+                for img in images
+            ]
+        }
+    )
+
+
+@router.post(
+    "/{session_id}/parameter-attachments",
+    response_model=APIResponse[UploadParameterAttachmentData],
+    summary="上传参数附件",
+    operation_id="uploadParameterAttachment",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+async def upload_parameter_attachment(
+    session_id: str,
+    file: UploadFile = File(..., description="参数图、说明书图片或 PDF。"),
+    display_order: int = Form(..., description="显示顺序。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    attachments = list_active_parameter_attachments(db, session_id)
+    if len(attachments) >= MAX_DETAIL_STYLE_IMAGES:
+        raise AppError("too_many_images", http_status=400)
+
+    content = await file.read()
+    if len(content) > MAX_IMAGE_BYTES:
+        raise AppError("file_too_large", http_status=400)
+    if file.content_type not in ALLOWED_PARAMETER_MIME:
+        raise AppError("unsupported_file_type", http_status=400)
+
+    storage = LocalStorageAdapter()
+    source_url, width, height, mime_type, file_size = storage.save_upload(
+        session_id=session_id,
+        original_name=file.filename or "parameter-attachment",
+        content=content,
+        allow_non_image=True,
+        mime_type_hint=file.content_type,
+    )
+    model = ParameterAttachmentModel(
+        session_id=session.id,
+        display_order=display_order,
+        original_name=file.filename or "parameter-attachment",
+        source_url=source_url,
+        width=width,
+        height=height,
+        mime_type=mime_type,
+        file_size=file_size,
+        is_deleted=False,
+    )
+    db.add(model)
+    session.parameter_snapshot = None
+    db.commit()
+
+    attachments = list_active_parameter_attachments(db, session_id)
+    return success_response(
+        {
+            "attachment_id": model.id,
+            "session_id": session.id,
+            "uploaded_attachments": [
+                {
+                    "attachment_id": item.id,
+                    "display_order": item.display_order,
+                    "original_name": item.original_name,
+                    "url": item.source_url,
+                }
+                for item in attachments
+            ],
+        }
+    )
+
+
+@router.get(
+    "/{session_id}/parameter-attachments",
+    response_model=APIResponse[ParameterAttachmentsData],
+    summary="列出参数附件",
+    operation_id="listParameterAttachments",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def list_parameter_attachments(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    get_session_or_404(db, session_id, str(user_id))
+    attachments = list_active_parameter_attachments(db, session_id)
+    return success_response(
+        {
+            "attachments": [
+                {
+                    "attachment_id": item.id,
+                    "display_order": item.display_order,
+                    "original_name": item.original_name,
+                    "url": item.source_url,
+                    "width": item.width,
+                    "height": item.height,
+                    "mime_type": item.mime_type,
+                    "file_size": item.file_size,
+                }
+                for item in attachments
+            ]
+        }
+    )
+
+
+@router.delete(
+    "/{session_id}/parameter-attachments/{attachment_id}",
+    response_model=APIResponse[DeleteParameterAttachmentData],
+    summary="删除参数附件",
+    operation_id="deleteParameterAttachment",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def delete_parameter_attachment(
+    session_id: str,
+    attachment_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    get_session_or_404(db, session_id, str(user_id))
+    attachment = (
+        db.query(ParameterAttachmentModel)
+        .filter(ParameterAttachmentModel.id == attachment_id, ParameterAttachmentModel.session_id == session_id)
+        .one_or_none()
+    )
+    if not attachment:
+        raise AppError("invalid_request", "parameter attachment not found", 404)
+    attachment.is_deleted = True
+    db.commit()
+    return success_response({"attachment_id": attachment_id, "deleted": True})
+
+
+@router.post(
+    "/{session_id}/strategy-reference-images",
+    response_model=APIResponse[UploadStrategyReferenceImageData],
+    summary="上传策略参考图",
+    operation_id="uploadStrategyReferenceImage",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+async def upload_strategy_reference_image(
+    session_id: str,
+    file: UploadFile = File(..., description="策略参考图。"),
+    display_order: int = Form(..., description="显示顺序。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    images = list_active_strategy_reference_images(db, session_id)
+    if len(images) >= MAX_DETAIL_STYLE_IMAGES:
+        raise AppError("too_many_images", http_status=400)
+
+    content = await file.read()
+    if len(content) > MAX_IMAGE_BYTES:
+        raise AppError("file_too_large", http_status=400)
+    if file.content_type not in ALLOWED_MIME:
+        raise AppError("unsupported_file_type", http_status=400)
+
+    storage = LocalStorageAdapter()
+    source_url, width, height, mime_type, file_size = storage.save_upload(
+        session_id=session_id,
+        original_name=file.filename or "strategy-reference.jpg",
+        content=content,
+        mime_type_hint=file.content_type,
+    )
+    model = StrategyReferenceImageModel(
+        session_id=session.id,
+        display_order=display_order,
+        source_url=source_url,
+        width=width,
+        height=height,
+        mime_type=mime_type,
+        file_size=file_size,
+        is_deleted=False,
+    )
+    db.add(model)
+    session.strategy_preview = None
+    db.commit()
+
+    images = list_active_strategy_reference_images(db, session_id)
+    return success_response(
+        {
+            "image_id": model.id,
+            "session_id": session.id,
+            "uploaded_images": [
+                {
+                    "image_id": item.id,
+                    "display_order": item.display_order,
+                    "url": item.source_url,
+                }
+                for item in images
+            ],
+        }
+    )
+
+
+@router.get(
+    "/{session_id}/strategy-reference-images",
+    response_model=APIResponse[StrategyReferenceImagesData],
+    summary="列出策略参考图",
+    operation_id="listStrategyReferenceImages",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def list_strategy_reference_images(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    get_session_or_404(db, session_id, str(user_id))
+    images = list_active_strategy_reference_images(db, session_id)
+    return success_response(
+        {
+            "images": [
+                {
+                    "image_id": item.id,
+                    "display_order": item.display_order,
+                    "url": item.source_url,
+                    "width": item.width,
+                    "height": item.height,
+                    "mime_type": item.mime_type,
+                    "file_size": item.file_size,
+                }
+                for item in images
+            ]
+        }
+    )
+
+
+@router.delete(
+    "/{session_id}/strategy-reference-images/{image_id}",
+    response_model=APIResponse[DeleteStrategyReferenceImageData],
+    summary="删除策略参考图",
+    operation_id="deleteStrategyReferenceImage",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def delete_strategy_reference_image(
+    session_id: str,
+    image_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    get_session_or_404(db, session_id, str(user_id))
+    image = (
+        db.query(StrategyReferenceImageModel)
+        .filter(StrategyReferenceImageModel.id == image_id, StrategyReferenceImageModel.session_id == session_id)
+        .one_or_none()
+    )
+    if not image:
+        raise AppError("invalid_request", "strategy reference image not found", 404)
+    image.is_deleted = True
+    db.commit()
+    return success_response({"image_id": image_id, "deleted": True})
+
+
+@router.delete(
+    "/{session_id}/detail-pages/style-images/{image_id}",
+    response_model=APIResponse[DeleteDetailStyleImageData],
+    summary="删除详情页风格图",
+    description="逻辑删除指定 session 下的一张详情页风格图。",
+    operation_id="deleteDetailStyleImage",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def delete_detail_style_image(
+    session_id: str,
+    image_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    get_session_or_404(db, session_id, str(user_id))
+    image = (
+        db.query(DetailStyleImageModel)
+        .filter(DetailStyleImageModel.id == image_id, DetailStyleImageModel.session_id == session_id)
+        .one_or_none()
+    )
+    if not image:
+        raise AppError("invalid_request", "style image not found", 404)
+    image.is_deleted = True
+    db.commit()
+    return success_response({"image_id": image_id, "deleted": True})
 
 
 @router.post(
@@ -323,6 +884,79 @@ def trigger_analysis(
 def get_analysis(session_id: str, db: Session = Depends(get_db), user_id=Depends(get_current_user_id)) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
     return success_response({"status": session.status, "analysis_snapshot": session.analysis_snapshot or {}})
+
+
+@router.post(
+    "/{session_id}/parameters/extract",
+    response_model=APIResponse[ParameterExtractionJobData],
+    summary="触发参数提取",
+    operation_id="extractParameters",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def extract_parameters(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    if not list_active_parameter_attachments(db, session.id):
+        raise AppError("invalid_request", "parameter attachments missing", 400)
+
+    job = create_job(
+        db,
+        session_id=session.id,
+        user_id=str(user_id),
+        job_type="extract_parameters",
+        input_payload={},
+    )
+    session.latest_parameter_job_id = job.id
+    db.commit()
+    dispatch_job(job.id, queue="q.analysis")
+    return success_response(
+        {
+            "job_id": job.id,
+            "job_type": job.job_type,
+            "status": job.status,
+            "session_id": session.id,
+        }
+    )
+
+
+@router.get(
+    "/{session_id}/parameters",
+    response_model=APIResponse[ParameterSnapshotData],
+    summary="获取参数提取结果",
+    operation_id="getParameters",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def get_parameters(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    return success_response({"session_id": session.id, "parameter_snapshot": session.parameter_snapshot or {}})
+
+
+@router.put(
+    "/{session_id}/parameters",
+    response_model=APIResponse[ParameterSnapshotData],
+    summary="保存参数提取结果",
+    operation_id="saveParameters",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def put_parameters(
+    session_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    session.parameter_snapshot = payload or {}
+    session.strategy_preview = None
+    session.detail_strategy_preview = None
+    db.commit()
+    return success_response({"session_id": session.id, "parameter_snapshot": session.parameter_snapshot or {}})
 
 
 @router.put(
@@ -519,7 +1153,11 @@ def build_strategy(
         session.active_platform_id,
         session_images=images,
         analysis_snapshot=session.analysis_snapshot or {},
+        parameter_snapshot=session.parameter_snapshot or {},
         planner_instruction=payload.get("planner_instruction"),
+        slot_preferences=payload.get("slot_preferences") or [],
+        prompt_overrides=_serialized_session_overrides(db, session.id),
+        strategy_reference_images=list_active_strategy_reference_images(db, session.id),
     )
     session.strategy_preview = preview
     session.latest_strategy_job_id = job.id
@@ -540,6 +1178,222 @@ def build_strategy(
 
 
 @router.post(
+    "/{session_id}/detail-pages/strategy/preview",
+    response_model=APIResponse[DetailStrategyPreviewData],
+    summary="生成详情页策略预览",
+    description="同步构建详情页策略预览。固定输出 8 个 Amazon detail page panel 规划，并持久化到 session.detail_strategy_preview。",
+    operation_id="buildDetailPageStrategyPreview",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def build_detail_strategy(
+    session_id: str,
+    req: DetailStrategyPreviewRequest | None = None,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    if not session.confirmed_copy:
+        raise AppError("invalid_session_status", "copy not ready", 400)
+    if not session.active_platform_id:
+        raise AppError("invalid_platform", "active platform required", 400)
+
+    payload = req.model_dump() if req is not None else {"planner_instruction": None}
+    product_images = list_active_session_images(db, session.id)
+    if not product_images:
+        raise AppError("missing_required_images", http_status=400)
+    style_images = list_active_detail_style_images(db, session.id)
+
+    preview = build_detail_strategy_preview(
+        merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+        product_images=product_images,
+        style_images=style_images,
+        analysis_snapshot=session.analysis_snapshot or {},
+        planner_instruction=payload.get("planner_instruction"),
+        panel_preferences=payload.get("panel_preferences") or [],
+        active_platform_id=session.active_platform_id,
+        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+    )
+    session.detail_strategy_preview = preview
+    db.commit()
+    return success_response({"session_id": session.id, "detail_strategy_preview": preview})
+
+
+@router.get(
+    "/{session_id}/strategy/overrides",
+    response_model=APIResponse[StrategyOverridesData],
+    summary="获取主图文案与 Prompt Override",
+    operation_id="getStrategyOverrides",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def get_strategy_overrides(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id)})
+
+
+@router.put(
+    "/{session_id}/strategy/overrides",
+    response_model=APIResponse[StrategyOverridesData],
+    summary="保存主图文案与 Prompt Override",
+    operation_id="saveStrategyOverrides",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def put_strategy_overrides(
+    session_id: str,
+    req: StrategyOverridesRequest,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    strategy_preview = _effective_strategy_preview(session, db) if session.confirmed_copy and session.active_platform_id else {}
+    valid_slot_ids = {
+        str(item.get("slot_id") or item.get("role") or "").strip()
+        for item in strategy_preview.get("asset_plan", [])
+        if isinstance(item, dict)
+    }
+    existing = {item.slot_id: item for item in list_session_prompt_overrides(db, session.id, asset_family="main_gallery")}
+    requested_slots: set[str] = set()
+
+    for override in req.overrides:
+        slot_id = override.slot_id.strip()
+        if valid_slot_ids and slot_id not in valid_slot_ids:
+            raise AppError("invalid_request", f"invalid slot_id: {slot_id}", 400)
+        requested_slots.add(slot_id)
+        record = existing.get(slot_id)
+        if record is None:
+            record = SessionPromptOverrideModel(
+                session_id=session.id,
+                asset_family="main_gallery",
+                slot_id=slot_id,
+            )
+            db.add(record)
+        if override.applied_preset_id:
+            get_prompt_preset_or_404(db, override.applied_preset_id)
+        record.copy_blocks_override = override.copy_blocks_override or {}
+        record.raw_prompt_override = override.raw_prompt_override
+        record.expression_mode_override = override.expression_mode_override
+        record.applied_preset_id = override.applied_preset_id
+        record.locked = override.locked
+
+    for slot_id, record in existing.items():
+        if slot_id not in requested_slots:
+            db.delete(record)
+
+    db.flush()
+    if session.confirmed_copy and session.active_platform_id:
+        preview = build_strategy_preview(
+            session.confirmed_copy,
+            session.active_platform_id,
+            session_images=list_active_session_images(db, session.id),
+            analysis_snapshot=session.analysis_snapshot or {},
+            parameter_snapshot=session.parameter_snapshot or {},
+            planner_instruction=(session.strategy_preview or {}).get("planner_instruction"),
+            slot_preferences=(session.strategy_preview or {}).get("slot_preferences") or [],
+            prompt_overrides=_serialized_session_overrides(db, session.id),
+            strategy_reference_images=list_active_strategy_reference_images(db, session.id),
+        )
+        session.strategy_preview = preview
+
+    db.commit()
+    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id)})
+
+
+@router.get(
+    "/{session_id}/detail-pages/strategy/overrides",
+    response_model=APIResponse[StrategyOverridesData],
+    summary="获取详情页文案与 Prompt Override",
+    operation_id="getDetailStrategyOverrides",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def get_detail_strategy_overrides(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    return success_response(
+        {
+            "session_id": session.id,
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page"),
+        }
+    )
+
+
+@router.put(
+    "/{session_id}/detail-pages/strategy/overrides",
+    response_model=APIResponse[StrategyOverridesData],
+    summary="保存详情页文案与 Prompt Override",
+    operation_id="saveDetailStrategyOverrides",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def put_detail_strategy_overrides(
+    session_id: str,
+    req: StrategyOverridesRequest,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    detail_preview = _effective_detail_strategy_preview(session, db) if session.confirmed_copy else {}
+    valid_slot_ids = {
+        str(item.get("slot_id") or item.get("panel_id") or "").strip()
+        for item in detail_preview.get("panel_plan", [])
+        if isinstance(item, dict)
+    }
+    existing = {item.slot_id: item for item in list_session_prompt_overrides(db, session.id, asset_family="detail_page")}
+    requested_slots: set[str] = set()
+
+    for override in req.overrides:
+        slot_id = override.slot_id.strip()
+        if valid_slot_ids and slot_id not in valid_slot_ids:
+            raise AppError("invalid_request", f"invalid detail slot_id: {slot_id}", 400)
+        requested_slots.add(slot_id)
+        record = existing.get(slot_id)
+        if record is None:
+            record = SessionPromptOverrideModel(
+                session_id=session.id,
+                asset_family="detail_page",
+                slot_id=slot_id,
+            )
+            db.add(record)
+        if override.applied_preset_id:
+            get_prompt_preset_or_404(db, override.applied_preset_id)
+        record.copy_blocks_override = override.copy_blocks_override or {}
+        record.raw_prompt_override = override.raw_prompt_override
+        record.expression_mode_override = override.expression_mode_override
+        record.applied_preset_id = override.applied_preset_id
+        record.locked = override.locked
+
+    for slot_id, record in existing.items():
+        if slot_id not in requested_slots:
+            db.delete(record)
+
+    db.flush()
+    if session.confirmed_copy and session.active_platform_id:
+        preview = build_detail_strategy_preview(
+            merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+            product_images=list_active_session_images(db, session.id),
+            style_images=list_active_detail_style_images(db, session.id),
+            analysis_snapshot=session.analysis_snapshot or {},
+            planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
+            panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
+            active_platform_id=session.active_platform_id,
+            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+        )
+        session.detail_strategy_preview = preview
+
+    db.commit()
+    return success_response(
+        {
+            "session_id": session.id,
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page"),
+        }
+    )
+
+
+@router.post(
     "/{session_id}/prompts/preview",
     response_model=APIResponse[PromptPreviewData],
     summary="预览 Prompt",
@@ -554,38 +1408,34 @@ def preview_prompts(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    strategy_preview = _effective_strategy_preview(session)
+    strategy_preview = _effective_strategy_preview(session, db)
     if not strategy_preview.get("reference_manifest"):
         strategy_preview = build_strategy_preview(
             session.confirmed_copy or {},
             session.active_platform_id or "temu",
             session_images=list_active_session_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
+            parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=strategy_preview.get("planner_instruction"),
+            slot_preferences=strategy_preview.get("slot_preferences") or [],
+            prompt_overrides=_serialized_session_overrides(db, session.id),
+            strategy_reference_images=list_active_strategy_reference_images(db, session.id),
         )
     prompts = build_prompt_previews(
-        confirmed_copy=session.confirmed_copy or {},
+        confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
         strategy_preview=strategy_preview,
         instruction=req.instruction,
     )
 
     latest_assets: list[dict] = []
     if req.include_latest_assets and session.latest_result_version > 0:
-        assets = (
-            db.query(AssetModel)
-            .filter(
-                AssetModel.session_id == session.id,
-                AssetModel.version_no == session.latest_result_version,
-                AssetModel.status == "ready",
-            )
-            .order_by(AssetModel.display_order.asc())
-            .all()
-        )
+        assets = _main_gallery_assets_query(db, session.id, session.latest_result_version).all()
         latest_assets = [
             {
                 "asset_id": asset.id,
                 "version_no": asset.version_no,
                 "role": asset.asset_role,
+                "slot_id": asset.slot_id,
                 "display_order": asset.display_order,
                 "prompt_snapshot": asset.prompt_snapshot,
                 "edit_instruction": asset.edit_instruction,
@@ -593,6 +1443,10 @@ def preview_prompts(
                 "reference_image_ids": (asset.generation_snapshot or {}).get("reference_image_ids", []),
                 "upstream_endpoint": (asset.generation_snapshot or {}).get("upstream_endpoint"),
                 "planner_instruction": (asset.generation_snapshot or {}).get("planner_instruction"),
+                "expression_mode": asset.expression_mode or (asset.generation_snapshot or {}).get("expression_mode"),
+                "rule_pack_id": asset.rule_pack_id or (asset.generation_snapshot or {}).get("rule_pack_id"),
+                "raw_prompt_override": (asset.generation_snapshot or {}).get("raw_prompt_override"),
+                "applied_preset_id": (asset.generation_snapshot or {}).get("applied_preset_id"),
             }
             for asset in assets
         ]
@@ -605,6 +1459,65 @@ def preview_prompts(
             "model": settings.whatai_image_model,
             "image_size": "1024x1024",
             "reference_manifest": strategy_preview.get("reference_manifest", []),
+            "prompts": prompts,
+            "latest_assets": latest_assets,
+        }
+    )
+
+
+@router.post(
+    "/{session_id}/detail-pages/prompts/preview",
+    response_model=APIResponse[DetailPromptPreviewData],
+    summary="预览详情页 Prompt",
+    description="按当前 session 的 detail_strategy_preview 生成 8 个详情页 panel 的 prompt 预览，可选带出最近一版真实执行快照。",
+    operation_id="previewDetailPagePrompts",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def preview_detail_prompts(
+    session_id: str,
+    req: PromptPreviewRequest,
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    detail_strategy_preview = _effective_detail_strategy_preview(session, db)
+    prompts = build_detail_prompt_previews(
+        confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        strategy_preview=detail_strategy_preview,
+        instruction=req.instruction,
+    )
+
+    latest_assets: list[dict] = []
+    if req.include_latest_assets and session.detail_latest_result_version > 0:
+        assets = _detail_page_assets_query(db, session.id, session.detail_latest_result_version).all()
+        latest_assets = [
+            {
+                "asset_id": asset.id,
+                "asset_kind": asset.asset_kind,
+                "version_no": asset.version_no,
+                "panel_id": asset.asset_role,
+                "slot_id": asset.slot_id,
+                "display_order": asset.display_order,
+                "prompt_snapshot": asset.prompt_snapshot,
+                "edit_instruction": asset.edit_instruction,
+                "generation_snapshot": asset.generation_snapshot,
+                "panel_type": (asset.generation_snapshot or {}).get("panel_type"),
+            }
+            for asset in assets
+        ]
+
+    settings = get_settings()
+    return success_response(
+        {
+            "session_id": session.id,
+            "active_platform_id": session.active_platform_id,
+            "use_case": detail_strategy_preview.get("use_case", DETAIL_PAGE_USE_CASE),
+            "aspect_ratio": detail_strategy_preview.get("aspect_ratio", DETAIL_PAGE_ASPECT_RATIO),
+            "panel_count": detail_strategy_preview.get("panel_count", DETAIL_PAGE_PANEL_COUNT),
+            "model": settings.whatai_image_model,
+            "image_size": DETAIL_PAGE_IMAGE_SIZE,
+            "product_reference_manifest": detail_strategy_preview.get("product_reference_manifest", []),
+            "style_reference_manifest": detail_strategy_preview.get("style_reference_manifest", []),
             "prompts": prompts,
             "latest_assets": latest_assets,
         }
@@ -629,6 +1542,16 @@ def generate_gallery(
     session = get_session_or_404(db, session_id, str(user_id))
     if session.status not in {"strategy_ready", "completed"}:
         raise AppError("invalid_session_status", "strategy not ready", 400)
+    if req.slot_ids:
+        strategy_preview = _effective_strategy_preview(session, db)
+        valid_slot_ids = {
+            str(item.get("slot_id") or item.get("role") or "").strip()
+            for item in strategy_preview.get("asset_plan", [])
+            if isinstance(item, dict)
+        }
+        invalid_slot_ids = [slot_id for slot_id in req.slot_ids if slot_id not in valid_slot_ids]
+        if invalid_slot_ids:
+            raise AppError("invalid_request", f"invalid slot_ids: {invalid_slot_ids}", 400)
 
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
 
@@ -667,7 +1590,71 @@ def generate_gallery(
         idem_record.response_payload = response_data
 
     db.commit()
-    dispatch_job(job.id, queue="q.generation")
+    dispatch_job(job.id, queue="q.generation.main")
+    return success_response(response_data)
+
+
+@router.post(
+    "/{session_id}/detail-pages/generations",
+    response_model=APIResponse[DetailGenerationJobData],
+    summary="触发详情页生成",
+    description="为当前 session 创建 generate_detail_page 任务。固定生成 8 张 21:9 panel 图和 1 张竖向拼接长图。支持 `Idempotency-Key`。",
+    operation_id="generateDetailPage",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def generate_detail_page(
+    session_id: str,
+    req: GenerateGalleryRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    if not session.confirmed_copy:
+        raise AppError("invalid_session_status", "copy not ready", 400)
+    if not session.active_platform_id:
+        raise AppError("invalid_platform", "active platform required", 400)
+    if not list_active_session_images(db, session.id):
+        raise AppError("missing_required_images", http_status=400)
+
+    payload = req.model_dump()
+
+    idem_record = None
+    if idempotency_key:
+        hit, cached, idem_record = check_or_create_idempotency(
+            db,
+            str(user_id),
+            f"POST /sessions/{session_id}/detail-pages/generations",
+            idempotency_key,
+            payload,
+        )
+        if hit:
+            return success_response(cached)
+
+    ensure_no_running_generation_jobs(db, session.id, str(user_id))
+    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+
+    job = create_job(
+        db,
+        session_id=session.id,
+        user_id=str(user_id),
+        job_type="generate_detail_page",
+        input_payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    session.latest_detail_generate_job_id = job.id
+    response_data = {
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "status": job.status,
+        "session_id": session.id,
+        "detail_generation_round": session.detail_generation_round + 1,
+    }
+    if idem_record is not None:
+        idem_record.response_payload = response_data
+
+    db.commit()
+    dispatch_job(job.id, queue="q.generation.detail")
     return success_response(response_data)
 
 
@@ -687,27 +1674,27 @@ def get_results(
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
     target_version = version or session.latest_result_version
-    assets = (
-        db.query(AssetModel)
-        .filter(
-            AssetModel.session_id == session.id,
-            AssetModel.version_no == target_version,
-            AssetModel.status == "ready",
-        )
-        .order_by(AssetModel.display_order.asc())
-        .all()
-    )
+    available_versions = _available_versions(db, session.id, asset_family="main_gallery")
+    version_summaries = _version_summaries(db, session.id, asset_family="main_gallery")
+    assets = _main_gallery_assets_query(db, session.id, target_version).all()
     return success_response(
         {
             "session_id": session.id,
             "status": session.status,
             "generation_round": session.generation_round,
             "latest_result_version": session.latest_result_version,
+            "requested_version": target_version,
+            "available_versions": available_versions,
+            "version_summaries": version_summaries,
             "summary": {"total_count": len(assets), "ready_count": len(assets)},
             "assets": [
                 {
                     "asset_id": asset.id,
                     "role": asset.asset_role,
+                    "slot_id": asset.slot_id,
+                    "expression_mode": asset.expression_mode,
+                    "rule_pack_id": asset.rule_pack_id,
+                    "render_total_ms": (asset.generation_snapshot or {}).get("timing", {}).get("render_total_ms"),
                     "status": asset.status,
                     "display_order": asset.display_order,
                     "image_url": asset.image_url,
@@ -718,6 +1705,85 @@ def get_results(
                 }
                 for asset in assets
             ],
+        }
+    )
+
+
+@router.get(
+    "/{session_id}/detail-pages/results",
+    response_model=APIResponse[DetailResultsData],
+    summary="获取详情页结果",
+    description="按 session 返回某一详情页版本的 ready 资产列表。不传 version 时默认返回 `detail_latest_result_version`。",
+    operation_id="getDetailPageResults",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def get_detail_page_results(
+    session_id: str,
+    version: int | None = Query(default=None, description="可选详情页结果版本号。为空时返回最近一版。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+) -> dict:
+    session = get_session_or_404(db, session_id, str(user_id))
+    target_version = version or session.detail_latest_result_version
+    available_versions = _available_versions(db, session.id, asset_family="detail_page")
+    version_summaries = _version_summaries(db, session.id, asset_family="detail_page")
+    assets = _detail_page_assets_query(db, session.id, target_version).all()
+    panel_plan_by_id = {
+        str(item.get("slot_id") or item.get("panel_id")): item
+        for item in (session.detail_strategy_preview or {}).get("panel_plan", [])
+        if isinstance(item, dict) and (item.get("slot_id") or item.get("panel_id"))
+    }
+    panels = [asset for asset in assets if asset.asset_kind == "panel"]
+    stitched_asset = next((asset for asset in assets if asset.asset_kind == "stitched"), None)
+
+    return success_response(
+        {
+            "session_id": session.id,
+            "status": session.status,
+            "detail_generation_round": session.detail_generation_round,
+            "detail_latest_result_version": session.detail_latest_result_version,
+            "requested_version": target_version,
+            "available_versions": available_versions,
+            "version_summaries": version_summaries,
+            "use_case": DETAIL_PAGE_USE_CASE,
+            "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+            "summary": {
+                "total_count": len(assets),
+                "ready_count": len(assets),
+                "panel_count": len(panels),
+            },
+            "panels": [
+                {
+                    "asset_id": asset.id,
+                    "panel_id": asset.asset_role,
+                    "slot_id": asset.slot_id,
+                    "panel_label": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("panel_label"),
+                    "panel_type": (asset.generation_snapshot or {}).get("panel_type"),
+                    "render_total_ms": (asset.generation_snapshot or {}).get("timing", {}).get("render_total_ms"),
+                    "status": asset.status,
+                    "display_order": asset.display_order,
+                    "image_url": asset.image_url,
+                    "thumbnail_url": asset.thumbnail_url,
+                    "width": asset.width,
+                    "height": asset.height,
+                    "version_no": asset.version_no,
+                }
+                for asset in panels
+            ],
+            "stitched_asset": (
+                {
+                    "asset_id": stitched_asset.id,
+                    "status": stitched_asset.status,
+                    "display_order": stitched_asset.display_order,
+                    "image_url": stitched_asset.image_url,
+                    "thumbnail_url": stitched_asset.thumbnail_url,
+                    "width": stitched_asset.width,
+                    "height": stitched_asset.height,
+                    "version_no": stitched_asset.version_no,
+                }
+                if stitched_asset is not None
+                else None
+            ),
         }
     )
 
@@ -773,7 +1839,7 @@ def global_edit(
         idem_record.response_payload = response_data
 
     db.commit()
-    dispatch_job(job.id, queue="q.generation")
+    dispatch_job(job.id, queue="q.generation.main")
     return success_response(response_data)
 
 
@@ -825,7 +1891,7 @@ def regenerate_gallery(
         idem_record.response_payload = response_data
 
     db.commit()
-    dispatch_job(job.id, queue="q.generation")
+    dispatch_job(job.id, queue="q.generation.main")
     return success_response(response_data)
 
 
@@ -847,21 +1913,42 @@ def download_results(
 ):
     session = get_session_or_404(db, session_id, str(user_id))
     target_version = version or session.latest_result_version
-    assets = (
-        db.query(AssetModel)
-        .filter(
-            and_(
-                AssetModel.session_id == session.id,
-                AssetModel.version_no == target_version,
-                AssetModel.status == "ready",
-            )
-        )
-        .order_by(AssetModel.display_order.asc())
-        .all()
-    )
+    assets = _main_gallery_assets_query(db, session.id, target_version).all()
     zip_path = build_zip_for_assets(session.id, target_version, [{"image_url": a.image_url} for a in assets])
     return FileResponse(
         path=zip_path,
         media_type="application/zip",
         filename=f"session_{session.id}_v{target_version}.zip",
+    )
+
+
+@router.get(
+    "/{session_id}/detail-pages/download",
+    summary="下载详情页结果 ZIP",
+    description="将指定详情页结果版本的 ready 资产打包为 ZIP 并下载。不传 version 时默认下载最近一版详情页结果。",
+    operation_id="downloadDetailPageResults",
+    responses={
+        200: {"description": "ZIP 文件下载流。", "content": {"application/zip": {}}},
+        **OPENAPI_ERROR_RESPONSES,
+    },
+)
+def download_detail_page_results(
+    session_id: str,
+    version: int | None = Query(default=None, description="可选详情页结果版本号。为空时下载最近一版。"),
+    db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
+):
+    session = get_session_or_404(db, session_id, str(user_id))
+    target_version = version or session.detail_latest_result_version
+    assets = _detail_page_assets_query(db, session.id, target_version).all()
+    zip_path = build_zip_for_assets(
+        session.id,
+        target_version,
+        [{"image_url": asset.image_url} for asset in assets],
+        file_prefix="detail_page_results",
+    )
+    return FileResponse(
+        path=zip_path,
+        media_type="application/zip",
+        filename=f"session_{session.id}_detail_page_v{target_version}.zip",
     )

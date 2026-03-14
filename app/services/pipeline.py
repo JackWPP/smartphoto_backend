@@ -1,31 +1,50 @@
 from __future__ import annotations
 
+import io
 import logging
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
+from PIL import Image
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.errors import AppError
 from app.models.asset import AssetModel
+from app.models.detail_style_image import DetailStyleImageModel
 from app.models.job import JobModel
+from app.models.parameter_attachment import ParameterAttachmentModel
+from app.models.prompt_preset import PromptPresetModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
+from app.models.session_prompt_override import SessionPromptOverrideModel
+from app.models.strategy_reference_image import StrategyReferenceImageModel
 from app.services.copy_normalization import normalize_copy_payload
+from app.services.detail_pages import (
+    DETAIL_PAGE_ASPECT_RATIO,
+    DETAIL_PAGE_IMAGE_SIZE,
+    build_detail_prompt_previews,
+    build_detail_reference_grids,
+    build_detail_strategy_preview,
+    compose_detail_panel_prompt,
+    normalize_detail_strategy_preview,
+)
 from app.services.jobs import append_job_event, update_job_status
 from app.services.locking import release_locks
+from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
 from app.services.prompts import compose_prompt
 from app.services.reference_images import load_reference_images, select_reference_images_for_role
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import LocalStorageAdapter
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview
+from app.services.strategy_overrides import serialize_session_override
 from app.services.upstream import WhataiClient
 from app.services.white_bg import strengthen_white_bg_instruction, validate_white_background
 
 COPY_TARGETS = {"headline", "selling_points", "usage_scenes", "specs"}
-MAX_GENERATION_CONCURRENCY = 2
 ASSET_RENDER_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
 
@@ -53,6 +72,57 @@ def _session_images(db: Session, session_id: str) -> list[SessionImageModel]:
     )
 
 
+def _detail_style_images(db: Session, session_id: str) -> list[DetailStyleImageModel]:
+    return (
+        db.query(DetailStyleImageModel)
+        .filter(and_(DetailStyleImageModel.session_id == session_id, DetailStyleImageModel.is_deleted.is_(False)))
+        .order_by(DetailStyleImageModel.display_order.asc())
+        .all()
+    )
+
+
+def _parameter_attachments(db: Session, session_id: str) -> list[ParameterAttachmentModel]:
+    return (
+        db.query(ParameterAttachmentModel)
+        .filter(and_(ParameterAttachmentModel.session_id == session_id, ParameterAttachmentModel.is_deleted.is_(False)))
+        .order_by(ParameterAttachmentModel.display_order.asc())
+        .all()
+    )
+
+
+def _strategy_reference_images(db: Session, session_id: str) -> list[StrategyReferenceImageModel]:
+    return (
+        db.query(StrategyReferenceImageModel)
+        .filter(and_(StrategyReferenceImageModel.session_id == session_id, StrategyReferenceImageModel.is_deleted.is_(False)))
+        .order_by(StrategyReferenceImageModel.display_order.asc())
+        .all()
+    )
+
+
+def _session_prompt_overrides(db: Session, session_id: str) -> list[dict[str, Any]]:
+    overrides = (
+        db.query(SessionPromptOverrideModel)
+        .filter(
+            SessionPromptOverrideModel.session_id == session_id,
+            SessionPromptOverrideModel.asset_family == "main_gallery",
+        )
+        .order_by(SessionPromptOverrideModel.slot_id.asc())
+        .all()
+    )
+    preset_ids = [override.applied_preset_id for override in overrides if override.applied_preset_id]
+    presets_by_id: dict[str, PromptPresetModel] = {}
+    if preset_ids:
+        presets = db.query(PromptPresetModel).filter(PromptPresetModel.id.in_(preset_ids)).all()
+        presets_by_id = {preset.id: preset for preset in presets}
+    return [
+        serialize_session_override(
+            override,
+            preset=presets_by_id.get(override.applied_preset_id) if override.applied_preset_id else None,
+        )
+        for override in overrides
+    ]
+
+
 def _snapshot_section(snapshot: dict, key: str, *, text_key: str | None = None) -> dict:
     value = snapshot.get(key)
     if isinstance(value, dict):
@@ -70,6 +140,35 @@ def _snapshot_string_list(snapshot: dict, key: str) -> list[str]:
         normalized = value.replace("｜", ",").replace("、", ",").replace("/", ",")
         return [item.strip() for item in normalized.split(",") if item.strip()]
     return []
+
+
+def _attachment_markdown(path, mime_type: str) -> str:
+    if mime_type.startswith("image/"):
+        return ""
+    if mime_type == "application/pdf":
+        try:
+            import pymupdf4llm  # type: ignore
+
+            markdown = str(pymupdf4llm.to_markdown(str(path)) or "").strip()
+            if markdown:
+                return markdown[:12000]
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import fitz  # type: ignore
+
+            doc = fitz.open(str(path))
+            pages = [page.get_text("text") for page in doc]
+            text = "\n\n".join(part.strip() for part in pages if part and part.strip())
+            if text:
+                return text[:12000]
+        except Exception:  # noqa: BLE001
+            return ""
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")[:12000]
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def run_analysis_job(db: Session, job_id: str) -> None:
@@ -99,6 +198,7 @@ def run_analysis_job(db: Session, job_id: str) -> None:
 
     loaded_images = load_reference_images(images)
     snapshot = client.analyze_images(loaded_images, session.active_platform_id)
+    snapshot["reanalysis_required"] = False
 
     update_job_status(db, job, status="running", progress=80, stage="finalizing")
     append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 80, "stage": "finalizing"})
@@ -129,6 +229,65 @@ def run_analysis_job(db: Session, job_id: str) -> None:
 
     result_payload = {"analysis_snapshot": snapshot}
     update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
+    append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+
+
+def run_extract_parameters_job(db: Session, job_id: str) -> None:
+    client = WhataiClient()
+    storage = LocalStorageAdapter()
+    job = _require_job(db, job_id)
+    session = _require_session(db, job.session_id)
+
+    attachments = _parameter_attachments(db, session.id)
+    if not attachments:
+        update_job_status(
+            db,
+            job,
+            status="failed",
+            error_code="40001",
+            error_message="parameter attachments missing",
+            progress=100,
+        )
+        append_job_event(db, job.id, "job_failed", {"event": "job_failed", "error": "parameter attachments missing"})
+        raise AppError("invalid_request", "parameter attachments missing", 400)
+
+    update_job_status(db, job, status="running", progress=10, stage="extracting")
+    append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
+
+    image_attachments = [attachment for attachment in attachments if attachment.mime_type.startswith("image/")]
+    loaded_images = load_reference_images(image_attachments, storage=storage) if image_attachments else []
+    file_attachments = []
+    for attachment in attachments:
+        path = storage.resolve_url_to_path(attachment.source_url)
+        file_attachments.append(
+            {
+                "attachment_id": attachment.id,
+                "original_name": attachment.original_name,
+                "mime_type": attachment.mime_type,
+                "file_size": attachment.file_size,
+                "markdown_content": _attachment_markdown(path, attachment.mime_type),
+            }
+        )
+
+    snapshot = client.extract_parameters(
+        confirmed_copy=session.confirmed_copy or {},
+        active_platform_id=session.active_platform_id,
+        image_attachments=loaded_images,
+        file_attachments=file_attachments,
+    )
+
+    session.parameter_snapshot = snapshot
+    session.latest_parameter_job_id = job.id
+    session.current_step = max(session.current_step, 3)
+
+    update_job_status(
+        db,
+        job,
+        status="succeeded",
+        progress=100,
+        stage="done",
+        result_payload={"parameter_snapshot": snapshot},
+    )
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
 
 
@@ -164,19 +323,34 @@ def _prepare_assets_plan(job: JobModel, strategy_preview: dict, session: Session
 
     if job.job_type == "regenerate_asset":
         plan_item = payload["asset_plan_item"]
-        base_by_role = {
-            item["role"]: item
+        base_by_slot = {
+            str(item.get("slot_id") or item.get("role")): item
             for item in strategy_preview.get("asset_plan", [])
-            if isinstance(item, dict) and item.get("role")
+            if isinstance(item, dict) and (item.get("slot_id") or item.get("role"))
         }
-        base = base_by_role.get(plan_item.get("role"), {})
+        base = base_by_slot.get(str(plan_item.get("slot_id") or plan_item.get("role") or ""), {})
         return [{**base, **plan_item}]
 
     plan = strategy_preview.get("asset_plan") or []
     if not plan:
-        plan = build_strategy_preview(session.confirmed_copy or {}, session.active_platform_id or "temu").get(
-            "asset_plan", []
-        )
+        plan = build_strategy_preview(
+            session.confirmed_copy or {},
+            session.active_platform_id or "temu",
+            parameter_snapshot=session.parameter_snapshot or {},
+            planner_instruction=(strategy_preview or {}).get("planner_instruction"),
+            slot_preferences=(strategy_preview or {}).get("slot_preferences") or [],
+        ).get("asset_plan", [])
+    requested_slot_ids = {
+        str(value).strip()
+        for value in payload.get("slot_ids", [])
+        if str(value).strip()
+    }
+    if requested_slot_ids:
+        plan = [
+            item
+            for item in plan
+            if str(item.get("slot_id") or item.get("role") or "").strip() in requested_slot_ids
+        ]
     return sorted(plan, key=lambda item: int(item.get("display_order") or 0))
 
 
@@ -184,18 +358,85 @@ def _mark_superseded_assets(
     db: Session,
     session_id: str,
     version_no: int,
+    *,
+    asset_family: str = "main_gallery",
     include_all: bool = True,
     asset_ids: Iterable[str] | None = None,
 ) -> None:
     query = db.query(AssetModel).filter(
         AssetModel.session_id == session_id,
         AssetModel.version_no == version_no,
+        AssetModel.asset_family == asset_family,
         AssetModel.status == "ready",
     )
     if not include_all and asset_ids:
         query = query.filter(AssetModel.id.in_(list(asset_ids)))
     for asset in query.all():
         asset.status = "superseded"
+
+
+def _version_assets(
+    db: Session,
+    session_id: str,
+    version_no: int,
+    *,
+    asset_family: str = "main_gallery",
+) -> list[AssetModel]:
+    return (
+        db.query(AssetModel)
+        .filter(
+            AssetModel.session_id == session_id,
+            AssetModel.version_no == version_no,
+            AssetModel.asset_family == asset_family,
+            AssetModel.status == "ready",
+        )
+        .order_by(AssetModel.display_order.asc())
+        .all()
+    )
+
+
+def _clone_asset_for_version(
+    source_asset: AssetModel,
+    *,
+    job_id: str,
+    round_no: int,
+    version_no: int,
+    edit_instruction: str | None,
+) -> AssetModel:
+    snapshot = dict(source_asset.generation_snapshot or {})
+    snapshot.update(
+        {
+            "carry_forward": True,
+            "source_asset_id": source_asset.id,
+            "source_version_no": source_asset.version_no,
+            "source_round_no": source_asset.round_no,
+        }
+    )
+    return AssetModel(
+        session_id=source_asset.session_id,
+        job_id=job_id,
+        round_no=round_no,
+        version_no=version_no,
+        parent_asset_id=None,
+        platform_id=source_asset.platform_id,
+        asset_family=source_asset.asset_family,
+        asset_kind=source_asset.asset_kind,
+        asset_role=source_asset.asset_role,
+        slot_id=source_asset.slot_id,
+        expression_mode=source_asset.expression_mode,
+        rule_pack_id=source_asset.rule_pack_id,
+        display_order=source_asset.display_order,
+        image_url=source_asset.image_url,
+        thumbnail_url=source_asset.thumbnail_url,
+        width=source_asset.width,
+        height=source_asset.height,
+        mime_type=source_asset.mime_type,
+        file_size=source_asset.file_size,
+        prompt_snapshot=source_asset.prompt_snapshot,
+        edit_instruction=edit_instruction,
+        generation_snapshot=snapshot,
+        status="ready",
+    )
 
 
 def run_generate_family_job(db: Session, job_id: str) -> None:
@@ -226,34 +467,42 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         if not images:
             raise AppError("missing_required_images", http_status=400)
         loaded_reference_images = load_reference_images(images, storage=storage)
-        effective_strategy_preview = _ensure_generation_strategy_preview(session, images)
+        effective_strategy_preview = _ensure_generation_strategy_preview(db, session, images)
 
         if job.job_type in {"generate_gallery", "regenerate_gallery", "global_edit"}:
             round_no = session.generation_round + 1
 
         version_no = last_version + 1
         plan = _prepare_assets_plan(job, effective_strategy_preview, session)
-
-        if job.job_type in {"global_edit", "regenerate_gallery"}:
-            _mark_superseded_assets(db, session.id, last_version)
-
-        if job.job_type == "regenerate_asset":
+        carry_forward_sources: list[AssetModel] = []
+        if job.job_type == "regenerate_asset" and last_version > 0:
             parent_asset_id = payload.get("parent_asset_id")
-            if parent_asset_id:
-                _mark_superseded_assets(db, session.id, last_version, include_all=False, asset_ids=[parent_asset_id])
+            regenerated_slot_ids = {
+                str(item.get("slot_id") or item.get("role") or "").strip()
+                for item in plan
+                if isinstance(item, dict)
+            }
+            for asset in _version_assets(db, session.id, last_version, asset_family="main_gallery"):
+                if asset.id == parent_asset_id:
+                    continue
+                slot_id = str(asset.slot_id or asset.asset_role or "").strip()
+                if slot_id in regenerated_slot_ids:
+                    continue
+                carry_forward_sources.append(asset)
 
         rendered_assets = _render_assets_concurrently(
-            confirmed_copy=session.confirmed_copy or {},
+            confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
             strategy_preview=effective_strategy_preview,
             plan=plan,
             instruction=instruction,
             loaded_reference_images=loaded_reference_images,
         )
 
-        total = max(len(rendered_assets), 1)
+        total = max(len(rendered_assets) + len(carry_forward_sources), 1)
         created_assets: list[AssetModel] = []
+        progress_index = 0
 
-        for idx, rendered in enumerate(sorted(rendered_assets, key=lambda item: item["display_order"]), start=1):
+        for rendered in sorted(rendered_assets, key=lambda item: item["display_order"]):
             image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
                 session_id=session.id,
                 round_no=round_no,
@@ -271,7 +520,12 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                 version_no=version_no,
                 parent_asset_id=payload.get("parent_asset_id"),
                 platform_id=session.active_platform_id,
+                asset_family="main_gallery",
+                asset_kind="panel",
                 asset_role=rendered["role"],
+                slot_id=rendered.get("slot_id"),
+                expression_mode=rendered.get("expression_mode"),
+                rule_pack_id=rendered.get("rule_pack_id"),
                 display_order=rendered["display_order"],
                 image_url=image_url,
                 thumbnail_url=thumb_url,
@@ -288,7 +542,8 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
             db.flush()
             created_assets.append(asset)
 
-            progress = int((idx / total) * 90)
+            progress_index += 1
+            progress = int((progress_index / total) * 90)
             update_job_status(db, job, status="running", progress=progress, stage="generating")
             append_job_event(
                 db,
@@ -298,6 +553,35 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                     "event": "asset_ready",
                     "asset_id": asset.id,
                     "display_order": rendered["display_order"],
+                    "render_total_ms": (rendered.get("generation_snapshot") or {}).get("timing", {}).get("render_total_ms"),
+                },
+            )
+
+        for source_asset in carry_forward_sources:
+            asset = _clone_asset_for_version(
+                source_asset,
+                job_id=job.id,
+                round_no=round_no,
+                version_no=version_no,
+                edit_instruction=instruction,
+            )
+            db.add(asset)
+            db.flush()
+            created_assets.append(asset)
+
+            progress_index += 1
+            progress = int((progress_index / total) * 90)
+            update_job_status(db, job, status="running", progress=progress, stage="generating")
+            append_job_event(
+                db,
+                job.id,
+                "asset_ready",
+                {
+                    "event": "asset_ready",
+                    "asset_id": asset.id,
+                    "display_order": asset.display_order,
+                    "carry_forward": True,
+                    "render_total_ms": 0,
                 },
             )
 
@@ -331,22 +615,35 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         release_locks(lock_keys)
 
 
-def _ensure_generation_strategy_preview(session: SessionModel, session_images: list[SessionImageModel]) -> dict:
-    effective_strategy_preview = normalize_strategy_preview(
-        session.strategy_preview,
-        session.confirmed_copy or {},
-        session.active_platform_id or "temu",
-    )
-    if effective_strategy_preview.get("reference_manifest") and effective_strategy_preview.get("prompt_plan"):
-        return effective_strategy_preview
-
+def _ensure_generation_strategy_preview(db: Session, session: SessionModel, session_images: list[SessionImageModel]) -> dict:
+    existing_preview = session.strategy_preview or {}
+    prompt_overrides = _session_prompt_overrides(db, session.id)
+    strategy_reference_images = _strategy_reference_images(db, session.id)
     rebuilt = build_strategy_preview(
         session.confirmed_copy or {},
         session.active_platform_id or "temu",
         session_images=session_images,
         analysis_snapshot=session.analysis_snapshot or {},
-        planner_instruction=(session.strategy_preview or {}).get("planner_instruction") if session.strategy_preview else None,
+        parameter_snapshot=session.parameter_snapshot or {},
+        planner_instruction=existing_preview.get("planner_instruction"),
+        slot_preferences=existing_preview.get("slot_preferences") or [],
+        prompt_overrides=prompt_overrides,
+        strategy_reference_images=strategy_reference_images,
     )
+    effective_strategy_preview = normalize_strategy_preview(
+        existing_preview,
+        session.confirmed_copy or {},
+        session.active_platform_id or "temu",
+        prompt_overrides=prompt_overrides,
+        parameter_snapshot=session.parameter_snapshot or {},
+    )
+    if (
+        effective_strategy_preview.get("reference_manifest")
+        and effective_strategy_preview.get("prompt_plan")
+        and effective_strategy_preview.get("input_hash") == rebuilt.get("input_hash")
+    ):
+        return effective_strategy_preview
+
     session.strategy_preview = rebuilt
     return rebuilt
 
@@ -359,22 +656,256 @@ def _render_assets_concurrently(
     instruction: str | None,
     loaded_reference_images: list,
 ) -> list[dict[str, object]]:
-    rendered: list[dict[str, object]] = []
-    with ThreadPoolExecutor(max_workers=min(MAX_GENERATION_CONCURRENCY, max(len(plan), 1))) as executor:
+    if not plan:
+        return []
+
+    client = WhataiClient()
+    settings = get_settings()
+    render_specs = [
+        _prepare_main_render_spec(
+            confirmed_copy=confirmed_copy,
+            strategy_preview=strategy_preview,
+            plan_item=plan_item,
+            instruction=instruction,
+            loaded_reference_images=loaded_reference_images,
+        )
+        for plan_item in plan
+    ]
+    submitted_specs = _submit_render_specs(
+        client=client,
+        render_specs=render_specs,
+        max_workers=settings.generation_submit_concurrency,
+    )
+    poll_started = time.perf_counter()
+    results_by_submission = client.poll_image_tasks(
+        [spec["submission"] for spec in submitted_specs],
+        "upstream_image_error",
+    )
+    poll_ms = int((time.perf_counter() - poll_started) * 1000)
+    rendered_specs = _materialize_render_specs(
+        client=client,
+        render_specs=[
+            {**spec, "timing": {**dict(spec.get("timing") or {}), "poll_ms": poll_ms}}
+            for spec in submitted_specs
+        ],
+        results_by_submission=results_by_submission,
+        max_workers=settings.main_generation_concurrency,
+    )
+    return [
+        _finalize_main_rendered_asset(
+            client=client,
+            confirmed_copy=confirmed_copy,
+            strategy_preview=strategy_preview,
+            render_spec=render_spec,
+            instruction=instruction,
+        )
+        for render_spec in rendered_specs
+    ]
+
+
+def _prepare_main_render_spec(
+    *,
+    confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, object],
+    plan_item: dict[str, object],
+    instruction: str | None,
+    loaded_reference_images: list,
+) -> dict[str, Any]:
+    role = str(plan_item["role"])
+    slot_id = str(plan_item.get("slot_id") or role)
+    display_order = int(plan_item["display_order"])
+    aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
+    image_size = _resolve_image_size(aspect_ratio)
+    reference_role = str(plan_item.get("reference_role_hint") or slot_id or role)
+    reference_images = select_reference_images_for_role(loaded_reference_images, reference_role)
+    prompt_payload = compose_prompt(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        asset_role=role,
+        instruction=instruction,
+        plan_item=plan_item,
+    )
+    return {
+        "submission_id": f"main:{slot_id}:{display_order}",
+        "role": role,
+        "slot_id": slot_id,
+        "display_order": display_order,
+        "aspect_ratio": aspect_ratio,
+        "image_size": image_size,
+        "plan_item": plan_item,
+        "prompt_payload": prompt_payload,
+        "reference_images": reference_images,
+        "planner_instruction": str(strategy_preview.get("planner_instruction") or "") or None,
+    }
+
+
+def _submit_render_specs(
+    *,
+    client: WhataiClient,
+    render_specs: list[dict[str, Any]],
+    max_workers: int,
+) -> list[dict[str, Any]]:
+    if not render_specs:
+        return []
+
+    submitted: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(render_specs)))) as executor:
+        future_map = {
+            executor.submit(_submit_single_render_spec, client=client, render_spec=render_spec): render_spec
+            for render_spec in render_specs
+        }
+        for future in as_completed(future_map):
+            submitted.append(future.result())
+    return submitted
+
+
+def _submit_single_render_spec(
+    *,
+    client: WhataiClient,
+    render_spec: dict[str, Any],
+) -> dict[str, Any]:
+    submit_started = time.perf_counter()
+    submission = _submit_image_request_with_retry(
+        client=client,
+        prompt=render_spec["prompt_payload"]["final_prompt"],
+        image_size=render_spec["image_size"],
+        aspect_ratio=render_spec["aspect_ratio"],
+        reference_images=render_spec["reference_images"],
+        role=render_spec["role"],
+        display_order=render_spec["display_order"],
+        submission_id=render_spec["submission_id"],
+    )
+    return {
+        **render_spec,
+        "submission": submission,
+        "timing": {
+            "submit_ms": int((time.perf_counter() - submit_started) * 1000),
+        },
+    }
+
+
+def _materialize_render_specs(
+    *,
+    client: WhataiClient,
+    render_specs: list[dict[str, Any]],
+    results_by_submission: dict[str, dict[str, Any]],
+    max_workers: int,
+) -> list[dict[str, Any]]:
+    if not render_specs:
+        return []
+
+    rendered: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(render_specs)))) as executor:
         future_map = {
             executor.submit(
-                _render_single_asset,
-                confirmed_copy=confirmed_copy,
-                strategy_preview=strategy_preview,
-                plan_item=plan_item,
-                instruction=instruction,
-                loaded_reference_images=loaded_reference_images,
-            ): plan_item
-            for plan_item in plan
+                _download_single_render_spec,
+                client=client,
+                render_spec=render_spec,
+                result=results_by_submission.get(str(render_spec["submission_id"])),
+            ): render_spec
+            for render_spec in render_specs
         }
         for future in as_completed(future_map):
             rendered.append(future.result())
     return rendered
+
+
+def _download_single_render_spec(
+    *,
+    client: WhataiClient,
+    render_spec: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    download_started = time.perf_counter()
+    image_bytes = client.download_image_bytes(render_spec["submission"], result, "upstream_image_error")
+    timing = dict(render_spec.get("timing") or {})
+    timing["download_ms"] = int((time.perf_counter() - download_started) * 1000)
+    timing["render_total_ms"] = int(sum(timing.get(key, 0) for key in ("submit_ms", "poll_ms", "download_ms")))
+    return {
+        **render_spec,
+        "image_bytes": image_bytes,
+        "timing": timing,
+    }
+
+
+def _finalize_main_rendered_asset(
+    *,
+    client: WhataiClient,
+    confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, object],
+    render_spec: dict[str, Any],
+    instruction: str | None,
+) -> dict[str, object]:
+    prompt_payload = render_spec["prompt_payload"]
+    image_bytes = render_spec["image_bytes"]
+    validation_result = None
+    plan_item = render_spec["plan_item"]
+    reference_images = render_spec["reference_images"]
+
+    if bool(plan_item.get("requires_white_bg_validation")) and client.settings.whatai_api_key:
+        passed, diagnostics = validate_white_background(image_bytes)
+        validation_result = diagnostics
+        if not passed:
+            retry_instruction = _merge_instructions(instruction, strengthen_white_bg_instruction())
+            retry_prompt_payload = compose_prompt(
+                confirmed_copy=confirmed_copy,
+                strategy_preview=strategy_preview,
+                asset_role=render_spec["role"],
+                instruction=retry_instruction,
+                plan_item=plan_item,
+            )
+            image_bytes = _generate_image_with_asset_retry(
+                client=client,
+                prompt=retry_prompt_payload["final_prompt"],
+                image_size=render_spec["image_size"],
+                aspect_ratio=render_spec["aspect_ratio"],
+                reference_images=reference_images,
+                role=render_spec["role"],
+                display_order=render_spec["display_order"],
+            )
+            passed, diagnostics = validate_white_background(image_bytes)
+            diagnostics["retry_applied"] = True
+            validation_result = diagnostics
+            prompt_payload = retry_prompt_payload
+            if not passed:
+                raise AppError(
+                    "upstream_image_error",
+                    f"white background validation failed after retry: {diagnostics}",
+                    502,
+                )
+
+    generation_snapshot = {
+        "final_prompt": prompt_payload["final_prompt"],
+        "prompt_blocks": prompt_payload["blocks"],
+        "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
+        "applied_preset_id": prompt_payload.get("applied_preset_id"),
+        "reference_image_ids": [image.image_id for image in reference_images],
+        "reference_slots": [image.slot_type for image in reference_images],
+        "upstream_endpoint": render_spec["submission"].get("upstream_endpoint"),
+        "planner_instruction": render_spec["planner_instruction"],
+        "aspect_ratio": render_spec["aspect_ratio"],
+        "size": render_spec["image_size"],
+        "planner_source": prompt_payload.get("planner_source"),
+        "white_bg_validation": validation_result,
+        "slot_id": render_spec["slot_id"],
+        "expression_mode": prompt_payload.get("expression_mode") or plan_item.get("expression_mode"),
+        "rule_pack_id": plan_item.get("platform_rule_pack"),
+        "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
+        "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
+        "platform_overlay": prompt_payload.get("platform_overlay"),
+        "timing": dict(render_spec.get("timing") or {}),
+    }
+    return {
+        "role": render_spec["role"],
+        "slot_id": render_spec["slot_id"],
+        "display_order": render_spec["display_order"],
+        "expression_mode": generation_snapshot["expression_mode"],
+        "rule_pack_id": generation_snapshot["rule_pack_id"],
+        "image_bytes": image_bytes,
+        "prompt_payload": prompt_payload,
+        "generation_snapshot": generation_snapshot,
+    }
 
 
 def _render_single_asset(
@@ -386,10 +917,13 @@ def _render_single_asset(
     loaded_reference_images: list,
 ) -> dict[str, object]:
     role = str(plan_item["role"])
+    slot_id = str(plan_item.get("slot_id") or role)
     display_order = int(plan_item["display_order"])
     planner_instruction = str(strategy_preview.get("planner_instruction") or "") or None
-    image_size = _resolve_image_size(str(plan_item.get("aspect_ratio") or "1:1"))
-    reference_images = select_reference_images_for_role(loaded_reference_images, role)
+    aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
+    image_size = _resolve_image_size(aspect_ratio)
+    reference_role = str(plan_item.get("reference_role_hint") or slot_id or role)
+    reference_images = select_reference_images_for_role(loaded_reference_images, reference_role)
     prompt_payload = compose_prompt(
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
@@ -398,17 +932,19 @@ def _render_single_asset(
         plan_item=plan_item,
     )
     client = WhataiClient()
+    started_at = time.perf_counter()
     image_bytes = _generate_image_with_asset_retry(
         client=client,
         prompt=prompt_payload["final_prompt"],
         image_size=image_size,
+        aspect_ratio=aspect_ratio,
         reference_images=reference_images,
         role=role,
         display_order=display_order,
     )
 
     validation_result = None
-    if role == "white_bg" and client.settings.whatai_api_key:
+    if bool(plan_item.get("requires_white_bg_validation")) and client.settings.whatai_api_key:
         passed, diagnostics = validate_white_background(image_bytes)
         validation_result = diagnostics
         if not passed:
@@ -424,6 +960,7 @@ def _render_single_asset(
                 client=client,
                 prompt=retry_prompt_payload["final_prompt"],
                 image_size=image_size,
+                aspect_ratio=aspect_ratio,
                 reference_images=reference_images,
                 role=role,
                 display_order=display_order,
@@ -442,21 +979,265 @@ def _render_single_asset(
     generation_snapshot = {
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
+        "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
+        "applied_preset_id": prompt_payload.get("applied_preset_id"),
         "reference_image_ids": [image.image_id for image in reference_images],
         "reference_slots": [image.slot_type for image in reference_images],
         "upstream_endpoint": "/v1/images/edits" if reference_images else "/v1/images/generations",
         "planner_instruction": planner_instruction,
+        "aspect_ratio": aspect_ratio,
         "size": image_size,
         "planner_source": prompt_payload.get("planner_source"),
         "white_bg_validation": validation_result,
+        "slot_id": slot_id,
+        "expression_mode": prompt_payload.get("expression_mode") or plan_item.get("expression_mode"),
+        "rule_pack_id": plan_item.get("platform_rule_pack"),
+        "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
+        "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
+        "platform_overlay": prompt_payload.get("platform_overlay"),
+        "timing": {"render_total_ms": int((time.perf_counter() - started_at) * 1000)},
     }
     return {
         "role": role,
+        "slot_id": slot_id,
         "display_order": display_order,
+        "expression_mode": generation_snapshot["expression_mode"],
+        "rule_pack_id": generation_snapshot["rule_pack_id"],
         "image_bytes": image_bytes,
         "prompt_payload": prompt_payload,
         "generation_snapshot": generation_snapshot,
     }
+
+
+def run_generate_detail_page_job(db: Session, job_id: str) -> None:
+    storage = LocalStorageAdapter()
+    job = _require_job(db, job_id)
+    session = _require_session(db, job.session_id)
+    payload = job.input_payload or {}
+    lock_keys = payload.get("lock_keys") or []
+
+    try:
+        update_job_status(db, job, status="running", progress=3, stage="preparing")
+        append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
+
+        if not session.confirmed_copy:
+            raise AppError("invalid_session_status", "confirmed_copy missing", 400)
+        if not session.active_platform_id:
+            raise AppError("invalid_platform", "active_platform_id missing", 400)
+
+        session_images = _session_images(db, session.id)
+        if not session_images:
+            raise AppError("missing_required_images", http_status=400)
+        style_images = _detail_style_images(db, session.id)
+
+        effective_strategy_preview = _ensure_detail_strategy_preview(db, session, session_images, style_images)
+        loaded_product_images = load_reference_images(session_images, storage=storage)
+        loaded_style_images = load_reference_images(style_images, storage=storage) if style_images else []
+        product_grid, style_grid = build_detail_reference_grids(loaded_product_images, loaded_style_images)
+        reference_grids = [product_grid, *([style_grid] if style_grid is not None else [])]
+
+        last_version = session.detail_latest_result_version
+        version_no = last_version + 1
+        round_no = session.detail_generation_round + 1
+        plan = effective_strategy_preview.get("panel_plan") or []
+        carry_forward_sources: list[AssetModel] = []
+        if job.job_type == "regenerate_detail_panel" and last_version > 0:
+            requested = payload.get("panel_plan_item") or {}
+            requested_slot_id = str(requested.get("slot_id") or requested.get("panel_id") or "").strip()
+            plan = [
+                item
+                for item in plan
+                if str(item.get("slot_id") or item.get("panel_id") or "").strip() == requested_slot_id
+            ]
+            parent_asset_id = payload.get("parent_asset_id")
+            for asset in _version_assets(db, session.id, last_version, asset_family="detail_page"):
+                if asset.asset_kind != "panel":
+                    continue
+                if asset.id == parent_asset_id:
+                    continue
+                slot_id = str(asset.slot_id or asset.asset_role or "").strip()
+                if slot_id == requested_slot_id:
+                    continue
+                carry_forward_sources.append(asset)
+
+        rendered_panels = _render_detail_panels_concurrently(
+            confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+            strategy_preview=effective_strategy_preview,
+            plan=plan,
+            instruction=payload.get("instruction"),
+            reference_grids=reference_grids,
+        )
+
+        total_assets = max(len(rendered_panels) + len(carry_forward_sources) + 1, 1)
+        created_assets: list[AssetModel] = []
+        panel_bytes_for_stitch: list[tuple[int, bytes]] = []
+        progress_index = 0
+
+        for rendered in sorted(rendered_panels, key=lambda item: item["display_order"]):
+            image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
+                session_id=session.id,
+                round_no=round_no,
+                version_no=version_no,
+                role=rendered["panel_id"],
+                display_order=rendered["display_order"],
+                image_bytes=rendered["image_bytes"],
+                ext=".jpg",
+            )
+            asset = AssetModel(
+                session_id=session.id,
+                job_id=job.id,
+                round_no=round_no,
+                version_no=version_no,
+                parent_asset_id=None,
+                platform_id=session.active_platform_id,
+                asset_family="detail_page",
+                asset_kind="panel",
+                asset_role=rendered["panel_id"],
+                slot_id=rendered.get("slot_id"),
+                expression_mode=None,
+                rule_pack_id=rendered.get("rule_pack_id"),
+                display_order=rendered["display_order"],
+                image_url=image_url,
+                thumbnail_url=thumb_url,
+                width=width,
+                height=height,
+                mime_type=mime_type,
+                file_size=file_size,
+                prompt_snapshot=rendered["prompt_payload"]["final_prompt"],
+                edit_instruction=payload.get("instruction"),
+                generation_snapshot=rendered["generation_snapshot"],
+                status="ready",
+            )
+            db.add(asset)
+            db.flush()
+            created_assets.append(asset)
+            panel_bytes_for_stitch.append((asset.display_order, rendered["image_bytes"]))
+            progress_index += 1
+            update_job_status(db, job, status="running", progress=int((progress_index / total_assets) * 85), stage="generating")
+            append_job_event(
+                db,
+                job.id,
+                "asset_ready",
+                {
+                    "event": "asset_ready",
+                    "asset_id": asset.id,
+                    "asset_kind": "panel",
+                    "panel_id": rendered["panel_id"],
+                    "display_order": rendered["display_order"],
+                    "render_total_ms": (rendered.get("generation_snapshot") or {}).get("timing", {}).get("render_total_ms"),
+                },
+            )
+
+        for source_asset in carry_forward_sources:
+            asset = _clone_asset_for_version(
+                source_asset,
+                job_id=job.id,
+                round_no=round_no,
+                version_no=version_no,
+                edit_instruction=payload.get("instruction"),
+            )
+            db.add(asset)
+            db.flush()
+            created_assets.append(asset)
+            panel_bytes_for_stitch.append((asset.display_order, storage.resolve_url_to_path(source_asset.image_url).read_bytes()))
+            progress_index += 1
+            update_job_status(db, job, status="running", progress=int((progress_index / total_assets) * 85), stage="generating")
+            append_job_event(
+                db,
+                job.id,
+                "asset_ready",
+                {
+                    "event": "asset_ready",
+                    "asset_id": asset.id,
+                    "asset_kind": "panel",
+                    "panel_id": asset.asset_role,
+                    "display_order": asset.display_order,
+                    "carry_forward": True,
+                    "render_total_ms": 0,
+                },
+            )
+
+        update_job_status(db, job, status="running", progress=90, stage="stitching")
+        append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 90, "stage": "stitching"})
+
+        stitched_bytes = _stitch_detail_panels([item[1] for item in sorted(panel_bytes_for_stitch, key=lambda value: value[0])])
+        image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
+            session_id=session.id,
+            round_no=round_no,
+            version_no=version_no,
+            role="detail_page_long",
+            display_order=len(rendered_panels) + 1,
+            image_bytes=stitched_bytes,
+            ext=".jpg",
+        )
+        stitched_asset = AssetModel(
+            session_id=session.id,
+            job_id=job.id,
+            round_no=round_no,
+            version_no=version_no,
+            parent_asset_id=None,
+            platform_id=session.active_platform_id,
+            asset_family="detail_page",
+            asset_kind="stitched",
+            asset_role="detail_page_long",
+            slot_id=None,
+            expression_mode=None,
+            rule_pack_id=effective_strategy_preview.get("detail_rule_pack"),
+            display_order=len(rendered_panels) + 1,
+            image_url=image_url,
+            thumbnail_url=thumb_url,
+            width=width,
+            height=height,
+            mime_type=mime_type,
+            file_size=file_size,
+            prompt_snapshot=None,
+            edit_instruction=payload.get("instruction"),
+            generation_snapshot={
+                "asset_family": "detail_page",
+                "asset_kind": "stitched",
+                "source_panel_asset_ids": [asset.id for asset in created_assets],
+                "panel_count": len(created_assets),
+                "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+                "rule_pack_id": effective_strategy_preview.get("detail_rule_pack"),
+            },
+            status="ready",
+        )
+        db.add(stitched_asset)
+        db.flush()
+        created_assets.append(stitched_asset)
+        append_job_event(
+            db,
+            job.id,
+            "asset_ready",
+            {
+                "event": "asset_ready",
+                "asset_id": stitched_asset.id,
+                "asset_kind": "stitched",
+                "display_order": stitched_asset.display_order,
+            },
+        )
+
+        session.detail_generation_round = round_no
+        session.detail_latest_result_version = version_no
+        session.latest_detail_generate_job_id = job.id
+
+        update_job_status(
+            db,
+            job,
+            status="succeeded",
+            progress=100,
+            stage="done",
+            result_payload={
+                "asset_ids": [asset.id for asset in created_assets if asset.asset_kind == "panel"],
+                "stitched_asset_id": stitched_asset.id,
+                "detail_generation_round": round_no,
+                "version_no": version_no,
+            },
+        )
+        append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+    finally:
+        release_locks(lock_keys)
 
 
 def _generate_image_with_asset_retry(
@@ -464,6 +1245,7 @@ def _generate_image_with_asset_retry(
     client: WhataiClient,
     prompt: str,
     image_size: str,
+    aspect_ratio: str,
     reference_images: list,
     role: str,
     display_order: int,
@@ -474,6 +1256,7 @@ def _generate_image_with_asset_retry(
             return client.generate_image(
                 prompt,
                 image_size,
+                aspect_ratio=aspect_ratio,
                 reference_images=reference_images,
             )
         except AppError as exc:
@@ -495,12 +1278,74 @@ def _generate_image_with_asset_retry(
     raise AppError("upstream_image_error", "unknown asset render error", 502)
 
 
+def _submit_image_request_with_retry(
+    *,
+    client: WhataiClient,
+    prompt: str,
+    image_size: str,
+    aspect_ratio: str,
+    reference_images: list,
+    role: str,
+    display_order: int,
+    submission_id: str,
+) -> dict[str, Any]:
+    supports_submit_api = hasattr(client, "submit_image_request")
+    api_key = getattr(getattr(client, "settings", None), "whatai_api_key", "")
+    if not supports_submit_api or not api_key:
+        image_bytes = _generate_image_with_asset_retry(
+            client=client,
+            prompt=prompt,
+            image_size=image_size,
+            aspect_ratio=aspect_ratio,
+            reference_images=reference_images,
+            role=role,
+            display_order=display_order,
+        )
+        return {
+            "submission_id": submission_id,
+            "task_id": None,
+            "upstream_endpoint": "/v1/images/edits" if reference_images else "/v1/images/generations",
+            "result": {"fake_bytes": image_bytes},
+        }
+
+    last_error: AppError | None = None
+    for attempt in range(1, ASSET_RENDER_ATTEMPTS + 1):
+        try:
+            submission = client.submit_image_request(
+                prompt=prompt,
+                size=image_size,
+                aspect_ratio=aspect_ratio,
+                reference_images=reference_images,
+                error_key="upstream_image_error",
+            )
+            submission["submission_id"] = submission_id
+            return submission
+        except AppError as exc:
+            last_error = exc
+            if not (exc.key == "upstream_image_error" and exc.retryable) or attempt == ASSET_RENDER_ATTEMPTS:
+                raise
+            delay = min(10 * attempt, 30)
+            logger.warning(
+                "Retrying image submission after transient upstream error: role=%s display_order=%s attempt=%s/%s error=%s",
+                role,
+                display_order,
+                attempt,
+                ASSET_RENDER_ATTEMPTS,
+                exc.message,
+            )
+            time.sleep(delay)
+    if last_error is not None:  # pragma: no cover
+        raise last_error
+    raise AppError("upstream_image_error", "unknown asset submission error", 502)
+
+
 def _resolve_image_size(aspect_ratio: str) -> str:
     return {
         "1:1": "1024x1024",
         "4:5": "1024x1280",
         "3:4": "1024x1365",
         "16:9": "1280x720",
+        "21:9": DETAIL_PAGE_IMAGE_SIZE,
     }.get(aspect_ratio, "1024x1024")
 
 
@@ -508,3 +1353,247 @@ def _merge_instructions(instruction: str | None, appended: str) -> str:
     if not instruction:
         return appended
     return f"{instruction}；{appended}"
+
+
+def _ensure_detail_strategy_preview(
+    db: Session,
+    session: SessionModel,
+    session_images: list[SessionImageModel],
+    style_images: list[DetailStyleImageModel],
+) -> dict:
+    prompt_overrides = _session_prompt_overrides(db, session.id)
+    effective_strategy_preview = normalize_detail_strategy_preview(
+        session.detail_strategy_preview,
+        merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        product_images=session_images,
+        style_images=style_images,
+        analysis_snapshot=session.analysis_snapshot or {},
+        active_platform_id=session.active_platform_id,
+        prompt_overrides=prompt_overrides,
+    )
+    rebuilt = build_detail_strategy_preview(
+        merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        product_images=session_images,
+        style_images=style_images,
+        analysis_snapshot=session.analysis_snapshot or {},
+        planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
+        panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
+        active_platform_id=session.active_platform_id,
+        prompt_overrides=prompt_overrides,
+    )
+    if effective_strategy_preview.get("input_hash") == rebuilt.get("input_hash"):
+        session.detail_strategy_preview = effective_strategy_preview
+        return effective_strategy_preview
+
+    effective_strategy_preview = rebuilt
+    session.detail_strategy_preview = effective_strategy_preview
+    return effective_strategy_preview
+
+
+def _render_detail_panels_concurrently(
+    *,
+    confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, object],
+    plan: list[dict[str, object]],
+    instruction: str | None,
+    reference_grids: list,
+) -> list[dict[str, object]]:
+    if not plan:
+        return []
+
+    client = WhataiClient()
+    settings = get_settings()
+    render_specs = [
+        _prepare_detail_render_spec(
+            confirmed_copy=confirmed_copy,
+            strategy_preview=strategy_preview,
+            plan_item=plan_item,
+            instruction=instruction,
+            reference_grids=reference_grids,
+        )
+        for plan_item in plan
+    ]
+    submitted_specs = _submit_render_specs(
+        client=client,
+        render_specs=render_specs,
+        max_workers=settings.generation_submit_concurrency,
+    )
+    poll_started = time.perf_counter()
+    results_by_submission = client.poll_image_tasks(
+        [spec["submission"] for spec in submitted_specs],
+        "upstream_image_error",
+    )
+    poll_ms = int((time.perf_counter() - poll_started) * 1000)
+    rendered_specs = _materialize_render_specs(
+        client=client,
+        render_specs=[
+            {**spec, "timing": {**dict(spec.get("timing") or {}), "poll_ms": poll_ms}}
+            for spec in submitted_specs
+        ],
+        results_by_submission=results_by_submission,
+        max_workers=settings.detail_generation_concurrency,
+    )
+    return [_finalize_detail_rendered_panel(render_spec, strategy_preview) for render_spec in rendered_specs]
+
+
+def _prepare_detail_render_spec(
+    *,
+    confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, object],
+    plan_item: dict[str, object],
+    instruction: str | None,
+    reference_grids: list,
+) -> dict[str, Any]:
+    panel_id = str(plan_item["panel_id"])
+    slot_id = str(plan_item.get("slot_id") or panel_id)
+    display_order = int(plan_item["display_order"])
+    aspect_ratio = str(strategy_preview.get("aspect_ratio") or DETAIL_PAGE_ASPECT_RATIO)
+    prompt_payload = compose_detail_panel_prompt(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        panel_id=panel_id,
+        instruction=instruction,
+        panel_plan_item=plan_item,
+    )
+    return {
+        "submission_id": f"detail:{slot_id}:{display_order}",
+        "role": panel_id,
+        "panel_id": panel_id,
+        "slot_id": slot_id,
+        "display_order": display_order,
+        "aspect_ratio": aspect_ratio,
+        "image_size": DETAIL_PAGE_IMAGE_SIZE,
+        "plan_item": plan_item,
+        "prompt_payload": prompt_payload,
+        "reference_images": reference_grids,
+        "planner_instruction": str(strategy_preview.get("planner_instruction") or "") or None,
+    }
+
+
+def _finalize_detail_rendered_panel(
+    render_spec: dict[str, Any],
+    strategy_preview: dict[str, object],
+) -> dict[str, object]:
+    plan_item = render_spec["plan_item"]
+    prompt_payload = render_spec["prompt_payload"]
+    generation_snapshot = {
+        "asset_family": "detail_page",
+        "asset_kind": "panel",
+        "use_case": strategy_preview.get("use_case"),
+        "aspect_ratio": render_spec["aspect_ratio"],
+        "image_size": DETAIL_PAGE_IMAGE_SIZE,
+        "size": DETAIL_PAGE_IMAGE_SIZE,
+        "panel_label": plan_item.get("panel_label"),
+        "final_prompt": prompt_payload["final_prompt"],
+        "prompt_blocks": prompt_payload["blocks"],
+        "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
+        "applied_preset_id": prompt_payload.get("applied_preset_id"),
+        "product_reference_image_ids": [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)],
+        "style_reference_image_ids": [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)],
+        "reference_grid_ids": [grid.image_id for grid in render_spec["reference_images"]],
+        "upstream_endpoint": render_spec["submission"].get("upstream_endpoint"),
+        "planner_instruction": render_spec["planner_instruction"],
+        "planner_source": prompt_payload.get("planner_source"),
+        "slot_id": render_spec["slot_id"],
+        "panel_type": prompt_payload.get("panel_type"),
+        "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
+        "display_order": render_spec["display_order"],
+        "layout_template": prompt_payload.get("layout_template"),
+        "timing": dict(render_spec.get("timing") or {}),
+    }
+    return {
+        "panel_id": render_spec["panel_id"],
+        "slot_id": render_spec["slot_id"],
+        "display_order": render_spec["display_order"],
+        "panel_type": prompt_payload.get("panel_type"),
+        "rule_pack_id": strategy_preview.get("detail_rule_pack"),
+        "image_bytes": render_spec["image_bytes"],
+        "prompt_payload": prompt_payload,
+        "generation_snapshot": generation_snapshot,
+    }
+
+
+def _render_single_detail_panel(
+    *,
+    confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, object],
+    plan_item: dict[str, object],
+    instruction: str | None,
+    reference_grids: list,
+) -> dict[str, object]:
+    panel_id = str(plan_item["panel_id"])
+    slot_id = str(plan_item.get("slot_id") or panel_id)
+    display_order = int(plan_item["display_order"])
+    planner_instruction = str(strategy_preview.get("planner_instruction") or "") or None
+    aspect_ratio = str(strategy_preview.get("aspect_ratio") or DETAIL_PAGE_ASPECT_RATIO)
+    prompt_payload = compose_detail_panel_prompt(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        panel_id=panel_id,
+        instruction=instruction,
+        panel_plan_item=plan_item,
+    )
+    client = WhataiClient()
+    started_at = time.perf_counter()
+    image_bytes = _generate_image_with_asset_retry(
+        client=client,
+        prompt=prompt_payload["final_prompt"],
+        image_size=DETAIL_PAGE_IMAGE_SIZE,
+        aspect_ratio=aspect_ratio,
+        reference_images=reference_grids,
+        role=panel_id,
+        display_order=display_order,
+    )
+    generation_snapshot = {
+        "asset_family": "detail_page",
+        "asset_kind": "panel",
+        "use_case": strategy_preview.get("use_case"),
+        "aspect_ratio": aspect_ratio,
+        "image_size": DETAIL_PAGE_IMAGE_SIZE,
+        "size": DETAIL_PAGE_IMAGE_SIZE,
+        "panel_label": plan_item.get("panel_label"),
+        "final_prompt": prompt_payload["final_prompt"],
+        "prompt_blocks": prompt_payload["blocks"],
+        "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
+        "applied_preset_id": prompt_payload.get("applied_preset_id"),
+        "product_reference_image_ids": [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)],
+        "style_reference_image_ids": [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)],
+        "reference_grid_ids": [grid.image_id for grid in reference_grids],
+        "upstream_endpoint": "/v1/images/edits",
+        "planner_instruction": planner_instruction,
+        "planner_source": prompt_payload.get("planner_source"),
+        "slot_id": slot_id,
+        "panel_type": prompt_payload.get("panel_type"),
+        "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
+        "display_order": display_order,
+        "layout_template": prompt_payload.get("layout_template"),
+        "timing": {"render_total_ms": int((time.perf_counter() - started_at) * 1000)},
+    }
+    return {
+        "panel_id": panel_id,
+        "slot_id": slot_id,
+        "display_order": display_order,
+        "panel_type": prompt_payload.get("panel_type"),
+        "rule_pack_id": strategy_preview.get("detail_rule_pack"),
+        "image_bytes": image_bytes,
+        "prompt_payload": prompt_payload,
+        "generation_snapshot": generation_snapshot,
+    }
+
+
+def _stitch_detail_panels(panel_images: list[bytes]) -> bytes:
+    frames = [Image.open(io.BytesIO(item)).convert("RGB") for item in panel_images]
+    if not frames:
+        raise AppError("missing_required_images", "detail panels missing", 400)
+    width = max(frame.width for frame in frames)
+    height = sum(frame.height for frame in frames)
+    canvas = Image.new("RGB", (width, height), color=(255, 255, 255))
+    offset = 0
+    for frame in frames:
+        canvas.paste(frame, (0, offset))
+        offset += frame.height
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="JPEG", quality=92)
+    return buffer.getvalue()

@@ -20,9 +20,23 @@ logger = logging.getLogger(__name__)
 
 class WhataiClient:
     REQUEST_RETRYABLE_ERRORS = (httpx.TransportError,)
-    IMAGE_TASK_POLL_ATTEMPTS = 24
-    IMAGE_TASK_POLL_INTERVAL_SECONDS = 20
     IMAGE_EDIT_REQUEST_ATTEMPTS = 4
+    IMAGE_EDIT_ALLOWED_ASPECT_RATIOS = {
+        "1:1",
+        "1:4",
+        "1:8",
+        "2:3",
+        "3:2",
+        "3:4",
+        "4:1",
+        "4:3",
+        "4:5",
+        "5:4",
+        "8:1",
+        "9:16",
+        "16:9",
+        "21:9",
+    }
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -71,6 +85,7 @@ class WhataiClient:
         active_platform_id: str,
         asset_plan: list[dict[str, Any]],
         reference_images: list[LoadedReferenceImage],
+        supplemental_reference_images: list[LoadedReferenceImage] | None = None,
         reference_summary: dict[str, Any] | None,
         planner_instruction: str | None,
     ) -> dict[str, dict[str, Any]]:
@@ -89,27 +104,30 @@ class WhataiClient:
             for item in asset_plan
         ]
         manifest = [image.to_manifest_item() for image in reference_images]
+        supplemental_manifest = [image.to_manifest_item() for image in supplemental_reference_images or []]
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": (
                     "你是 SmartPhoto 的电商主图 Prompt Planner。"
-                    "请根据商品 copy、平台信息、角色定义和参考图，为 5 个主图角色输出 JSON。"
+                    "请根据商品 copy、平台信息、槽位定义和参考图，为 5 个主图槽位输出 JSON。"
                     "只能返回 JSON 对象，顶层键必须是 prompt_plan，值是数组。"
                     "prompt_plan 中每项必须包含：role,reference_image_ids,must_keep,must_avoid,"
                     "background_rule,composition_rule,lighting_rule,fidelity_rule,final_prompt_base。"
                     "reference_image_ids 只能从可用参考图 id 中选择。"
-                    "白底图必须严格强调纯白无缝背景、单主体、不要人物和道具。"
+                    "需要白底的槽位必须严格强调纯白无缝背景、单主体、不要人物和道具。"
                     "所有角色都必须以商品保真为最高优先级。"
                     f"平台：{active_platform_id}。"
                     f"商品 copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
                     f"角色定义：{json.dumps(defaults, ensure_ascii=False)}。"
                     f"可用参考图：{json.dumps(manifest, ensure_ascii=False)}。"
+                    f"补充策略参考图：{json.dumps(supplemental_manifest, ensure_ascii=False)}。"
                     f"参考图摘要：{json.dumps(reference_summary or {}, ensure_ascii=False)}。"
                     f"额外策略指令：{planner_instruction or '无'}。"
                 ),
             },
             *self._build_chat_image_parts(reference_images),
+            *self._build_chat_image_parts(supplemental_reference_images or []),
         ]
         payload = {
             "model": self.settings.whatai_chat_model,
@@ -145,9 +163,151 @@ class WhataiClient:
                 "lighting_rule": str(item.get("lighting_rule") or "").strip(),
                 "fidelity_rule": str(item.get("fidelity_rule") or "").strip(),
                 "final_prompt_base": str(item.get("final_prompt_base") or "").strip(),
-                "reference_slots": [str(value) for value in item.get("reference_slots", []) if str(value).strip()],
+                    "reference_slots": [str(value) for value in item.get("reference_slots", []) if str(value).strip()],
             }
         return by_role
+
+    def plan_detail_page_panels(
+        self,
+        *,
+        confirmed_copy: dict[str, Any],
+        product_manifest: list[dict[str, Any]],
+        style_manifest: list[dict[str, Any]],
+        product_grid: LoadedReferenceImage,
+        style_grid: LoadedReferenceImage | None,
+        planner_instruction: str | None,
+        analysis_snapshot: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not self.settings.whatai_api_key:
+            return []
+
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "You are SmartPhoto's Amazon detail page planner. "
+                    "Image 1 is the product multi-angle grid. "
+                    "Image 2 is the optional style/font reference grid. "
+                    "Return JSON only with top-level key panel_plan. "
+                    "panel_plan must be an array of exactly 8 items. "
+                    "Each item must contain: panel_id, panel_label, planner_prompt_base, copy_lines, layout_notes, "
+                    "product_reference_ids, style_reference_ids. "
+                    "Visible copy should be concise and suitable for English Amazon detail page panels. "
+                    f"Confirmed copy: {json.dumps(confirmed_copy, ensure_ascii=False)}. "
+                    f"Product manifest: {json.dumps(product_manifest, ensure_ascii=False)}. "
+                    f"Style manifest: {json.dumps(style_manifest, ensure_ascii=False)}. "
+                    f"Reference summary: {json.dumps((analysis_snapshot or {}).get('reference_summary') or {}, ensure_ascii=False)}. "
+                    f"Extra planner instruction: {planner_instruction or 'None'}."
+                ),
+            },
+            {
+                "type": "text",
+                "text": "Image 1 is the product multi-angle grid.",
+            },
+            {"type": "image_url", "image_url": {"url": product_grid.to_data_uri()}},
+        ]
+        if style_grid is not None:
+            content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": "Image 2 is the style/font reference grid.",
+                    },
+                    {"type": "image_url", "image_url": {"url": style_grid.to_data_uri()}},
+                ]
+            )
+
+        payload = {
+            "model": self.settings.whatai_chat_model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.4,
+        }
+        response = self._post_chat_json(payload, "upstream_llm_error")
+        parsed = self._parse_json_object(self._extract_text(response))
+        if not isinstance(parsed, dict):
+            return []
+        panel_plan = parsed.get("panel_plan")
+        if not isinstance(panel_plan, list):
+            return []
+
+        valid_product_ids = {str(item["image_id"]) for item in product_manifest if item.get("image_id")}
+        valid_style_ids = {str(item["image_id"]) for item in style_manifest if item.get("image_id")}
+        normalized: list[dict[str, Any]] = []
+        for item in panel_plan:
+            if not isinstance(item, dict):
+                continue
+            panel_id = str(item.get("panel_id") or "").strip()
+            if not panel_id:
+                continue
+            normalized.append(
+                {
+                    "panel_id": panel_id,
+                    "panel_label": str(item.get("panel_label") or "").strip(),
+                    "planner_prompt_base": str(item.get("planner_prompt_base") or "").strip(),
+                    "copy_lines": [str(value).strip() for value in item.get("copy_lines", []) if str(value).strip()],
+                    "layout_notes": str(item.get("layout_notes") or "").strip(),
+                    "product_reference_ids": [
+                        image_id
+                        for image_id in [str(value).strip() for value in item.get("product_reference_ids", [])]
+                        if image_id in valid_product_ids
+                    ],
+                    "style_reference_ids": [
+                        image_id
+                        for image_id in [str(value).strip() for value in item.get("style_reference_ids", [])]
+                        if image_id in valid_style_ids
+                    ],
+                }
+            )
+        return normalized
+
+    def extract_parameters(
+        self,
+        *,
+        confirmed_copy: dict[str, Any],
+        active_platform_id: str | None,
+        image_attachments: list[LoadedReferenceImage],
+        file_attachments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        fallback = self._fake_parameter_snapshot(confirmed_copy, active_platform_id, image_attachments, file_attachments)
+        if not self.settings.whatai_api_key:
+            return fallback
+
+        attachment_manifest = [
+            {
+                "attachment_id": item["attachment_id"],
+                "original_name": item["original_name"],
+                "mime_type": item["mime_type"],
+                "size_hint": item.get("file_size"),
+                "markdown_content": item.get("markdown_content", ""),
+            }
+            for item in file_attachments
+        ]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "你是 SmartPhoto 的 Step3 参数抽取器。"
+                    "请判断上传内容是否与当前商品相关，并只返回 JSON 对象。"
+                    "字段必须包含：relevance_status,rejection_reason,hero_scene,core_selling_points,"
+                    "key_parameters,product_advantages,feature_highlights。"
+                    "如果内容无关，relevance_status=invalid，并给出 rejection_reason。"
+                    f"当前平台：{active_platform_id or 'temu'}。"
+                    f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
+                    f"文件附件摘要：{json.dumps(attachment_manifest, ensure_ascii=False)}。"
+                ),
+            },
+            *self._build_chat_image_parts(image_attachments),
+        ]
+        payload = {
+            "model": self.settings.whatai_parameter_model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.2,
+        }
+        response = self._post_chat_json(payload, "upstream_llm_error")
+        parsed = self._parse_json_object(self._extract_text(response))
+        if not isinstance(parsed, dict):
+            return fallback
+        return self._merge_parameter_snapshot(fallback, parsed)
 
     def regenerate_copy(
         self,
@@ -172,13 +332,20 @@ class WhataiClient:
         prompt: str,
         size: str = "1024x1024",
         *,
+        aspect_ratio: str | None = None,
         reference_images: list[LoadedReferenceImage] | None = None,
     ) -> bytes:
         if not self.settings.whatai_api_key:
             return self._fake_image(prompt)
 
         if reference_images:
-            response_json = self._submit_image_edit(prompt, size, reference_images, "upstream_image_error")
+            response_json = self._submit_image_edit(
+                prompt,
+                aspect_ratio,
+                reference_images,
+                "upstream_image_error",
+            )
+            upstream_endpoint = "/v1/images/edits"
         else:
             payload = {
                 "model": self.settings.whatai_image_model,
@@ -186,16 +353,165 @@ class WhataiClient:
                 "size": size,
             }
             response_json = self._submit_image_generation_task(payload, "upstream_image_error")
+            upstream_endpoint = "/v1/images/generations"
 
         task_id = self._extract_image_task_id(response_json)
         data = self._poll_image_generation_task(task_id, "upstream_image_error") if task_id else self._extract_image_result(response_json)
-        image_url = data.get("url")
-        b64 = data.get("b64_json")
+        submission = {
+            "task_id": task_id,
+            "upstream_endpoint": upstream_endpoint,
+            "result": None if task_id else data,
+        }
+        return self.download_image_bytes(submission, data, "upstream_image_error")
+
+    def submit_image_request(
+        self,
+        *,
+        prompt: str,
+        size: str = "1024x1024",
+        aspect_ratio: str | None = None,
+        reference_images: list[LoadedReferenceImage] | None = None,
+        error_key: str = "upstream_image_error",
+    ) -> dict[str, Any]:
+        if not self.settings.whatai_api_key:
+            return {
+                "submission_id": None,
+                "task_id": None,
+                "prompt": prompt,
+                "size": size,
+                "aspect_ratio": aspect_ratio,
+                "reference_images": reference_images or [],
+                "upstream_endpoint": "/local/fake-image",
+                "result": {"fake_bytes": self._fake_image(prompt)},
+            }
+
+        if reference_images:
+            response_json = self._submit_image_edit(
+                prompt,
+                aspect_ratio,
+                reference_images,
+                error_key,
+            )
+            upstream_endpoint = "/v1/images/edits"
+        else:
+            payload = {
+                "model": self.settings.whatai_image_model,
+                "prompt": prompt,
+                "size": size,
+            }
+            response_json = self._submit_image_generation_task(payload, error_key)
+            upstream_endpoint = "/v1/images/generations"
+
+        task_id = self._extract_image_task_id(response_json)
+        result = self._extract_image_result(response_json) if not task_id else None
+        return {
+            "submission_id": None,
+            "task_id": task_id,
+            "prompt": prompt,
+            "size": size,
+            "aspect_ratio": aspect_ratio,
+            "reference_images": reference_images or [],
+            "upstream_endpoint": upstream_endpoint,
+            "submitted_response": response_json,
+            "result": result,
+        }
+
+    def poll_image_tasks(
+        self,
+        submissions: list[dict[str, Any]],
+        error_key: str,
+    ) -> dict[str, dict[str, Any]]:
+        completed: dict[str, dict[str, Any]] = {}
+        pending: dict[str, dict[str, Any]] = {}
+
+        for submission in submissions:
+            submission_key = self._submission_key(submission)
+            task_id = str(submission.get("task_id") or "")
+            if submission.get("result"):
+                completed[submission_key] = dict(submission["result"])
+                continue
+            if submission.get("task_id"):
+                pending[task_id] = submission
+                continue
+            raise AppError(error_key, f"missing task_id and result in submission: {submission}", 502)
+
+        if not pending:
+            return completed
+
+        headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
+        last_status: dict[str, str] = {task_id: "UNKNOWN" for task_id in pending}
+        deadline = time.monotonic() + max(int(self.settings.image_task_timeout_seconds), 1)
+        for interval_seconds, attempts in self._image_poll_schedule():
+            for _ in range(attempts):
+                if time.monotonic() >= deadline:
+                    pending_text = ", ".join(f"{task_id}:{last_status.get(task_id, 'UNKNOWN')}" for task_id in sorted(pending))
+                    raise AppError(
+                        error_key,
+                        f"image tasks exceeded timeout window before downloadable result: {pending_text}",
+                        502,
+                    )
+                for task_id in list(pending):
+                    response_json = self._request_json_with_retry(
+                        base_url=self._normalized_base_url(),
+                        method="GET",
+                        path=f"/images/tasks/{task_id}",
+                        payload=None,
+                        headers=headers,
+                        error_key=error_key,
+                        attempts=2,
+                        retryable_on_exhausted=False,
+                    )
+                    task_payload = self._extract_image_task_payload(response_json)
+                    status = str(task_payload.get("status") or response_json.get("status") or "").upper()
+                    if status:
+                        last_status[task_id] = status
+
+                    if status == "SUCCESS":
+                        data = self._extract_image_result(task_payload)
+                        if data.get("url") or data.get("b64_json"):
+                            submission = pending.pop(task_id, None) or {"task_id": task_id}
+                            completed[self._submission_key(submission)] = data
+                            logger.info("Async image generation task completed: task_id=%s", task_id)
+                            continue
+                        raise AppError(error_key, f"image task {task_id} completed without image result", 502)
+
+                    if status in {"FAILURE", "FAILED", "ERROR", "CANCELED", "CANCELLED"}:
+                        fail_reason = (
+                            task_payload.get("fail_reason")
+                            or task_payload.get("message")
+                            or response_json.get("message")
+                            or "unknown upstream failure"
+                        )
+                        raise AppError(error_key, f"image task {task_id} failed: {fail_reason}", 502)
+
+                if not pending:
+                    return completed
+                time.sleep(interval_seconds)
+
+        pending_text = ", ".join(f"{task_id}:{last_status.get(task_id, 'UNKNOWN')}" for task_id in sorted(pending))
+        raise AppError(
+            error_key,
+            f"image tasks timed out before downloadable result: {pending_text}",
+            502,
+        )
+
+    def download_image_bytes(
+        self,
+        submission: dict[str, Any],
+        result: dict[str, Any] | None,
+        error_key: str,
+    ) -> bytes:
+        resolved_result = dict(result or submission.get("result") or {})
+        fake_bytes = resolved_result.get("fake_bytes")
+        if isinstance(fake_bytes, bytes):
+            return fake_bytes
+        image_url = resolved_result.get("url")
+        b64 = resolved_result.get("b64_json")
         if image_url:
-            return self._get_bytes_with_retry(image_url, "upstream_image_error", attempts=3)
+            return self._get_bytes_with_retry(image_url, error_key, attempts=3)
         if b64:
             return base64.b64decode(b64)
-        raise AppError("upstream_image_error", f"missing image result in response: {response_json}", 502)
+        raise AppError(error_key, f"missing image result in submission: {submission}", 502)
 
     def _post_json(self, path: str, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
@@ -258,17 +574,35 @@ class WhataiClient:
     def _submit_image_edit(
         self,
         prompt: str,
-        size: str,
+        aspect_ratio: str | None,
         reference_images: list[LoadedReferenceImage],
         error_key: str,
     ) -> dict[str, Any]:
+        normalized_aspect_ratio = str(aspect_ratio or "").strip()
+        if normalized_aspect_ratio not in self.IMAGE_EDIT_ALLOWED_ASPECT_RATIOS:
+            raise AppError(
+                error_key,
+                (
+                    "invalid edit aspect_ratio: "
+                    f"{normalized_aspect_ratio or '<missing>'}; allowed values are "
+                    f"{sorted(self.IMAGE_EDIT_ALLOWED_ASPECT_RATIOS)}"
+                ),
+                502,
+            )
         headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
         files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:2]]
         data = {
             "model": self.settings.whatai_image_model,
             "prompt": prompt,
-            "size": size,
+            "aspect_ratio": normalized_aspect_ratio,
         }
+        logger.info(
+            "Submitting upstream image edit: model=%s endpoint=%s aspect_ratio=%s reference_count=%s",
+            self.settings.whatai_image_model,
+            "/v1/images/edits",
+            normalized_aspect_ratio,
+            len(files),
+        )
         return self._request_multipart_json_with_retry(
             base_url=self._normalized_base_url(),
             path="/images/edits",
@@ -281,48 +615,21 @@ class WhataiClient:
         )
 
     def _poll_image_generation_task(self, task_id: str, error_key: str) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
-        last_status = "UNKNOWN"
-        for attempt in range(1, self.IMAGE_TASK_POLL_ATTEMPTS + 1):
-            response_json = self._request_json_with_retry(
-                base_url=self._normalized_base_url(),
-                method="GET",
-                path=f"/images/tasks/{task_id}",
-                payload=None,
-                headers=headers,
-                error_key=error_key,
-                attempts=2,
-                retryable_on_exhausted=False,
-            )
-            task_payload = self._extract_image_task_payload(response_json)
-            status = str(task_payload.get("status") or response_json.get("status") or "").upper()
-            if status:
-                last_status = status
+        return self.poll_image_tasks([{"task_id": task_id}], error_key).get(task_id, {})
 
-            if status == "SUCCESS":
-                data = self._extract_image_result(task_payload)
-                if data.get("url") or data.get("b64_json"):
-                    logger.info("Async image generation task completed: task_id=%s", task_id)
-                    return data
-                raise AppError(error_key, f"image task {task_id} completed without image result", 502)
+    def _image_poll_schedule(self) -> list[tuple[int, int]]:
+        schedule: list[tuple[int, int]] = []
+        for item in self.settings.parsed_image_poll_profile():
+            interval = int(item.get("interval_seconds") or 0)
+            attempts = int(item.get("attempts") or 0)
+            if interval > 0 and attempts > 0:
+                schedule.append((interval, attempts))
+        if schedule:
+            return schedule
+        return [(20, 24)]
 
-            if status in {"FAILURE", "FAILED", "ERROR", "CANCELED", "CANCELLED"}:
-                fail_reason = (
-                    task_payload.get("fail_reason")
-                    or task_payload.get("message")
-                    or response_json.get("message")
-                    or "unknown upstream failure"
-                )
-                raise AppError(error_key, f"image task {task_id} failed: {fail_reason}", 502)
-
-            if attempt < self.IMAGE_TASK_POLL_ATTEMPTS:
-                time.sleep(self.IMAGE_TASK_POLL_INTERVAL_SECONDS)
-
-        raise AppError(
-            error_key,
-            f"image task {task_id} did not produce a downloadable result before timeout; last_status={last_status}",
-            502,
-        )
+    def _submission_key(self, submission: dict[str, Any]) -> str:
+        return str(submission.get("task_id") or submission.get("submission_id") or "")
 
     def _request_json_with_retry(
         self,
@@ -768,6 +1075,76 @@ class WhataiClient:
         if not original:
             return f"优化文案：{suffix}"
         return f"{original}（已优化：{suffix}）"
+
+    def _fake_parameter_snapshot(
+        self,
+        confirmed_copy: dict[str, Any],
+        active_platform_id: str | None,
+        image_attachments: list[LoadedReferenceImage],
+        file_attachments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        selling_points = self._normalize_string_list(
+            confirmed_copy.get("selling_points"),
+            ["高效净化", "低噪运行"],
+        )
+        key_parameters = self._normalize_key_parameters(
+            confirmed_copy.get("key_parameters"),
+            [{"label": "额定功率", "value": "35", "unit": "W"}],
+        )
+        return {
+            "relevance_status": "valid" if image_attachments or file_attachments else "invalid",
+            "rejection_reason": "" if image_attachments or file_attachments else "请上传与产品相关的说明书、参数图或产品图片。",
+            "hero_scene": confirmed_copy.get("usage_scenes") or "客厅净化",
+            "core_selling_points": selling_points[:3] or ["核心卖点待补充"],
+            "key_parameters": key_parameters,
+            "product_advantages": [
+                "适合电商主图提炼的短优势表达",
+                f"平台 {active_platform_id or 'temu'} 可继续做定向调优",
+            ],
+            "feature_highlights": [
+                "参数信息可人工确认后进入策略生成",
+                "不相关附件会被拦截并返回解释",
+            ],
+            "source_summary": [
+                {"source_type": "image", "count": len(image_attachments)},
+                {"source_type": "file", "count": len(file_attachments)},
+            ],
+        }
+
+    def _merge_parameter_snapshot(self, fallback: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
+        snapshot = {**fallback}
+        relevance_status = str(parsed.get("relevance_status") or fallback.get("relevance_status") or "invalid").lower()
+        snapshot["relevance_status"] = "valid" if relevance_status == "valid" else "invalid"
+        snapshot["rejection_reason"] = str(parsed.get("rejection_reason") or fallback.get("rejection_reason") or "").strip()
+        snapshot["hero_scene"] = str(parsed.get("hero_scene") or fallback.get("hero_scene") or "").strip()
+        snapshot["core_selling_points"] = self._normalize_string_list(
+            parsed.get("core_selling_points"),
+            fallback.get("core_selling_points", []),
+        )
+        snapshot["key_parameters"] = self._normalize_key_parameters(
+            parsed.get("key_parameters"),
+            fallback.get("key_parameters", []),
+        )
+        snapshot["product_advantages"] = self._normalize_string_list(
+            parsed.get("product_advantages"),
+            fallback.get("product_advantages", []),
+        )
+        snapshot["feature_highlights"] = self._normalize_string_list(
+            parsed.get("feature_highlights"),
+            fallback.get("feature_highlights", []),
+        )
+        source_summary = parsed.get("source_summary")
+        if isinstance(source_summary, list):
+            snapshot["source_summary"] = [
+                value
+                for value in source_summary
+                if isinstance(value, dict) and (value.get("source_type") or value.get("count") is not None)
+            ]
+        else:
+            snapshot["source_summary"] = fallback.get("source_summary", [])
+        if snapshot["relevance_status"] == "invalid" and not snapshot["rejection_reason"]:
+            snapshot["rejection_reason"] = "请上传与当前产品直接相关的说明书、参数图或产品附件。"
+        return snapshot
 
     def _fake_image(self, prompt: str) -> bytes:
         img = Image.new("RGB", (1024, 1024), color=(245, 245, 245))

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.models.session_image import SessionImageModel
 from app.services.storage import LocalStorageAdapter
 
 SLOT_PRIORITY = {"front": 0, "angle45": 1, "side": 2, "extra": 3}
@@ -14,6 +13,11 @@ ROLE_REFERENCE_SLOT_PREFERENCES = {
     "selling_point": ["front", "angle45"],
     "scene": ["front", "angle45"],
     "detail": ["front", "side", "angle45"],
+    "primary_kv": ["front", "angle45"],
+    "reason_why": ["front", "angle45"],
+    "proof_authority": ["front", "angle45", "side"],
+    "benefit_scene_or_compare": ["front", "angle45", "side"],
+    "closing_selling_point": ["front", "side", "angle45"],
 }
 
 
@@ -48,7 +52,7 @@ class LoadedReferenceImage:
         return f"data:{self.mime_type};base64,{encoded}"
 
 
-def build_reference_manifest(images: list[SessionImageModel | LoadedReferenceImage]) -> list[dict[str, Any]]:
+def build_reference_manifest(images: list[Any]) -> list[dict[str, Any]]:
     manifest = []
     for image in images:
         if isinstance(image, LoadedReferenceImage):
@@ -56,21 +60,21 @@ def build_reference_manifest(images: list[SessionImageModel | LoadedReferenceIma
             continue
         manifest.append(
             {
-                "image_id": image.id,
-                "slot_type": image.slot_type,
-                "display_order": image.display_order,
-                "source_url": image.source_url,
-                "width": image.width,
-                "height": image.height,
-                "mime_type": image.mime_type,
-                "file_size": image.file_size,
+                "image_id": str(getattr(image, "id")),
+                "slot_type": str(getattr(image, "slot_type", "style")),
+                "display_order": int(getattr(image, "display_order", 0)),
+                "source_url": str(getattr(image, "source_url")),
+                "width": int(getattr(image, "width")),
+                "height": int(getattr(image, "height")),
+                "mime_type": str(getattr(image, "mime_type")),
+                "file_size": int(getattr(image, "file_size")),
             }
         )
     return sorted(manifest, key=_manifest_sort_key)
 
 
 def load_reference_images(
-    images: list[SessionImageModel],
+    images: list[Any],
     *,
     storage: LocalStorageAdapter | None = None,
 ) -> list[LoadedReferenceImage]:
@@ -82,14 +86,14 @@ def load_reference_images(
         mime_type = image.mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
         loaded.append(
             LoadedReferenceImage(
-                image_id=image.id,
-                slot_type=image.slot_type,
-                display_order=image.display_order,
-                source_url=image.source_url,
-                width=image.width,
-                height=image.height,
+                image_id=str(getattr(image, "id")),
+                slot_type=str(getattr(image, "slot_type", "style")),
+                display_order=int(getattr(image, "display_order", 0)),
+                source_url=str(getattr(image, "source_url")),
+                width=int(getattr(image, "width")),
+                height=int(getattr(image, "height")),
                 mime_type=mime_type,
-                file_size=image.file_size,
+                file_size=int(getattr(image, "file_size")),
                 file_name=path.name,
                 path=path,
                 content=content,

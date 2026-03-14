@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "smartphoto-backend",
-    "description": "SmartPhoto Backend v2 OpenAPI。系统围绕前端 6 步流程设计，覆盖 session 创建、图片上传、分析、平台选择、copy 编辑、策略预览、Prompt 调试、整组生图、结果查询、下载、重生成。",
+    "description": "SmartPhoto Backend v2 OpenAPI。系统围绕前端 6 步流程设计，覆盖 session 创建、图片上传、分析、平台选择、copy 编辑、策略预览、Prompt 调试、主图整组生图、详情页独立生成、结果查询、下载、重生成。",
     "version": "2.0.0"
   },
   "paths": {
@@ -679,6 +679,1068 @@
         }
       }
     },
+    "/api/v2/sessions/{session_id}/detail-pages/style-images": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "上传详情页风格图",
+        "description": "向指定 session 上传详情页风格/字体参考图。支持 jpeg/png/webp，最多 4 张。",
+        "operationId": "uploadDetailStyleImage",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_uploadDetailStyleImage"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_UploadDetailStyleImageData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "列出详情页风格图",
+        "description": "返回当前 session 下的所有有效详情页风格图。",
+        "operationId": "listDetailStyleImages",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_DetailStyleImagesData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/parameter-attachments": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "上传参数附件",
+        "operationId": "uploadParameterAttachment",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_uploadParameterAttachment"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_UploadParameterAttachmentData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "列出参数附件",
+        "operationId": "listParameterAttachments",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_ParameterAttachmentsData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/parameter-attachments/{attachment_id}": {
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "删除参数附件",
+        "operationId": "deleteParameterAttachment",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "attachment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Attachment Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_DeleteParameterAttachmentData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/strategy-reference-images": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "上传策略参考图",
+        "operationId": "uploadStrategyReferenceImage",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_uploadStrategyReferenceImage"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_UploadStrategyReferenceImageData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "列出策略参考图",
+        "operationId": "listStrategyReferenceImages",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_StrategyReferenceImagesData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/strategy-reference-images/{image_id}": {
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "删除策略参考图",
+        "operationId": "deleteStrategyReferenceImage",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "image_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Image Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_DeleteStrategyReferenceImageData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/detail-pages/style-images/{image_id}": {
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "删除详情页风格图",
+        "description": "逻辑删除指定 session 下的一张详情页风格图。",
+        "operationId": "deleteDetailStyleImage",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "image_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Image Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_DeleteDetailStyleImageData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/sessions/{session_id}/analysis": {
       "post": {
         "tags": [
@@ -834,6 +1896,352 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/APIResponse_AnalysisData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/parameters/extract": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "触发参数提取",
+        "operationId": "extractParameters",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_ParameterExtractionJobData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/parameters": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "获取参数提取结果",
+        "operationId": "getParameters",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_ParameterSnapshotData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "保存参数提取结果",
+        "operationId": "saveParameters",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_ParameterSnapshotData_"
                 }
               }
             }
@@ -1671,6 +3079,600 @@
         }
       }
     },
+    "/api/v2/sessions/{session_id}/detail-pages/strategy/preview": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "生成详情页策略预览",
+        "description": "同步构建详情页策略预览。固定输出 8 个 Amazon detail page panel 规划，并持久化到 session.detail_strategy_preview。",
+        "operationId": "buildDetailPageStrategyPreview",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DetailStrategyPreviewRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_DetailStrategyPreviewData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/strategy/overrides": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "获取主图文案与 Prompt Override",
+        "operationId": "getStrategyOverrides",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_StrategyOverridesData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "保存主图文案与 Prompt Override",
+        "operationId": "saveStrategyOverrides",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyOverridesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_StrategyOverridesData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/detail-pages/strategy/overrides": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "获取详情页文案与 Prompt Override",
+        "operationId": "getDetailStrategyOverrides",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_StrategyOverridesData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "保存详情页文案与 Prompt Override",
+        "operationId": "saveDetailStrategyOverrides",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StrategyOverridesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_StrategyOverridesData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/sessions/{session_id}/prompts/preview": {
       "post": {
         "tags": [
@@ -1707,6 +3709,129 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/APIResponse_PromptPreviewData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/detail-pages/prompts/preview": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "预览详情页 Prompt",
+        "description": "按当前 session 的 detail_strategy_preview 生成 8 个详情页 panel 的 prompt 预览，可选带出最近一版真实执行快照。",
+        "operationId": "previewDetailPagePrompts",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptPreviewRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_DetailPromptPreviewData_"
                 }
               }
             }
@@ -1935,6 +4060,147 @@
         }
       }
     },
+    "/api/v2/sessions/{session_id}/detail-pages/generations": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "触发详情页生成",
+        "description": "为当前 session 创建 generate_detail_page 任务。固定生成 8 张 21:9 panel 图和 1 张竖向拼接长图。支持 `Idempotency-Key`。",
+        "operationId": "generateDetailPage",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "可选幂等键。",
+              "title": "Idempotency-Key"
+            },
+            "description": "可选幂等键。"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateGalleryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_DetailGenerationJobData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/sessions/{session_id}/results": {
       "get": {
         "tags": [
@@ -1979,6 +4245,137 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/APIResponse_ResultsData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/detail-pages/results": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "获取详情页结果",
+        "description": "按 session 返回某一详情页版本的 ready 资产列表。不传 version 时默认返回 `detail_latest_result_version`。",
+        "operationId": "getDetailPageResults",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "可选详情页结果版本号。为空时返回最近一版。",
+              "title": "Version"
+            },
+            "description": "可选详情页结果版本号。为空时返回最近一版。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_DetailResultsData_"
                 }
               }
             }
@@ -2478,6 +4875,136 @@
         }
       }
     },
+    "/api/v2/sessions/{session_id}/detail-pages/download": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "下载详情页结果 ZIP",
+        "description": "将指定详情页结果版本的 ready 资产打包为 ZIP 并下载。不传 version 时默认下载最近一版详情页结果。",
+        "operationId": "downloadDetailPageResults",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "可选详情页结果版本号。为空时下载最近一版。",
+              "title": "Version"
+            },
+            "description": "可选详情页结果版本号。为空时下载最近一版。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ZIP 文件下载流。",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/zip": {}
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/jobs/{job_id}": {
       "get": {
         "tags": [
@@ -2846,6 +5373,638 @@
         }
       }
     },
+    "/api/v2/prompt-presets": {
+      "get": {
+        "tags": [
+          "prompt-presets"
+        ],
+        "summary": "列出 Prompt 模板",
+        "operationId": "listPromptPresets",
+        "parameters": [
+          {
+            "name": "preset_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Preset Type"
+            }
+          },
+          {
+            "name": "asset_family",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Asset Family"
+            }
+          },
+          {
+            "name": "platform_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Platform Id"
+            }
+          },
+          {
+            "name": "slot_family",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Slot Family"
+            }
+          },
+          {
+            "name": "include_inactive",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Inactive"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_PromptPresetListData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "prompt-presets"
+        ],
+        "summary": "创建 Prompt 模板",
+        "operationId": "createPromptPreset",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptPresetCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_PromptPresetData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/prompt-presets/{preset_id}": {
+      "put": {
+        "tags": [
+          "prompt-presets"
+        ],
+        "summary": "更新 Prompt 模板",
+        "operationId": "updatePromptPreset",
+        "parameters": [
+          {
+            "name": "preset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Preset Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptPresetUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_PromptPresetData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/prompt-presets/{preset_id}/archive": {
+      "post": {
+        "tags": [
+          "prompt-presets"
+        ],
+        "summary": "归档 Prompt 模板",
+        "operationId": "archivePromptPreset",
+        "parameters": [
+          {
+            "name": "preset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Preset Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_PromptPresetData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/prompt-presets/{preset_id}/clone": {
+      "post": {
+        "tags": [
+          "prompt-presets"
+        ],
+        "summary": "复制 Prompt 模板",
+        "operationId": "clonePromptPreset",
+        "parameters": [
+          {
+            "name": "preset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Preset Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_PromptPresetData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "summary": "Healthz",
@@ -3122,6 +6281,68 @@
         ],
         "title": "APIResponse[CreateSessionData]"
       },
+      "APIResponse_DeleteDetailStyleImageData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DeleteDetailStyleImageData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[DeleteDetailStyleImageData]"
+      },
+      "APIResponse_DeleteParameterAttachmentData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DeleteParameterAttachmentData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[DeleteParameterAttachmentData]"
+      },
       "APIResponse_DeleteSessionImageData_": {
         "properties": {
           "code": {
@@ -3152,6 +6373,192 @@
           "data"
         ],
         "title": "APIResponse[DeleteSessionImageData]"
+      },
+      "APIResponse_DeleteStrategyReferenceImageData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DeleteStrategyReferenceImageData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[DeleteStrategyReferenceImageData]"
+      },
+      "APIResponse_DetailGenerationJobData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DetailGenerationJobData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[DetailGenerationJobData]"
+      },
+      "APIResponse_DetailPromptPreviewData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DetailPromptPreviewData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[DetailPromptPreviewData]"
+      },
+      "APIResponse_DetailResultsData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DetailResultsData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[DetailResultsData]"
+      },
+      "APIResponse_DetailStrategyPreviewData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DetailStrategyPreviewData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[DetailStrategyPreviewData]"
+      },
+      "APIResponse_DetailStyleImagesData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DetailStyleImagesData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[DetailStyleImagesData]"
       },
       "APIResponse_GenerationJobData_": {
         "properties": {
@@ -3246,6 +6653,99 @@
         ],
         "title": "APIResponse[JobStatusData]"
       },
+      "APIResponse_ParameterAttachmentsData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/ParameterAttachmentsData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[ParameterAttachmentsData]"
+      },
+      "APIResponse_ParameterExtractionJobData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/ParameterExtractionJobData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[ParameterExtractionJobData]"
+      },
+      "APIResponse_ParameterSnapshotData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/ParameterSnapshotData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[ParameterSnapshotData]"
+      },
       "APIResponse_PlatformListData_": {
         "properties": {
           "code": {
@@ -3307,6 +6807,68 @@
           "data"
         ],
         "title": "APIResponse[PlatformSelectionData]"
+      },
+      "APIResponse_PromptPresetData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/PromptPresetData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[PromptPresetData]"
+      },
+      "APIResponse_PromptPresetListData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/PromptPresetListData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[PromptPresetListData]"
       },
       "APIResponse_PromptPreviewData_": {
         "properties": {
@@ -3432,6 +6994,37 @@
         ],
         "title": "APIResponse[SessionSnapshotData]"
       },
+      "APIResponse_StrategyOverridesData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/StrategyOverridesData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[StrategyOverridesData]"
+      },
       "APIResponse_StrategyPreviewData_": {
         "properties": {
           "code": {
@@ -3463,6 +7056,99 @@
         ],
         "title": "APIResponse[StrategyPreviewData]"
       },
+      "APIResponse_StrategyReferenceImagesData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/StrategyReferenceImagesData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[StrategyReferenceImagesData]"
+      },
+      "APIResponse_UploadDetailStyleImageData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/UploadDetailStyleImageData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[UploadDetailStyleImageData]"
+      },
+      "APIResponse_UploadParameterAttachmentData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/UploadParameterAttachmentData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[UploadParameterAttachmentData]"
+      },
       "APIResponse_UploadSessionImageData_": {
         "properties": {
           "code": {
@@ -3493,6 +7179,37 @@
           "data"
         ],
         "title": "APIResponse[UploadSessionImageData]"
+      },
+      "APIResponse_UploadStrategyReferenceImageData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/UploadStrategyReferenceImageData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[UploadStrategyReferenceImageData]"
       },
       "AnalysisData": {
         "properties": {
@@ -3564,6 +7281,54 @@
             "type": "string",
             "title": "Role",
             "description": "主图角色。"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id",
+            "description": "主图槽位 ID。"
+          },
+          "expression_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expression Mode",
+            "description": "本图表达方式。"
+          },
+          "rule_pack_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Pack Id",
+            "description": "本图命中的规则包 ID。"
+          },
+          "render_total_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Render Total Ms",
+            "description": "该图生成耗时。"
           },
           "status": {
             "type": "string",
@@ -3644,6 +7409,48 @@
         ],
         "title": "AssetRegenerateRequest"
       },
+      "Body_uploadDetailStyleImage": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "要上传的风格参考图文件。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "display_order"
+        ],
+        "title": "Body_uploadDetailStyleImage"
+      },
+      "Body_uploadParameterAttachment": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "参数图、说明书图片或 PDF。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "display_order"
+        ],
+        "title": "Body_uploadParameterAttachment"
+      },
       "Body_uploadSessionImage": {
         "properties": {
           "file": {
@@ -3670,6 +7477,27 @@
           "display_order"
         ],
         "title": "Body_uploadSessionImage"
+      },
+      "Body_uploadStrategyReferenceImage": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "策略参考图。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file",
+          "display_order"
+        ],
+        "title": "Body_uploadStrategyReferenceImage"
       },
       "CopyData": {
         "properties": {
@@ -3950,6 +7778,49 @@
         ],
         "title": "CreateSessionData"
       },
+      "DeleteDetailStyleImageData": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "title": "Image Id",
+            "description": "被删除的详情页风格图 ID。"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted",
+            "description": "是否删除成功。",
+            "examples": [
+              true
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "deleted"
+        ],
+        "title": "DeleteDetailStyleImageData"
+      },
+      "DeleteParameterAttachmentData": {
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "title": "Attachment Id",
+            "description": "被删除的参数附件 ID。"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted",
+            "description": "是否删除成功。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attachment_id",
+          "deleted"
+        ],
+        "title": "DeleteParameterAttachmentData"
+      },
       "DeleteSessionImageData": {
         "properties": {
           "image_id": {
@@ -3972,6 +7843,902 @@
           "deleted"
         ],
         "title": "DeleteSessionImageData"
+      },
+      "DeleteStrategyReferenceImageData": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "title": "Image Id",
+            "description": "被删除的策略参考图 ID。"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted",
+            "description": "是否删除成功。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "deleted"
+        ],
+        "title": "DeleteStrategyReferenceImageData"
+      },
+      "DetailGenerationJobData": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id",
+            "description": "任务 ID。"
+          },
+          "job_type": {
+            "type": "string",
+            "title": "Job Type",
+            "description": "任务类型。",
+            "examples": [
+              "generate_detail_page"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "任务状态。"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "会话 ID。"
+          },
+          "detail_generation_round": {
+            "type": "integer",
+            "title": "Detail Generation Round",
+            "description": "触发后预期进入的详情页轮次。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "job_type",
+          "status",
+          "session_id",
+          "detail_generation_round"
+        ],
+        "title": "DetailGenerationJobData"
+      },
+      "DetailPanelAssetItem": {
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "title": "Asset Id",
+            "description": "资产 ID。"
+          },
+          "panel_id": {
+            "type": "string",
+            "title": "Panel Id",
+            "description": "panel ID。"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id",
+            "description": "详情页固定槽位 ID。"
+          },
+          "panel_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Label",
+            "description": "panel 中文名。"
+          },
+          "panel_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Type",
+            "description": "详情页板块类型。"
+          },
+          "render_total_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Render Total Ms",
+            "description": "该 panel 生成耗时。"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "资产状态。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url",
+            "description": "原图 URL。"
+          },
+          "thumbnail_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Url",
+            "description": "缩略图 URL。"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width",
+            "description": "图片宽度。"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height",
+            "description": "图片高度。"
+          },
+          "version_no": {
+            "type": "integer",
+            "title": "Version No",
+            "description": "结果版本号。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "asset_id",
+          "panel_id",
+          "status",
+          "display_order",
+          "image_url",
+          "width",
+          "height",
+          "version_no"
+        ],
+        "title": "DetailPanelAssetItem"
+      },
+      "DetailPromptPreviewData": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "会话 ID。"
+          },
+          "active_platform_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Platform Id",
+            "description": "当前生效平台。"
+          },
+          "use_case": {
+            "type": "string",
+            "title": "Use Case",
+            "description": "固定为 amazon_detail。"
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "title": "Aspect Ratio",
+            "description": "固定为 21:9。"
+          },
+          "panel_count": {
+            "type": "integer",
+            "title": "Panel Count",
+            "description": "固定为 8。"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "当前图片模型名称。"
+          },
+          "image_size": {
+            "type": "string",
+            "title": "Image Size",
+            "description": "当前详情页预览输出尺寸。"
+          },
+          "product_reference_manifest": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Product Reference Manifest",
+            "description": "当前 session 可用商品参考图清单。"
+          },
+          "style_reference_manifest": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Style Reference Manifest",
+            "description": "当前 session 可用详情页风格图清单。"
+          },
+          "prompts": {
+            "items": {
+              "$ref": "#/components/schemas/DetailPromptPreviewItem"
+            },
+            "type": "array",
+            "title": "Prompts",
+            "description": "按 panel 顺序生成的 prompt 预览列表。"
+          },
+          "latest_assets": {
+            "items": {
+              "$ref": "#/components/schemas/DetailPromptPreviewLatestAsset"
+            },
+            "type": "array",
+            "title": "Latest Assets",
+            "description": "最近一版详情页结果的执行快照。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "use_case",
+          "aspect_ratio",
+          "panel_count",
+          "model",
+          "image_size",
+          "product_reference_manifest",
+          "style_reference_manifest",
+          "prompts",
+          "latest_assets"
+        ],
+        "title": "DetailPromptPreviewData"
+      },
+      "DetailPromptPreviewItem": {
+        "properties": {
+          "panel_id": {
+            "type": "string",
+            "title": "Panel Id",
+            "description": "详情页 panel ID。"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id",
+            "description": "详情页固定槽位 ID。"
+          },
+          "panel_label": {
+            "type": "string",
+            "title": "Panel Label",
+            "description": "panel 中文名。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "title": "Aspect Ratio",
+            "description": "固定为 21:9。"
+          },
+          "use_case": {
+            "type": "string",
+            "title": "Use Case",
+            "description": "固定为 amazon_detail。"
+          },
+          "final_prompt": {
+            "type": "string",
+            "title": "Final Prompt",
+            "description": "最终提交给上游的 prompt。"
+          },
+          "blocks": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Blocks",
+            "description": "结构化 prompt blocks。"
+          },
+          "copy_blocks": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Copy Blocks",
+            "description": "结构化文案块。"
+          },
+          "raw_prompt_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Prompt Override",
+            "description": "Raw prompt override。"
+          },
+          "applied_preset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied Preset Id",
+            "description": "套用模板 ID。"
+          },
+          "strategy_fields_used": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Strategy Fields Used",
+            "description": "本次 prompt 用到的策略字段路径列表。"
+          },
+          "panel_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Type",
+            "description": "详情页板块类型。"
+          },
+          "panel_type_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Type Reason",
+            "description": "详情页板块类型推荐理由。"
+          },
+          "layout_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Layout Template",
+            "description": "详情页布局模板。"
+          },
+          "product_reference_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Product Reference Ids",
+            "description": "本次 prompt 使用的商品参考图 ID。"
+          },
+          "style_reference_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Style Reference Ids",
+            "description": "本次 prompt 使用的风格参考图 ID。"
+          },
+          "product_reference_images_used": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Product Reference Images Used",
+            "description": "本次 prompt 使用的商品参考图清单。"
+          },
+          "style_reference_images_used": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Style Reference Images Used",
+            "description": "本次 prompt 使用的风格参考图清单。"
+          },
+          "planner_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planner Source",
+            "description": "panel planner 来源，rule_based 或 llm。"
+          },
+          "planner_base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planner Base",
+            "description": "panel 级 planner 基础语义。"
+          },
+          "rule_modules_used": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Rule Modules Used",
+            "description": "详情页规则模块列表。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "panel_id",
+          "panel_label",
+          "display_order",
+          "aspect_ratio",
+          "use_case",
+          "final_prompt",
+          "blocks",
+          "strategy_fields_used"
+        ],
+        "title": "DetailPromptPreviewItem"
+      },
+      "DetailPromptPreviewLatestAsset": {
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "title": "Asset Id",
+            "description": "资产 ID。"
+          },
+          "asset_kind": {
+            "type": "string",
+            "title": "Asset Kind",
+            "description": "资产类型，panel 或 stitched。"
+          },
+          "version_no": {
+            "type": "integer",
+            "title": "Version No",
+            "description": "结果版本号。"
+          },
+          "panel_id": {
+            "type": "string",
+            "title": "Panel Id",
+            "description": "panel ID；拼接长图固定为 detail_page_long。"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id",
+            "description": "详情页固定槽位 ID。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "prompt_snapshot": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Snapshot",
+            "description": "真实执行时保存的 prompt 文本。"
+          },
+          "edit_instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edit Instruction",
+            "description": "该次结果的编辑指令。"
+          },
+          "generation_snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generation Snapshot",
+            "description": "真实执行快照。"
+          },
+          "panel_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Type",
+            "description": "真实执行的板块类型。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "asset_id",
+          "asset_kind",
+          "version_no",
+          "panel_id",
+          "display_order"
+        ],
+        "title": "DetailPromptPreviewLatestAsset"
+      },
+      "DetailResultsData": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "会话 ID。"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "当前 session 状态。"
+          },
+          "detail_generation_round": {
+            "type": "integer",
+            "title": "Detail Generation Round",
+            "description": "当前详情页生成轮次。"
+          },
+          "detail_latest_result_version": {
+            "type": "integer",
+            "title": "Detail Latest Result Version",
+            "description": "最近一版详情页结果版本号。"
+          },
+          "requested_version": {
+            "type": "integer",
+            "title": "Requested Version",
+            "description": "本次结果查询返回的版本号。"
+          },
+          "available_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Available Versions",
+            "description": "当前 session 可查看的所有详情页结果版本。"
+          },
+          "version_summaries": {
+            "items": {
+              "$ref": "#/components/schemas/VersionSummary"
+            },
+            "type": "array",
+            "title": "Version Summaries",
+            "description": "各版本的聚合统计。"
+          },
+          "use_case": {
+            "type": "string",
+            "title": "Use Case",
+            "description": "固定为 amazon_detail。"
+          },
+          "aspect_ratio": {
+            "type": "string",
+            "title": "Aspect Ratio",
+            "description": "固定为 21:9。"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/DetailResultsSummary",
+            "description": "当前版本统计信息。"
+          },
+          "panels": {
+            "items": {
+              "$ref": "#/components/schemas/DetailPanelAssetItem"
+            },
+            "type": "array",
+            "title": "Panels",
+            "description": "当前版本 panel 资产列表。"
+          },
+          "stitched_asset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DetailStitchedAssetItem"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "当前版本拼接长图资产。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "status",
+          "detail_generation_round",
+          "detail_latest_result_version",
+          "requested_version",
+          "available_versions",
+          "version_summaries",
+          "use_case",
+          "aspect_ratio",
+          "summary",
+          "panels"
+        ],
+        "title": "DetailResultsData"
+      },
+      "DetailResultsSummary": {
+        "properties": {
+          "total_count": {
+            "type": "integer",
+            "title": "Total Count",
+            "description": "当前详情页版本资产总数。"
+          },
+          "ready_count": {
+            "type": "integer",
+            "title": "Ready Count",
+            "description": "ready 状态资产数。"
+          },
+          "panel_count": {
+            "type": "integer",
+            "title": "Panel Count",
+            "description": "panel 资产数。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_count",
+          "ready_count",
+          "panel_count"
+        ],
+        "title": "DetailResultsSummary"
+      },
+      "DetailStitchedAssetItem": {
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "title": "Asset Id",
+            "description": "资产 ID。"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "资产状态。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url",
+            "description": "原图 URL。"
+          },
+          "thumbnail_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Url",
+            "description": "缩略图 URL。"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width",
+            "description": "图片宽度。"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height",
+            "description": "图片高度。"
+          },
+          "version_no": {
+            "type": "integer",
+            "title": "Version No",
+            "description": "结果版本号。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "asset_id",
+          "status",
+          "display_order",
+          "image_url",
+          "width",
+          "height",
+          "version_no"
+        ],
+        "title": "DetailStitchedAssetItem"
+      },
+      "DetailStrategyPreviewData": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "会话 ID。"
+          },
+          "detail_strategy_preview": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Detail Strategy Preview",
+            "description": "详情页策略预览对象，包含 use_case/aspect_ratio/panel_count/product_reference_manifest/style_reference_manifest/panel_plan。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "detail_strategy_preview"
+        ],
+        "title": "DetailStrategyPreviewData"
+      },
+      "DetailStrategyPreviewRequest": {
+        "properties": {
+          "planner_instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planner Instruction",
+            "description": "详情页 planner 的额外策略指令，例如“标题更简洁，字体更偏科技感”。"
+          },
+          "panel_preferences": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Panel Preferences",
+            "description": "可选的详情页槽位偏好。每项包含 slot_id/panel_type/display_order/locked。"
+          }
+        },
+        "type": "object",
+        "title": "DetailStrategyPreviewRequest"
+      },
+      "DetailStyleImageItem": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "title": "Image Id",
+            "description": "详情页风格图 ID。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "图片访问地址。"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width",
+            "description": "图片宽度。"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height",
+            "description": "图片高度。"
+          },
+          "mime_type": {
+            "type": "string",
+            "title": "Mime Type",
+            "description": "MIME 类型。"
+          },
+          "file_size": {
+            "type": "integer",
+            "title": "File Size",
+            "description": "文件大小，单位字节。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "display_order",
+          "url",
+          "width",
+          "height",
+          "mime_type",
+          "file_size"
+        ],
+        "title": "DetailStyleImageItem"
+      },
+      "DetailStyleImageSummary": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "title": "Image Id",
+            "description": "详情页风格图 ID。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "图片访问地址。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "display_order",
+          "url"
+        ],
+        "title": "DetailStyleImageSummary"
+      },
+      "DetailStyleImagesData": {
+        "properties": {
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/DetailStyleImageItem"
+            },
+            "type": "array",
+            "title": "Images",
+            "description": "当前 session 的详情页风格图列表。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "images"
+        ],
+        "title": "DetailStyleImagesData"
       },
       "GalleryRegenerateRequest": {
         "properties": {
@@ -4016,6 +8783,14 @@
             ],
             "title": "Instruction",
             "description": "本轮整组生图附加指令。"
+          },
+          "slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Slot Ids",
+            "description": "可选的主图槽位列表。为空时生成整组；传值时只生成指定槽位。"
           }
         },
         "type": "object",
@@ -4169,6 +8944,87 @@
             "title": "Estimated Seconds",
             "description": "预估剩余秒数。当前未实现。"
           },
+          "queued_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued At",
+            "description": "进入队列时间。"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At",
+            "description": "任务开始时间。"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At",
+            "description": "任务完成时间。"
+          },
+          "queue_wait_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Wait Ms",
+            "description": "排队耗时。"
+          },
+          "total_duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Duration Ms",
+            "description": "总耗时。"
+          },
+          "current_stage_elapsed_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Stage Elapsed Ms",
+            "description": "当前阶段已耗时。"
+          },
+          "stage_timings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Stage Timings",
+            "description": "各阶段耗时。"
+          },
           "error_code": {
             "anyOf": [
               {
@@ -4202,6 +9058,167 @@
           "progress"
         ],
         "title": "JobStatusData"
+      },
+      "ParameterAttachmentItem": {
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "title": "Attachment Id",
+            "description": "参数附件 ID。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "original_name": {
+            "type": "string",
+            "title": "Original Name",
+            "description": "原始文件名。"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "文件访问地址。"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width",
+            "description": "图片宽度；非图片时为 0。"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height",
+            "description": "图片高度；非图片时为 0。"
+          },
+          "mime_type": {
+            "type": "string",
+            "title": "Mime Type",
+            "description": "MIME 类型。"
+          },
+          "file_size": {
+            "type": "integer",
+            "title": "File Size",
+            "description": "文件大小。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attachment_id",
+          "display_order",
+          "original_name",
+          "url",
+          "width",
+          "height",
+          "mime_type",
+          "file_size"
+        ],
+        "title": "ParameterAttachmentItem"
+      },
+      "ParameterAttachmentSummary": {
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "title": "Attachment Id",
+            "description": "参数附件 ID。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "original_name": {
+            "type": "string",
+            "title": "Original Name",
+            "description": "原始文件名。"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "文件访问地址。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attachment_id",
+          "display_order",
+          "original_name",
+          "url"
+        ],
+        "title": "ParameterAttachmentSummary"
+      },
+      "ParameterAttachmentsData": {
+        "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ParameterAttachmentItem"
+            },
+            "type": "array",
+            "title": "Attachments",
+            "description": "当前 session 的参数附件列表。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attachments"
+        ],
+        "title": "ParameterAttachmentsData"
+      },
+      "ParameterExtractionJobData": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id",
+            "description": "参数提取任务 ID。"
+          },
+          "job_type": {
+            "type": "string",
+            "title": "Job Type",
+            "description": "任务类型。",
+            "examples": [
+              "extract_parameters"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "任务状态。"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "会话 ID。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "job_type",
+          "status",
+          "session_id"
+        ],
+        "title": "ParameterExtractionJobData"
+      },
+      "ParameterSnapshotData": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "会话 ID。"
+          },
+          "parameter_snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Parameter Snapshot",
+            "description": "参数提取结果快照。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "parameter_snapshot"
+        ],
+        "title": "ParameterSnapshotData"
       },
       "PlatformItem": {
         "properties": {
@@ -4323,6 +9340,476 @@
         ],
         "title": "PlatformSelectionRequest"
       },
+      "PromptPresetCreateRequest": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "模板名称。"
+          },
+          "preset_type": {
+            "type": "string",
+            "title": "Preset Type",
+            "description": "模板类型。"
+          },
+          "asset_family": {
+            "type": "string",
+            "title": "Asset Family",
+            "description": "资产族。"
+          },
+          "platform_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform Id",
+            "description": "平台 ID。"
+          },
+          "slot_family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Family",
+            "description": "槽位家族。"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category",
+            "description": "品类。"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale",
+            "description": "语言区域。"
+          },
+          "style_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Style Summary",
+            "description": "风格摘要。"
+          },
+          "default_expression_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Expression Mode",
+            "description": "默认表达方式。"
+          },
+          "copy_blocks_template": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Blocks Template",
+            "description": "文案块模板。"
+          },
+          "raw_prompt_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Prompt Template",
+            "description": "Raw prompt 模板。"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags",
+            "description": "标签。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "preset_type",
+          "asset_family"
+        ],
+        "title": "PromptPresetCreateRequest"
+      },
+      "PromptPresetData": {
+        "properties": {
+          "preset": {
+            "$ref": "#/components/schemas/PromptPresetItem",
+            "description": "模板详情。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "preset"
+        ],
+        "title": "PromptPresetData"
+      },
+      "PromptPresetItem": {
+        "properties": {
+          "preset_id": {
+            "type": "string",
+            "title": "Preset Id",
+            "description": "模板 ID。"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "模板名称。"
+          },
+          "preset_type": {
+            "type": "string",
+            "title": "Preset Type",
+            "description": "模板类型。"
+          },
+          "asset_family": {
+            "type": "string",
+            "title": "Asset Family",
+            "description": "资产族。"
+          },
+          "platform_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform Id",
+            "description": "平台 ID。"
+          },
+          "slot_family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Family",
+            "description": "槽位家族。"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category",
+            "description": "品类。"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale",
+            "description": "语言区域。"
+          },
+          "style_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Style Summary",
+            "description": "风格摘要。"
+          },
+          "default_expression_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Expression Mode",
+            "description": "默认表达方式。"
+          },
+          "copy_blocks_template": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Blocks Template",
+            "description": "文案块模板。"
+          },
+          "raw_prompt_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Prompt Template",
+            "description": "Raw prompt 模板。"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags",
+            "description": "标签。"
+          },
+          "version_no": {
+            "type": "integer",
+            "title": "Version No",
+            "description": "模板版本号。"
+          },
+          "is_system": {
+            "type": "boolean",
+            "title": "Is System",
+            "description": "是否为系统模板。"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "description": "是否激活。"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By",
+            "description": "创建者。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "preset_id",
+          "name",
+          "preset_type",
+          "asset_family",
+          "version_no",
+          "is_system",
+          "is_active"
+        ],
+        "title": "PromptPresetItem"
+      },
+      "PromptPresetListData": {
+        "properties": {
+          "presets": {
+            "items": {
+              "$ref": "#/components/schemas/PromptPresetItem"
+            },
+            "type": "array",
+            "title": "Presets",
+            "description": "模板列表。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "presets"
+        ],
+        "title": "PromptPresetListData"
+      },
+      "PromptPresetUpdateRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name",
+            "description": "模板名称。"
+          },
+          "platform_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform Id",
+            "description": "平台 ID。"
+          },
+          "slot_family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Family",
+            "description": "槽位家族。"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category",
+            "description": "品类。"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale",
+            "description": "语言区域。"
+          },
+          "style_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Style Summary",
+            "description": "风格摘要。"
+          },
+          "default_expression_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Expression Mode",
+            "description": "默认表达方式。"
+          },
+          "copy_blocks_template": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Blocks Template",
+            "description": "文案块模板。"
+          },
+          "raw_prompt_template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Prompt Template",
+            "description": "Raw prompt 模板。"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags",
+            "description": "标签。"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active",
+            "description": "是否激活。"
+          }
+        },
+        "type": "object",
+        "title": "PromptPresetUpdateRequest"
+      },
       "PromptPreviewData": {
         "properties": {
           "session_id": {
@@ -4396,6 +9883,42 @@
             "title": "Role",
             "description": "主图角色。"
           },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id",
+            "description": "主图槽位 ID。"
+          },
+          "slot_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Label",
+            "description": "主图槽位名称。"
+          },
+          "slot_family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Family",
+            "description": "主图槽位家族。"
+          },
           "role_label": {
             "anyOf": [
               {
@@ -4423,6 +9946,36 @@
             "type": "object",
             "title": "Blocks",
             "description": "结构化 prompt blocks。"
+          },
+          "copy_blocks": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Copy Blocks",
+            "description": "该槽位用于图上文字的 copy blocks。"
+          },
+          "raw_prompt_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Prompt Override",
+            "description": "Raw prompt override。"
+          },
+          "applied_preset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied Preset Id",
+            "description": "已套用模板 ID。"
           },
           "strategy_fields_used": {
             "items": {
@@ -4452,6 +10005,59 @@
             ],
             "title": "Planner Source",
             "description": "prompt planner 来源，rule_based 或 llm。"
+          },
+          "expression_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expression Mode",
+            "description": "当前槽位的表达方式。"
+          },
+          "expression_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expression Label",
+            "description": "表达方式名称。"
+          },
+          "rule_modules_used": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Rule Modules Used",
+            "description": "本次 prompt 组合到的规则模块列表。"
+          },
+          "platform_overlay": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform Overlay",
+            "description": "平台 overlay 元数据。"
+          },
+          "resolved_constraints": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Resolved Constraints",
+            "description": "本次 prompt 的最终约束列表。"
           }
         },
         "type": "object",
@@ -4480,6 +10086,18 @@
             "type": "string",
             "title": "Role",
             "description": "资产角色。"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id",
+            "description": "资产所属主图槽位。"
           },
           "display_order": {
             "type": "integer",
@@ -4554,6 +10172,54 @@
             ],
             "title": "Planner Instruction",
             "description": "Step 5 planner 指令。"
+          },
+          "expression_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expression Mode",
+            "description": "真实执行的表达方式。"
+          },
+          "rule_pack_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Pack Id",
+            "description": "命中的主图规则包 ID。"
+          },
+          "raw_prompt_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Prompt Override",
+            "description": "真实执行的 Raw prompt override。"
+          },
+          "applied_preset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied Preset Id",
+            "description": "真实执行套用的模板 ID。"
           }
         },
         "type": "object",
@@ -4611,6 +10277,27 @@
             "title": "Latest Result Version",
             "description": "最近一版结果版本号。"
           },
+          "requested_version": {
+            "type": "integer",
+            "title": "Requested Version",
+            "description": "本次结果查询返回的版本号。"
+          },
+          "available_versions": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Available Versions",
+            "description": "当前 session 可查看的所有主图结果版本。"
+          },
+          "version_summaries": {
+            "items": {
+              "$ref": "#/components/schemas/VersionSummary"
+            },
+            "type": "array",
+            "title": "Version Summaries",
+            "description": "各版本的聚合统计。"
+          },
           "summary": {
             "$ref": "#/components/schemas/ResultsSummary",
             "description": "当前版本统计信息。"
@@ -4630,6 +10317,9 @@
           "status",
           "generation_round",
           "latest_result_version",
+          "requested_version",
+          "available_versions",
+          "version_summaries",
           "summary",
           "assets"
         ],
@@ -4810,6 +10500,19 @@
             "title": "Analysis Snapshot",
             "description": "分析结果快照。"
           },
+          "parameter_snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parameter Snapshot",
+            "description": "参数提取结果快照。"
+          },
           "confirmed_copy": {
             "anyOf": [
               {
@@ -4836,6 +10539,19 @@
             "title": "Strategy Preview",
             "description": "当前保存的策略预览。"
           },
+          "detail_strategy_preview": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Strategy Preview",
+            "description": "当前保存的详情页策略预览。"
+          },
           "latest_generate_job_id": {
             "anyOf": [
               {
@@ -4848,6 +10564,30 @@
             "title": "Latest Generate Job Id",
             "description": "最近一次生成任务 ID。"
           },
+          "latest_detail_generate_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Detail Generate Job Id",
+            "description": "最近一次详情页生成任务 ID。"
+          },
+          "latest_parameter_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Parameter Job Id",
+            "description": "最近一次参数提取任务 ID。"
+          },
           "generation_round": {
             "type": "integer",
             "title": "Generation Round",
@@ -4857,6 +10597,16 @@
             "type": "integer",
             "title": "Latest Result Version",
             "description": "最近一版结果版本号。"
+          },
+          "detail_generation_round": {
+            "type": "integer",
+            "title": "Detail Generation Round",
+            "description": "当前详情页生成轮次。"
+          },
+          "detail_latest_result_version": {
+            "type": "integer",
+            "title": "Detail Latest Result Version",
+            "description": "最近一版详情页结果版本号。"
           }
         },
         "type": "object",
@@ -4866,9 +10616,110 @@
           "current_step",
           "selected_platform_ids",
           "generation_round",
-          "latest_result_version"
+          "latest_result_version",
+          "detail_generation_round",
+          "detail_latest_result_version"
         ],
         "title": "SessionSnapshotData"
+      },
+      "StrategyOverrideItem": {
+        "properties": {
+          "slot_id": {
+            "type": "string",
+            "title": "Slot Id",
+            "description": "主图槽位 ID。"
+          },
+          "copy_blocks_override": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Copy Blocks Override",
+            "description": "文案块 override。"
+          },
+          "raw_prompt_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Prompt Override",
+            "description": "Raw prompt override。"
+          },
+          "expression_mode_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expression Mode Override",
+            "description": "表达方式 override。"
+          },
+          "applied_preset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied Preset Id",
+            "description": "已套用模板 ID。"
+          },
+          "locked": {
+            "type": "boolean",
+            "title": "Locked",
+            "description": "是否锁定。",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "slot_id"
+        ],
+        "title": "StrategyOverrideItem"
+      },
+      "StrategyOverridesData": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "会话 ID。"
+          },
+          "overrides": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyOverrideItem"
+            },
+            "type": "array",
+            "title": "Overrides",
+            "description": "当前 session 的槽位 override 列表。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "overrides"
+        ],
+        "title": "StrategyOverridesData"
+      },
+      "StrategyOverridesRequest": {
+        "properties": {
+          "overrides": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyOverrideItem"
+            },
+            "type": "array",
+            "title": "Overrides",
+            "description": "本次提交的槽位 override 列表。"
+          }
+        },
+        "type": "object",
+        "title": "StrategyOverridesRequest"
       },
       "StrategyPreviewData": {
         "properties": {
@@ -4910,10 +10761,170 @@
             ],
             "title": "Planner Instruction",
             "description": "Step 5 额外策略指令，例如“白底图更标准，主图更像参考图”。"
+          },
+          "slot_preferences": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Slot Preferences",
+            "description": "可选的主图槽位偏好。每项包含 slot_id/expression_mode/locked。"
           }
         },
         "type": "object",
         "title": "StrategyPreviewRequest"
+      },
+      "StrategyReferenceImageItem": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "title": "Image Id",
+            "description": "策略参考图 ID。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "图片访问地址。"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width",
+            "description": "图片宽度。"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height",
+            "description": "图片高度。"
+          },
+          "mime_type": {
+            "type": "string",
+            "title": "Mime Type",
+            "description": "MIME 类型。"
+          },
+          "file_size": {
+            "type": "integer",
+            "title": "File Size",
+            "description": "文件大小。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "display_order",
+          "url",
+          "width",
+          "height",
+          "mime_type",
+          "file_size"
+        ],
+        "title": "StrategyReferenceImageItem"
+      },
+      "StrategyReferenceImageSummary": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "title": "Image Id",
+            "description": "策略参考图 ID。"
+          },
+          "display_order": {
+            "type": "integer",
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "图片访问地址。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "display_order",
+          "url"
+        ],
+        "title": "StrategyReferenceImageSummary"
+      },
+      "StrategyReferenceImagesData": {
+        "properties": {
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyReferenceImageItem"
+            },
+            "type": "array",
+            "title": "Images",
+            "description": "当前 session 的策略参考图列表。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "images"
+        ],
+        "title": "StrategyReferenceImagesData"
+      },
+      "UploadDetailStyleImageData": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "title": "Image Id",
+            "description": "本次新上传的详情页风格图 ID。"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "所属会话 ID。"
+          },
+          "uploaded_images": {
+            "items": {
+              "$ref": "#/components/schemas/DetailStyleImageSummary"
+            },
+            "type": "array",
+            "title": "Uploaded Images",
+            "description": "当前 session 下所有有效详情页风格图。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "session_id",
+          "uploaded_images"
+        ],
+        "title": "UploadDetailStyleImageData"
+      },
+      "UploadParameterAttachmentData": {
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "title": "Attachment Id",
+            "description": "本次新上传的参数附件 ID。"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "所属会话 ID。"
+          },
+          "uploaded_attachments": {
+            "items": {
+              "$ref": "#/components/schemas/ParameterAttachmentSummary"
+            },
+            "type": "array",
+            "title": "Uploaded Attachments",
+            "description": "当前 session 的参数附件列表。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attachment_id",
+          "session_id",
+          "uploaded_attachments"
+        ],
+        "title": "UploadParameterAttachmentData"
       },
       "UploadSessionImageData": {
         "properties": {
@@ -4949,6 +10960,61 @@
           "uploaded_images"
         ],
         "title": "UploadSessionImageData"
+      },
+      "UploadStrategyReferenceImageData": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "title": "Image Id",
+            "description": "本次新上传的策略参考图 ID。"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "所属会话 ID。"
+          },
+          "uploaded_images": {
+            "items": {
+              "$ref": "#/components/schemas/StrategyReferenceImageSummary"
+            },
+            "type": "array",
+            "title": "Uploaded Images",
+            "description": "当前 session 的策略参考图列表。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "session_id",
+          "uploaded_images"
+        ],
+        "title": "UploadStrategyReferenceImageData"
+      },
+      "VersionSummary": {
+        "properties": {
+          "version_no": {
+            "type": "integer",
+            "title": "Version No",
+            "description": "结果版本号。"
+          },
+          "asset_count": {
+            "type": "integer",
+            "title": "Asset Count",
+            "description": "该版本资产数。"
+          },
+          "ready_count": {
+            "type": "integer",
+            "title": "Ready Count",
+            "description": "该版本 ready 资产数。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version_no",
+          "asset_count",
+          "ready_count"
+        ],
+        "title": "VersionSummary"
       }
     }
   },
@@ -4968,6 +11034,10 @@
     {
       "name": "assets",
       "description": "单图级别的重生成接口。"
+    },
+    {
+      "name": "prompt-presets",
+      "description": "Prompt 仓库、风格预设与模板管理。"
     }
   ],
   "servers": [
