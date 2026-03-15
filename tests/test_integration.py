@@ -3,7 +3,10 @@ import zipfile
 
 from PIL import Image
 
-from app.db.session import SessionLocal
+from app.db import session as db_session
+from app.admin_db import session as admin_db_session
+from app.admin_models.admin_user import AdminUserModel
+from app.core.admin_auth import hash_password
 from app.models.asset import AssetModel
 from app.models.session import SessionModel
 
@@ -34,17 +37,31 @@ def create_ready_session(client, platform_id="temu"):
         {
             "product_name": copy_data.get("product_name") or "智能空气净化器",
             "category": copy_data.get("category") or "家电",
-            "headline": copy_data.get("headline") or "除甲醛99.9%",
-            "selling_points": copy_data.get("selling_points") or "低噪音｜母婴可用",
-            "usage_scenes": copy_data.get("usage_scenes") or "卧室/客厅",
-            "specs": copy_data.get("specs") or "CADR 500m3/h",
-            "style_choice": copy_data.get("style_choice") or "现代简约",
+            "hero_scene": copy_data.get("hero_scene") or "卧室/客厅",
+            "core_selling_points": copy_data.get("core_selling_points") or ["低噪音", "母婴可用"],
+            "key_parameters": copy_data.get("key_parameters")
+            or [{"key": "cadr", "label": "CADR", "value": "500", "unit": "m3/h"}],
+            "product_advantages": copy_data.get("product_advantages") or ["净化效率高", "适合卧室客厅"],
+            "style_preset_id": copy_data.get("style_preset_id"),
             "style_custom": copy_data.get("style_custom") or "浅色暖光",
         }
     )
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
     client.post(f"/api/v2/sessions/{sid}/strategy/preview")
     return sid
+
+
+def create_admin_user(username="admin", password="secret123", display_name="Admin"):
+    with admin_db_session.AdminSessionLocal() as db:
+        user = AdminUserModel(
+            username=username,
+            password_hash=hash_password(password),
+            display_name=display_name,
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+    return {"username": username, "password": password}
 
 
 def upload_detail_style_image(client, sid, display_order=1):
@@ -157,11 +174,74 @@ def test_generate_gallery_with_slot_ids_only_outputs_requested_slot(client):
     )
     assert gen.status_code == 200
 
-    results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
-    assert results["latest_result_version"] == 1
-    assert results["summary"]["ready_count"] == 1
-    assert len(results["assets"]) == 1
-    assert results["assets"][0]["slot_id"] == "proof_authority"
+
+def test_admin_login_and_asset_archive_hides_public_results(client):
+    sid = create_ready_session(client)
+    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "先生成"})
+    public_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
+    asset_id = public_results["assets"][0]["asset_id"]
+
+    creds = create_admin_user()
+    login = client.post("/api/admin/v1/auth/login", json=creds)
+    assert login.status_code == 200
+    access_token = login.json()["data"]["access_token"]
+
+    archived = client.post(
+        f"/api/admin/v1/assets/{asset_id}/archive",
+        json={"reason": "bad sample"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert archived.status_code == 200
+    assert archived.json()["data"]["asset"]["visibility_status"] == "archived"
+
+    updated_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
+    assert asset_id not in {item["asset_id"] for item in updated_results["assets"]}
+
+
+def test_admin_publish_rule_pack_affects_strategy_preview(client):
+    sid = create_ready_session(client, platform_id="temu")
+    creds = create_admin_user(username="rules", password="secret123")
+    login = client.post("/api/admin/v1/auth/login", json=creds)
+    token = login.json()["data"]["access_token"]
+
+    created = client.post(
+        "/api/admin/v1/rule-packs",
+        json={
+            "name": "Temu Admin Pack",
+            "asset_family": "main_gallery",
+            "platform_id": "temu",
+            "rule_pack_key": "default_main_gallery_v2",
+            "config_snapshot": {
+                "slot_plan": [
+                    {
+                        "slot_id": "hero",
+                        "slot_label": "主图",
+                        "slot_family": "hero",
+                        "compat_role": "hero",
+                        "role_label": "主图",
+                        "goal": "后台发布的新规则",
+                        "background_mode": "clean_studio",
+                        "text_policy": "no_text",
+                        "composition_hint": "居中",
+                        "copy_policy": "minimal",
+                        "layout_policy": "single_subject",
+                        "proof_policy": "soft",
+                        "requires_white_bg_validation": False,
+                        "reference_role_hint": "hero",
+                        "candidate_expression_modes": ["clean_conversion_kv"],
+                    }
+                ]
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()["data"]["rule_pack"]
+    client.post(f"/api/admin/v1/rule-packs/{created['rule_pack_id']}/publish", headers={"Authorization": f"Bearer {token}"})
+
+    preview = client.post(f"/api/v2/sessions/{sid}/strategy/preview").json()["data"]["strategy_preview"]
+    assert preview["asset_plan"][0]["goal"] == "后台发布的新规则"
+    assert preview["asset_plan"][0]["platform_rule_pack_key"] == "default_main_gallery_v2"
+    assert len(preview["asset_plan"]) == 1
+    assert preview["asset_plan"][0]["slot_id"] == "hero"
 
 
 def test_full_pipeline_and_download(client):
@@ -265,7 +345,7 @@ def test_detail_page_panel_preferences_and_result_metadata(client):
     assert slot_02["panel_type"] == "parameter_explainer"
     assert slot_02["display_order"] == 2
     assert "candidate_panel_types" in slot_02
-    assert detail_strategy["detail_rule_pack"] == "ecommerce_detail_v2"
+    assert detail_strategy["detail_rule_pack_key"] == "ecommerce_detail_v2"
 
     client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "信息层级更清晰"})
     detail_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results").json()["data"]
@@ -370,7 +450,9 @@ def test_copy_regenerate_not_overwrite_confirmed_copy(client):
     assert "headline" in detail["generated_fields"]
 
     after = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
-    assert after["headline"] == before["headline"]
+    assert after["hero_scene"] == before["hero_scene"]
+    assert after["core_selling_points"] == before["core_selling_points"]
+    assert after["product_advantages"] == before["product_advantages"]
 
 
 def test_regenerate_family_and_parent_asset(client):
@@ -403,7 +485,7 @@ def test_regenerate_family_and_parent_asset(client):
     v4_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
     assert v4_results["latest_result_version"] == v3 + 1
 
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         newest_assets = (
             db.query(AssetModel)
             .filter(AssetModel.session_id == sid, AssetModel.version_no == v4_results["latest_result_version"])
@@ -495,6 +577,43 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
     assert archived["is_active"] is False
 
 
+def test_copy_form_uses_style_preset_id_as_contract(client):
+    sid = create_ready_session(client)
+    preset = client.post(
+        "/api/v2/prompt-presets",
+        json={
+            "name": "简洁高级风",
+            "preset_type": "style",
+            "asset_family": "main_gallery",
+            "platform_id": None,
+            "slot_family": None,
+            "category": None,
+            "locale": "zh-CN",
+            "style_summary": "纯白背景 + 轻投影 + 高级质感",
+            "default_expression_mode": None,
+            "copy_blocks_template": {},
+            "raw_prompt_template": None,
+            "tags": ["style"],
+        },
+    ).json()["data"]["preset"]
+
+    save_payload = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    save_payload["style_preset_id"] = preset["preset_id"]
+    save_payload["style_custom"] = "暖色高端光感"
+    save_payload["style_choice"] = ""
+    saved = client.put(f"/api/v2/sessions/{sid}/copy", json=save_payload)
+    assert saved.status_code == 200
+
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    assert copy_data["style_preset_id"] == preset["preset_id"]
+    assert copy_data["style_custom"] == "暖色高端光感"
+    assert copy_data["style_choice"] == "简洁高级风"
+
+    preview = client.post(f"/api/v2/sessions/{sid}/strategy/preview").json()["data"]["strategy_preview"]
+    assert preview["style_preset_id"] == preset["preset_id"]
+    assert preview["resolved_style_preset"]["preset_id"] == preset["preset_id"]
+
+
 def test_parameter_attachment_extract_flow(client):
     sid = create_ready_session(client)
 
@@ -505,10 +624,18 @@ def test_parameter_attachment_extract_flow(client):
 
     extract = client.post(f"/api/v2/sessions/{sid}/parameters/extract").json()["data"]
     assert extract["job_type"] == "extract_parameters"
+    assert extract["overwrite_mode"] == "replace_all"
 
-    parameters = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]["parameter_snapshot"]
+    parameter_data = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]
+    parameters = parameter_data["parameter_snapshot"]
     assert parameters["relevance_status"] == "valid"
     assert parameters["core_selling_points"]
+    assert parameter_data["applied_copy_fields"]["hero_scene"]
+
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    assert copy_data["hero_scene"]
+    assert copy_data["core_selling_points"]
+    assert copy_data["key_parameters"]
 
 
 def test_idempotency_and_conflict(client, monkeypatch):
@@ -592,7 +719,7 @@ def test_prompt_preview_state_guards(client):
 def test_copy_form_normalizes_legacy_list_fields(client):
     sid = client.post("/api/v2/sessions").json()["data"]["session_id"]
 
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         session = db.query(SessionModel).filter(SessionModel.id == sid).one()
         session.confirmed_copy = {
             "product_name": "空气净化器",
@@ -610,18 +737,18 @@ def test_copy_form_normalizes_legacy_list_fields(client):
     copy_response = client.get(f"/api/v2/sessions/{sid}/copy")
     assert copy_response.status_code == 200
     copy_data = copy_response.json()["data"]
-    assert copy_data["selling_points"] == "卖点A\n卖点B"
-    assert copy_data["usage_scenes"] == "客厅\n卧室"
-    assert copy_data["specs"] == "参数A\n参数B"
+    assert copy_data["hero_scene"] == "客厅\n卧室"
+    assert copy_data["core_selling_points"] == ["卖点A", "卖点B"]
     assert copy_data["key_parameters"][0]["label"] == "300ml"
+    assert copy_data["style_choice"] == "现代简约"
 
     save_response = client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
     assert save_response.status_code == 200
 
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         session = db.query(SessionModel).filter(SessionModel.id == sid).one()
-        assert session.confirmed_copy["selling_points"] == "卖点A\n卖点B"
-        assert session.confirmed_copy["usage_scenes"] == "客厅\n卧室"
+        assert session.confirmed_copy["core_selling_points"] == ["卖点A", "卖点B"]
+        assert session.confirmed_copy["hero_scene"] == "客厅\n卧室"
 
     missing_platform = client.post(
         f"/api/v2/sessions/{sid}/prompts/preview",

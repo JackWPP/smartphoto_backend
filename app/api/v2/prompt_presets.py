@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user_id
+from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
 from app.models.prompt_preset import PromptPresetModel
@@ -54,6 +55,7 @@ def list_presets(
     slot_family: str | None = Query(default=None),
     include_inactive: bool = Query(default=False),
     db: Session = Depends(get_db),
+    user_id=Depends(get_current_user_id),
 ) -> dict:
     presets = list_prompt_presets(
         db,
@@ -61,6 +63,7 @@ def list_presets(
         asset_family=asset_family,
         platform_id=platform_id,
         slot_family=slot_family,
+        user_id=str(user_id),
         include_inactive=include_inactive,
     )
     db.commit()
@@ -105,7 +108,9 @@ def update_preset(
     db: Session = Depends(get_db),
     user_id=Depends(get_current_user_id),
 ) -> dict:
-    preset = get_prompt_preset_or_404(db, preset_id)
+    preset = get_prompt_preset_or_404(db, preset_id, str(user_id))
+    if preset.is_system:
+        raise AppError("forbidden", "system preset is read-only", 403)
     payload = req.model_dump(exclude_unset=True)
     for key, value in payload.items():
         setattr(preset, key, value)
@@ -129,7 +134,9 @@ def archive_preset(
     db: Session = Depends(get_db),
     user_id=Depends(get_current_user_id),
 ) -> dict:
-    preset = get_prompt_preset_or_404(db, preset_id)
+    preset = get_prompt_preset_or_404(db, preset_id, str(user_id))
+    if preset.is_system:
+        raise AppError("forbidden", "system preset is read-only", 403)
     preset.is_active = False
     if not preset.created_by:
         preset.created_by = str(user_id)
@@ -150,7 +157,7 @@ def clone_preset(
     db: Session = Depends(get_db),
     user_id=Depends(get_current_user_id),
 ) -> dict:
-    preset = get_prompt_preset_or_404(db, preset_id)
+    preset = get_prompt_preset_or_404(db, preset_id, str(user_id))
     clone = PromptPresetModel(
         name=f"{preset.name} Copy",
         preset_type=preset.preset_type,

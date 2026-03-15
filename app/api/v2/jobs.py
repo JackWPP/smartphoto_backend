@@ -6,11 +6,13 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sse_starlette import EventSourceResponse
 
+from app.core.deps import get_current_user_id
 from app.core.response import success_response
-from app.db.session import SessionLocal, get_db
+from app.db import session as db_session
+from app.db.session import get_db
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.schemas.jobs import JobStatusData
-from app.services.repo import get_job_or_404, list_job_events_after
+from app.services.repo import get_job_for_user_or_404, list_job_events_after
 
 router = APIRouter(tags=["jobs"])
 
@@ -23,8 +25,8 @@ router = APIRouter(tags=["jobs"])
     operation_id="getJobStatus",
     responses={**OPENAPI_ERROR_RESPONSES},
 )
-def get_job_status(job_id: str, db: Session = Depends(get_db)) -> dict:
-    job = get_job_or_404(db, job_id)
+def get_job_status(job_id: str, db: Session = Depends(get_db), user_id=Depends(get_current_user_id)) -> dict:
+    job = get_job_for_user_or_404(db, job_id, str(user_id))
     timing_snapshot = dict(job.timing_snapshot or {})
     current_stage = timing_snapshot.get("current_stage") or {}
     current_stage_elapsed_ms = None
@@ -74,21 +76,21 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)) -> dict:
         **OPENAPI_ERROR_RESPONSES,
     },
 )
-async def stream_job_events(job_id: str) -> EventSourceResponse:
-    with SessionLocal() as db:
-        get_job_or_404(db, job_id)
+async def stream_job_events(job_id: str, user_id=Depends(get_current_user_id)) -> EventSourceResponse:
+    with db_session.SessionLocal() as db:
+        get_job_for_user_or_404(db, job_id, str(user_id))
 
     async def event_generator():
         last_seq = 0
         while True:
-            with SessionLocal() as db:
+            with db_session.SessionLocal() as db:
                 events = list_job_events_after(db, job_id, last_seq)
                 if events:
                     for evt in events:
                         last_seq = evt.seq_no
                         yield {"data": json.dumps(evt.payload, ensure_ascii=False)}
 
-                job = get_job_or_404(db, job_id)
+                job = get_job_for_user_or_404(db, job_id, str(user_id))
                 if job.status in {"succeeded", "failed", "canceled", "partial_succeeded"}:
                     break
             await asyncio.sleep(1)

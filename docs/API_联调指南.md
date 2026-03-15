@@ -2,6 +2,29 @@
 
 ## 1. 基础约定
 
+### 1.0 本轮联调重点
+- 浏览器上传推荐改为：
+  - `POST /uploads/presign`
+  - 直传对象存储
+  - `POST /uploads/complete`
+- 业务表中持久化的是稳定 `object_key`，接口返回的 `url/image_url/thumbnail_url` 已改为临时可访问 URL
+- 账户中心新增 `GET /account/pricing`
+- 生成类接口响应新增：
+  - `charged_credits`
+  - `balance_after`
+  - `pricing_rule_id`
+- 余额不足时，生成类接口返回 `40201 insufficient_credits`
+- 主图与详情页结果接口都已支持：
+  - `requested_version`
+  - `available_versions`
+  - `version_summaries`
+- 单图重生接口 `POST /assets/{asset_id}/regenerate` 现在有两种 job_type：
+  - 主图：`regenerate_asset`
+  - 详情页 panel：`regenerate_detail_panel`
+- Step 3 参数提取默认模型已切为 `gemini-3.1-flash-lite-preview`
+- `GET /jobs/{job_id}` 已补 timing 字段，前端可直接展示任务总耗时和阶段耗时
+- Apifox 请始终重新导入 `docs/openapi/smartphoto_backend_openapi.json`，不要手改字段定义
+
 ### 1.1 Base URL
 - 前缀：`/api/v2`
 - 健康检查：`GET /healthz`
@@ -17,6 +40,10 @@
 - 该命令会导出当前代码实现对应的 OpenAPI JSON
 - 导出文件可直接导入 Apifox
 - 若接口有变更，优先重新导出后再同步给联调方
+- 建议联调流程：
+  - 每次后端 schema/响应结构有调整，先重新导出 `docs/openapi/smartphoto_backend_openapi.json`
+  - 在 Apifox 中直接重新导入同名文件覆盖接口定义
+  - 不要手工在 Apifox 内维护字段，否则很容易和代码实现漂移
 
 ### 1.2 统一响应
 成功：
@@ -50,6 +77,7 @@
 - `40006` `unsupported_file_type`
 - `40007` `file_too_large`
 - `40008` `missing_required_images`
+- `40201` `insufficient_credits`
 - `40401` `session_not_found`
 - `40402` `job_not_found`
 - `40403` `asset_not_found`
@@ -64,8 +92,19 @@
 - 前置状态：`created` 或 `images_uploaded`
 - 接口：
   - `POST /sessions`
+  - `POST /uploads/presign`
+  - `POST /uploads/complete`
   - `POST /sessions/{session_id}/images`
   - `DELETE /sessions/{session_id}/images/{image_id}`
+- 推荐生产模式：
+  - 前端先调用 `POST /uploads/presign`
+  - 再直传 OSS / S3 兼容对象存储
+  - 最后调用 `POST /uploads/complete`
+- `upload_kind`：
+  - `session_image`
+  - `detail_style_image`
+  - `parameter_attachment`
+  - `strategy_reference_image`
 - 关键字段：
   - `slot_type`: `front | angle45 | side | extra`
   - `display_order`: 建议按前端展示顺序传入
@@ -76,6 +115,9 @@
 - 成功后：session 从 `created` 进入 `images_uploaded`
 - 常见错误：`40005` `40006` `40007`
 - 并发/幂等：无 Idempotency-Key
+- 兼容说明：
+  - 旧的 multipart 上传接口仍保留给本地/dev fallback
+  - 生产环境不建议继续让浏览器把大文件经 API 进程转发
 
 ### Step 2 分析
 - 前置状态：建议至少 1 张未删除图片
@@ -114,6 +156,18 @@
   - `PUT /sessions/{session_id}/copy`
   - `POST /sessions/{session_id}/copy/regenerate`
   - `GET /sessions/{session_id}/copy/regenerate/{job_id}`
+- Step 4 正式字段：
+  - `product_name`
+  - `category`
+  - `hero_scene`
+  - `core_selling_points`
+  - `key_parameters`
+  - `product_advantages`
+  - `style_preset_id`
+  - `style_custom`
+- 兼容字段：
+  - `style_choice`：deprecated，只兼容旧前端读写
+  - `headline/selling_points/usage_scenes/specs`：legacy 输入，后端会转换成正式字段
 - regenerate 支持字段：`headline` `selling_points` `usage_scenes` `specs`
 - 语义：regenerate 结果写在 `job.result_payload.generated_fields`，**不会自动覆盖** `confirmed_copy`
 - 常见错误：`40004` `40402`
@@ -131,6 +185,14 @@
   - `PUT /sessions/{session_id}/parameters`
 - 当前实现行为：
   - 提取 job_type 为 `extract_parameters`
+  - 参数提取模型默认 `whatai_parameter_model = gemini-3.1-flash-lite-preview`
+  - 图片附件：直接作为多模态输入喂给参数提取模型
+  - PDF 附件：先转成 markdown，再把 markdown 正文交给参数提取模型解释
+  - 提取完成后会默认用 `replace_all` 模式覆盖 Step 4 正式字段：
+    - `hero_scene`
+    - `core_selling_points`
+    - `key_parameters`
+    - `product_advantages`
   - `parameter_snapshot` 至少包含：
     - `relevance_status`
     - `rejection_reason`
@@ -139,9 +201,12 @@
     - `key_parameters`
     - `product_advantages`
     - `feature_highlights`
+    - `source_summary`
 - 补充说明：
-  - 提取结果是“可用抽取 + 人工可改”，不会强承诺复杂 OCR 高精度
-  - 保存参数结果后会使 Step 5 策略预览失效，需要重新 build strategy
+  - 当前参数提取不走 OCR
+  - 提取结果是“可用抽取 + 人工可改”，不会强承诺复杂图表/版面还原精度
+  - `GET /sessions/{session_id}/parameters` 会同时返回 `applied_copy_fields`
+  - 保存参数结果后会同步覆盖上述 4 个正式字段，并使 Step 5 策略预览失效，需要重新 build strategy
 
 ### Step 5 策略预览
 - 前置状态：
@@ -307,6 +372,10 @@
     - `style`
     - `slot_recipe`
     - `raw_prompt`
+  - Step 4 风格正式契约已经收口为：
+    - `style_preset_id`
+    - `style_custom`
+    - `style_choice` 仅兼容读取/legacy 写入，文档视为 deprecated
   - 调试台当前支持：
     - Step 4 套用风格预设
     - Step 5 把单槽位 override 显式保存为模板
@@ -360,7 +429,7 @@
     - `product_reference_ids`
     - `style_reference_ids`
     - `rule_modules_used`
-  - 未上传风格图时，planner 自动退回 `style_choice + style_custom`
+  - 未上传风格图时，planner 自动退回 `style_preset_id(style_summary/name) + style_custom`；若缺失再兼容回退 `style_choice`
   - 详情页 override 接口：
     - `GET /sessions/{session_id}/detail-pages/strategy/overrides`
     - `PUT /sessions/{session_id}/detail-pages/strategy/overrides`
@@ -486,6 +555,9 @@
   - `total_duration_ms`
   - `current_stage_elapsed_ms`
   - `stage_timings`
+- 前端联调建议：
+  - `regenerate_detail_panel` 也属于 generation 类任务，前端不要只按 `regenerate_asset` 单一 job_type 判断
+  - JobMonitor 的事件展示要兼容 SSE 里的 `event` 字段，不要只读 `event_type`
 
 ### 3.2 SSE 事件
 - 接口：`GET /jobs/{job_id}/events`
@@ -509,15 +581,76 @@ data: {"event":"job_succeeded","job_id":"..."}
   - Job 轮询兜底（SSE 中断或网络抖动）
   - Prompt Debug 面板单独调 `POST /sessions/{id}/prompts/preview`，避免结果接口变重
 
+### 3.4 前台用户鉴权与账户中心
+- 鉴权前缀：`/api/v2/auth`
+- 登录注册接口：
+  - `POST /auth/register`
+  - `POST /auth/login`
+  - `POST /auth/refresh`
+  - `POST /auth/logout`
+  - `GET /auth/me`
+- 鉴权规则：
+  - 业务接口默认走 `Authorization: Bearer <access_token>`
+  - 刷新令牌使用 `HttpOnly` Cookie：`user_refresh_token`
+  - `dev` 环境默认允许 `ALLOW_DEV_AUTH_BYPASS=true`，未带 token 时回落到固定开发用户；联调前建议关闭
+  - `/platforms`、`/healthz`、`/openapi.json` 保持公开，其余 `/api/v2` 默认要求登录或 dev bypass
+- 账户中心接口：
+  - `GET /account/overview`
+  - `GET|PUT /account/profile`
+  - `GET /account/assets`
+  - `GET /account/pricing`
+  - `GET /account/notifications`
+  - `POST /account/notifications/{id}/read`
+  - `POST /account/notifications/read-all`
+  - `POST /account/security/change-password`
+  - `GET|PUT /account/settings`
+  - `GET /account/purchases`
+  - `GET /account/wallet`
+  - `GET /account/wallet/transactions`
+- 资产历史接口说明：
+  - 返回按 `session` 聚合的卡片，不按单 asset 平铺
+  - 支持筛选参数：`q` `platform_id` `image_type` `style_tag` `brand_name` `page` `page_size`
+  - `image_type` 当前支持：`original` `main` `detail` `white_bg`
+- 用户商业化闭环说明：
+  - 当前已实现额度价格规则、生成前余额校验、消费流水和失败自动退款
+  - 价格以 `GET /account/pricing` 为准，不建议前端硬编码
+  - 退款条件：任务最终 `failed` 且未产出任何 ready asset
+- 安全收口说明：
+  - `GET /jobs/{job_id}` 与 `GET /jobs/{job_id}/events` 已按当前登录用户做归属校验
+  - `prompt-presets` 当前只返回“系统模板 + 当前用户模板”；系统模板对用户侧只读
+
+### 3.5 后台管理接口
+- 管理前缀：`/api/admin/v1`
+- 后台登录接口：
+  - `POST /auth/login`
+  - `POST /auth/refresh`
+  - `POST /auth/logout`
+  - `GET /auth/me`
+- 后台管理对象：
+  - `GET /dashboard/summary`
+  - `GET /sessions` / `GET /sessions/{id}`
+  - `PUT /sessions/{id}/copy|parameters|strategy/overrides|detail-pages/strategy/overrides`
+  - `POST /sessions/{id}/actions/reanalyze|extract-parameters|regenerate-main|regenerate-detail`
+  - `GET /jobs` / `GET /jobs/{id}` / `GET /jobs/{id}/events` / `POST /jobs/{id}/retry`
+  - `GET /assets` / `GET /assets/{id}` / `POST /assets/{id}/archive|restore|actions/regenerate`
+  - `GET|POST|PUT /prompt-presets` / `POST /prompt-presets/{id}/archive|clone`
+  - `GET|POST|PUT /rule-packs` / `GET /rule-packs/{id}` / `POST /rule-packs/{id}/publish|clone|archive`
+  - `GET /audit-logs`
+  - `GET /users` / `GET /users/{id}` / `POST /users/{id}/orders` / `POST /users/{id}/wallet/adjust`
+- 资产归档语义：
+  - 用户侧 `/api/v2/sessions/{id}/results|download` 默认隐藏 `visibility_status=archived` 资产
+  - 后台侧可按 `visibility_status` 查看全部资产
+
 ## 4. 实现 vs SPEC 差距清单（集中维护）
-1. 鉴权接口（`/auth/register` `/auth/login` `/auth/me`）未实现，当前固定测试用户。
-2. `build_strategy` 当前为同步执行，不走 Worker 队列。
-3. `regenerate_copy` 仍返回占位重写结果，尚未解析上游真实输出。
-4. `global_edit` 的 `scope=selected` 参数已接收，但执行时仍按整组处理。
-5. 当前已实现“风格参考图单独上传 + 详情页独立首次生成 + 动态 panel_type 推荐/覆盖”，但未实现详情页 `global_edit`、单 panel 重生成、ComfyUI 节点级调试信息。
-6. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
-7. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
-8. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
+1. `build_strategy` 当前为同步执行，不走 Worker 队列。
+2. `regenerate_copy` 仍返回占位重写结果，尚未解析上游真实输出。
+3. `global_edit` 的 `scope=selected` 参数已接收，但执行时仍按整组处理。
+4. 当前已实现“风格参考图单独上传 + 详情页独立首次生成 + 动态 panel_type 推荐/覆盖”，但未实现详情页 `global_edit`、单 panel 重生成、ComfyUI 节点级调试信息。
+5. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
+6. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
+7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
+8. `adminfront/` 已提供最小可用后台，更偏运营/排障工作台，不是完整设计系统化的正式 B 端产品。
+9. 当前已实现浏览器直传对象存储、`GET /account/pricing`、生成扣费与失败退款；仍未接真实支付、邮箱验证、找回密码和设备会话管理。
 
 ## 5. 联调最短路径
 1. `POST /sessions`

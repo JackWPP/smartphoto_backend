@@ -4,7 +4,7 @@ SESSION_TRANSITIONS: dict[str, set[str]] = {
     "created": {"images_uploaded"},
     "images_uploaded": {"analyzing", "platform_selected"},
     "analyzing": {"analyzed", "failed"},
-    "analyzed": {"platform_selected", "copy_ready", "failed"},
+    "analyzed": {"analyzing", "platform_selected", "copy_ready", "failed"},
     "platform_selected": {"analyzing", "copy_ready", "failed"},
     "copy_ready": {"analyzing", "strategy_ready", "failed"},
     "strategy_ready": {"analyzing", "generating", "failed"},

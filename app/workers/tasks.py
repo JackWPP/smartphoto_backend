@@ -1,7 +1,8 @@
 from celery import shared_task
 
 from app.core.errors import AppError
-from app.db.session import SessionLocal
+from app.db import session as db_session
+from app.models.asset import AssetModel
 from app.services.jobs import append_job_event, update_job_status
 from app.services.pipeline import (
     run_analysis_job,
@@ -10,6 +11,7 @@ from app.services.pipeline import (
     run_generate_family_job,
     run_regenerate_copy_job,
 )
+from app.services.user_accounts import create_job_completion_notification, refund_generation_charge
 
 RETRYABLE_UPSTREAM_KEYS = {"upstream_llm_error"}
 
@@ -48,11 +50,37 @@ def _mark_job_failed(db, job, error_code: str, error_message: str) -> None:
         error_message=error_message,
     )
     append_job_event(db, job.id, "job_failed", {"event": "job_failed", "error": error_message})
+    ready_asset_count = (
+        db.query(AssetModel.id)
+        .filter(
+            AssetModel.job_id == job.id,
+            AssetModel.status == "ready",
+        )
+        .count()
+    )
+    if ready_asset_count == 0:
+        refund_generation_charge(db, user_id=job.user_id, job_id=job.id, session_id=job.session_id)
+    if job.job_type in {
+        "generate_gallery",
+        "regenerate_gallery",
+        "global_edit",
+        "regenerate_asset",
+        "generate_detail_page",
+        "regenerate_detail_panel",
+    }:
+        create_job_completion_notification(
+            db,
+            user_id=job.user_id,
+            session_id=job.session_id,
+            job_type=job.job_type,
+            succeeded=False,
+            error_message=error_message,
+        )
 
 
 @shared_task(bind=True, name="app.workers.tasks.execute_job", max_retries=3)
 def execute_job(self, job_id: str) -> None:
-    db = SessionLocal()
+    db = db_session.SessionLocal()
     job = None
     try:
         from app.models.job import JobModel

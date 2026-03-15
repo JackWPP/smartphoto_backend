@@ -1,3 +1,4 @@
+import io
 import httpx
 import pytest
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from app.core.errors import AppError
+from app.services.copy_normalization import normalize_key_parameters
 from app.services.reference_images import LoadedReferenceImage, select_reference_images_for_role
 from app.services.strategy import build_strategy_preview
 from app.services.upstream import WhataiClient
@@ -464,6 +466,7 @@ def test_request_multipart_json_with_retry_marks_transport_errors_retryable(monk
 def test_analyze_images_builds_inline_image_payload(monkeypatch):
     client = WhataiClient()
     monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    monkeypatch.setattr(client.settings, "whatai_analysis_model", "analysis-fast-model")
     captured: dict[str, object] = {}
 
     def fake_post_chat_json(payload, _error_key):
@@ -487,9 +490,37 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
     )
     client.analyze_images([image], "temu")
 
+    assert captured["payload"]["model"] == "analysis-fast-model"
     message_content = captured["payload"]["messages"][0]["content"]
     assert any(part.get("type") == "image_url" for part in message_content)
     assert any("data:image/jpeg;base64," in part.get("image_url", {}).get("url", "") for part in message_content)
+
+
+def test_optimized_data_uri_downsizes_large_reference_images():
+    client = WhataiClient()
+    large = Image.new("RGB", (2200, 1800), (230, 230, 230))
+    buf = io.BytesIO()
+    large.save(buf, format="JPEG", quality=95)
+    original_bytes = buf.getvalue()
+
+    image = LoadedReferenceImage(
+        "img-front",
+        "front",
+        1,
+        "/storage/front.jpg",
+        2200,
+        1800,
+        "image/jpeg",
+        len(original_bytes),
+        "front.jpg",
+        Path("front.jpg"),
+        original_bytes,
+    )
+
+    data_uri = client._optimized_data_uri(image)
+
+    assert data_uri.startswith("data:image/jpeg;base64,")
+    assert len(data_uri) < len(image.to_data_uri())
 
 
 def test_merge_analysis_result_normalizes_scalar_sections():
@@ -514,6 +545,34 @@ def test_merge_analysis_result_normalizes_scalar_sections():
     assert merged["missing_views"] == ["side", "detail"]
     assert merged["suggested_styles"] == ["现代简约", "清爽明亮"]
     assert merged["key_parameters"][0]["label"] == "300ml"
+
+
+def test_normalize_key_parameters_splits_label_value_and_unit():
+    normalized = normalize_key_parameters(
+        [
+            {
+                "label": "外观形态：圆柱塔式设计",
+                "value": "外观形态：圆柱塔式设计",
+                "unit": "",
+            },
+            "额定功率：35W",
+            {
+                "label": "适用面积",
+                "value": "30㎡",
+                "unit": "",
+            },
+        ]
+    )
+
+    assert normalized[0]["label"] == "外观形态"
+    assert normalized[0]["value"] == "圆柱塔式设计"
+    assert normalized[0]["unit"] == ""
+    assert normalized[1]["label"] == "额定功率"
+    assert normalized[1]["value"] == "35"
+    assert normalized[1]["unit"] == "W"
+    assert normalized[2]["label"] == "适用面积"
+    assert normalized[2]["value"] == "30"
+    assert normalized[2]["unit"] == "㎡"
 
 
 def _image_bytes(image: Image.Image) -> bytes:

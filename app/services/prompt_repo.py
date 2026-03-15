@@ -90,10 +90,13 @@ def list_prompt_presets(
     asset_family: str | None = None,
     platform_id: str | None = None,
     slot_family: str | None = None,
+    user_id: str | None = None,
     include_inactive: bool = False,
 ) -> list[PromptPresetModel]:
     ensure_system_prompt_presets(db)
     query = db.query(PromptPresetModel)
+    if user_id is not None:
+        query = query.filter((PromptPresetModel.is_system.is_(True)) | (PromptPresetModel.created_by == user_id))
     if preset_type:
         query = query.filter(PromptPresetModel.preset_type == preset_type)
     if asset_family:

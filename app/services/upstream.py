@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw
 
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.services.copy_normalization import normalize_key_parameters as normalize_structured_key_parameters
 from app.services.reference_images import LoadedReferenceImage
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,8 @@ logger = logging.getLogger(__name__)
 class WhataiClient:
     REQUEST_RETRYABLE_ERRORS = (httpx.TransportError,)
     IMAGE_EDIT_REQUEST_ATTEMPTS = 4
+    CHAT_IMAGE_MAX_EDGE = 1024
+    CHAT_IMAGE_JPEG_QUALITY = 82
     IMAGE_EDIT_ALLOWED_ASPECT_RATIOS = {
         "1:1",
         "1:4",
@@ -66,7 +69,7 @@ class WhataiClient:
             *self._build_chat_image_parts(normalized_images),
         ]
         payload = {
-            "model": self.settings.whatai_chat_model,
+            "model": self.settings.whatai_analysis_model or self.settings.whatai_chat_model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.2,
         }
@@ -130,7 +133,7 @@ class WhataiClient:
             *self._build_chat_image_parts(supplemental_reference_images or []),
         ]
         payload = {
-            "model": self.settings.whatai_chat_model,
+            "model": self.settings.whatai_planner_model or self.settings.whatai_chat_model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.3,
         }
@@ -204,7 +207,7 @@ class WhataiClient:
                 "type": "text",
                 "text": "Image 1 is the product multi-angle grid.",
             },
-            {"type": "image_url", "image_url": {"url": product_grid.to_data_uri()}},
+            {"type": "image_url", "image_url": {"url": self._optimized_data_uri(product_grid)}},
         ]
         if style_grid is not None:
             content.extend(
@@ -213,12 +216,12 @@ class WhataiClient:
                         "type": "text",
                         "text": "Image 2 is the style/font reference grid.",
                     },
-                    {"type": "image_url", "image_url": {"url": style_grid.to_data_uri()}},
+                    {"type": "image_url", "image_url": {"url": self._optimized_data_uri(style_grid)}},
                 ]
             )
 
         payload = {
-            "model": self.settings.whatai_chat_model,
+            "model": self.settings.whatai_planner_model or self.settings.whatai_chat_model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.4,
         }
@@ -287,13 +290,16 @@ class WhataiClient:
                 "type": "text",
                 "text": (
                     "你是 SmartPhoto 的 Step3 参数抽取器。"
-                    "请判断上传内容是否与当前商品相关，并只返回 JSON 对象。"
-                    "字段必须包含：relevance_status,rejection_reason,hero_scene,core_selling_points,"
-                    "key_parameters,product_advantages,feature_highlights。"
-                    "如果内容无关，relevance_status=invalid，并给出 rejection_reason。"
-                    f"当前平台：{active_platform_id or 'temu'}。"
-                    f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
-                    f"文件附件摘要：{json.dumps(attachment_manifest, ensure_ascii=False)}。"
+                "请判断上传内容是否与当前商品相关，并只返回 JSON 对象。"
+                "字段必须包含：relevance_status,rejection_reason,hero_scene,core_selling_points,"
+                "key_parameters,product_advantages,feature_highlights。"
+                "如果内容无关，relevance_status=invalid，并给出 rejection_reason。"
+                "key_parameters 必须是数组，每项都要拆成 key,label,value,unit。"
+                "label 只放参数名，value 只放参数值，不要把“参数名：参数值”整句同时塞进 label 和 value。"
+                "如果可以识别单位就放到 unit，不能识别时 unit 置空字符串。"
+                f"当前平台：{active_platform_id or 'temu'}。"
+                f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
+                f"文件附件摘要：{json.dumps(attachment_manifest, ensure_ascii=False)}。"
                 ),
             },
             *self._build_chat_image_parts(image_attachments),
@@ -647,7 +653,7 @@ class WhataiClient:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                with httpx.Client(base_url=base_url, timeout=90) as client:
+                with httpx.Client(base_url=base_url, timeout=self.settings.whatai_request_timeout_seconds) as client:
                     response = client.request(method, path, json=payload, headers=headers, params=params)
                     response.raise_for_status()
                     return response.json()
@@ -846,8 +852,30 @@ class WhataiClient:
                     ),
                 }
             )
-            content.append({"type": "image_url", "image_url": {"url": image.to_data_uri()}})
+            content.append({"type": "image_url", "image_url": {"url": self._optimized_data_uri(image)}})
         return content
+
+    def _optimized_data_uri(self, image: LoadedReferenceImage) -> str:
+        try:
+            with Image.open(io.BytesIO(image.content)) as img:
+                if img.mode not in {"RGB", "L"}:
+                    base = Image.new("RGB", img.size, (255, 255, 255))
+                    base.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
+                    img = base
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+
+                if max(img.size) > self.CHAT_IMAGE_MAX_EDGE:
+                    scaled = img.copy()
+                    scaled.thumbnail((self.CHAT_IMAGE_MAX_EDGE, self.CHAT_IMAGE_MAX_EDGE))
+                    img = scaled
+
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=self.CHAT_IMAGE_JPEG_QUALITY, optimize=True)
+                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+                return f"data:image/jpeg;base64,{encoded}"
+        except Exception:  # noqa: BLE001
+            return image.to_data_uri()
 
     def _parse_json_object(self, text: str) -> dict[str, Any] | None:
         stripped = text.strip()
@@ -985,25 +1013,7 @@ class WhataiClient:
     def _normalize_key_parameters(self, value: Any, fallback: list[Any]) -> list[dict[str, Any]]:
         parsed = self._decode_json_like(value)
         items = parsed if isinstance(parsed, list) else fallback
-        normalized: list[dict[str, Any]] = []
-        for index, item in enumerate(items, start=1):
-            if isinstance(item, dict):
-                normalized.append(item)
-                continue
-            text = str(item).strip()
-            if not text:
-                continue
-            normalized.append(
-                {
-                    "key": f"param_{index}",
-                    "label": text,
-                    "value": text,
-                    "unit": "",
-                    "confidence": None,
-                    "editable": True,
-                }
-            )
-        return normalized
+        return normalize_structured_key_parameters(items)
 
     def _decode_json_like(self, value: Any) -> Any:
         if isinstance(value, str):

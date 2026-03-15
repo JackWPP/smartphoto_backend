@@ -56,6 +56,10 @@ from app.schemas.session import (
     StrategyPreviewRequest,
     StrategyPreviewData,
     UploadParameterAttachmentData,
+    UploadPresignData,
+    UploadPresignRequest,
+    UploadCompleteData,
+    UploadCompleteRequest,
     UploadDetailStyleImageData,
     UploadStrategyReferenceImageData,
     UploadSessionImageData,
@@ -76,15 +80,22 @@ from app.services.download import build_zip_for_assets
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
 from app.services.jobs import append_job_event, create_job, update_job_status
-from app.services.locking import acquire_generation_locks
-from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
+from app.services.locking import acquire_generation_locks, release_locks
+from app.services.parameter_snapshot import (
+    apply_parameter_snapshot_to_copy,
+    merge_parameter_snapshot_into_copy,
+    parameter_snapshot_to_copy_fields,
+)
 from app.services.platforms import get_platform_or_none
+from app.services.pricing import get_pricing_rule
 from app.services.prompts import build_prompt_previews
 from app.services.prompt_repo import list_prompt_presets
 from app.services.repo import (
     get_prompt_preset_or_404,
-    get_job_or_404,
+    get_prompt_preset_or_none,
+    get_job_for_user_or_404,
     get_session_or_404,
+    list_visible_prompt_presets_by_ids,
     list_active_detail_style_images,
     list_active_parameter_attachments,
     list_active_session_images,
@@ -92,9 +103,10 @@ from app.services.repo import (
     list_session_prompt_overrides,
 )
 from app.services.state_machine import ensure_session_transition
-from app.services.storage import LocalStorageAdapter
+from app.services.storage import get_storage_adapter, public_url_for
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
+from app.services.user_accounts import charge_wallet_for_action, refresh_session_search_cache
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -106,6 +118,31 @@ MAX_SESSION_IMAGES = 6
 MAX_DETAIL_STYLE_IMAGES = 4
 
 
+def _signed_url(value: str | None) -> str | None:
+    return public_url_for(value)
+
+
+def _generation_response_data(
+    *,
+    job_id: str,
+    job_type: str,
+    status: str,
+    charged_credits: int,
+    balance_after: int,
+    pricing_rule_id: str | None,
+    **extra: int | str,
+) -> dict:
+    return {
+        "job_id": job_id,
+        "job_type": job_type,
+        "status": status,
+        "charged_credits": charged_credits,
+        "balance_after": balance_after,
+        "pricing_rule_id": pricing_rule_id,
+        **extra,
+    }
+
+
 def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
     if not session.confirmed_copy:
         raise AppError("invalid_session_status", "copy not ready", 400)
@@ -113,9 +150,10 @@ def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
         raise AppError("invalid_platform", "active platform required", 400)
     return normalize_strategy_preview(
         session.strategy_preview,
-        session.confirmed_copy,
+        _resolved_copy_for_session(session, db),
         session.active_platform_id,
-        prompt_overrides=_serialized_session_overrides(db, session.id),
+        db=db,
+        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
         parameter_snapshot=session.parameter_snapshot or {},
     )
 
@@ -128,12 +166,13 @@ def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> di
 
     return normalize_detail_strategy_preview(
         session.detail_strategy_preview,
-        merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+        _resolved_copy_for_session(session, db),
+        db=db,
         product_images=list_active_session_images(db, session.id),
         style_images=list_active_detail_style_images(db, session.id),
         analysis_snapshot=session.analysis_snapshot or {},
         active_platform_id=session.active_platform_id,
-        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
     )
 
 
@@ -145,6 +184,7 @@ def _main_gallery_assets_query(db: Session, session_id: str, version_no: int):
             AssetModel.version_no == version_no,
             AssetModel.asset_family == "main_gallery",
             AssetModel.status == "ready",
+            AssetModel.visibility_status == "visible",
         )
         .order_by(AssetModel.display_order.asc())
     )
@@ -158,6 +198,7 @@ def _detail_page_assets_query(db: Session, session_id: str, version_no: int):
             AssetModel.version_no == version_no,
             AssetModel.asset_family == "detail_page",
             AssetModel.status == "ready",
+            AssetModel.visibility_status == "visible",
         )
         .order_by(AssetModel.display_order.asc())
     )
@@ -169,6 +210,7 @@ def _available_versions(db: Session, session_id: str, *, asset_family: str) -> l
         .filter(
             AssetModel.session_id == session_id,
             AssetModel.asset_family == asset_family,
+            AssetModel.visibility_status == "visible",
         )
         .distinct()
         .order_by(AssetModel.version_no.desc())
@@ -187,6 +229,7 @@ def _version_summaries(db: Session, session_id: str, *, asset_family: str) -> li
                 AssetModel.session_id == session_id,
                 AssetModel.asset_family == asset_family,
                 AssetModel.version_no == version_no,
+                AssetModel.visibility_status == "visible",
             )
             .all()
         )
@@ -201,12 +244,12 @@ def _version_summaries(db: Session, session_id: str, *, asset_family: str) -> li
     return summaries
 
 
-def _serialized_session_overrides(db: Session, session_id: str, *, asset_family: str = "main_gallery") -> list[dict]:
+def _serialized_session_overrides(db: Session, session_id: str, *, asset_family: str = "main_gallery", user_id: str | None = None) -> list[dict]:
     overrides = list_session_prompt_overrides(db, session_id, asset_family=asset_family)
     preset_ids = [override.applied_preset_id for override in overrides if override.applied_preset_id]
     presets_by_id: dict[str, PromptPresetModel] = {}
     if preset_ids:
-        presets = db.query(PromptPresetModel).filter(PromptPresetModel.id.in_(preset_ids)).all()
+        presets = list_visible_prompt_presets_by_ids(db, preset_ids, user_id=user_id)
         presets_by_id = {preset.id: preset for preset in presets}
     return [
         serialize_session_override(
@@ -215,6 +258,34 @@ def _serialized_session_overrides(db: Session, session_id: str, *, asset_family:
         )
         for override in overrides
     ]
+
+
+def _copy_response_payload(session: SessionModel, db: Session) -> dict:
+    copy_data = _resolved_copy_for_session(session, db)
+    return {
+        "product_name": copy_data.get("product_name", ""),
+        "category": copy_data.get("category", ""),
+        "hero_scene": copy_data.get("hero_scene", ""),
+        "core_selling_points": copy_data.get("core_selling_points", []),
+        "key_parameters": copy_data.get("key_parameters", []),
+        "product_advantages": copy_data.get("product_advantages", []),
+        "style_preset_id": copy_data.get("style_preset_id"),
+        "style_custom": copy_data.get("style_custom", ""),
+        "style_choice": copy_data.get("style_choice", ""),
+    }
+
+
+def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
+    copy_data = normalize_copy_payload(session.confirmed_copy)
+    if session.parameter_snapshot:
+        copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
+    preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"), session.user_id)
+    if preset is not None:
+        copy_data["style_preset_id"] = preset.id
+        copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
+        if not copy_data.get("style_choice"):
+            copy_data["style_choice"] = preset.name
+    return normalize_copy_payload(copy_data)
 
 
 def _invalidate_strategy_inputs(session: SessionModel) -> None:
@@ -336,7 +407,7 @@ async def upload_session_image(
     if file.content_type not in ALLOWED_MIME:
         raise AppError("unsupported_file_type", http_status=400)
 
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     source_url, width, height, mime_type, file_size = storage.save_upload(
         session_id=session_id,
         original_name=file.filename or "upload.jpg",
@@ -379,7 +450,7 @@ async def upload_session_image(
                     "image_id": item.id,
                     "slot_type": item.slot_type,
                     "display_order": item.display_order,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                 }
                 for item in images
             ],
@@ -442,7 +513,7 @@ def list_session_images(
                 "image_id": img.id,
                 "slot_type": img.slot_type,
                 "display_order": img.display_order,
-                "url": img.source_url,
+                "url": _signed_url(img.source_url),
                 "width": img.width,
                 "height": img.height,
                 "mime_type": img.mime_type,
@@ -479,7 +550,7 @@ async def upload_detail_style_image(
     if file.content_type not in ALLOWED_MIME:
         raise AppError("unsupported_file_type", http_status=400)
 
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     source_url, width, height, mime_type, file_size = storage.save_upload(
         session_id=session_id,
         original_name=file.filename or "style.jpg",
@@ -507,7 +578,7 @@ async def upload_detail_style_image(
                 {
                     "image_id": item.id,
                     "display_order": item.display_order,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                 }
                 for item in images
             ],
@@ -536,7 +607,7 @@ def list_detail_style_images(
                 {
                     "image_id": img.id,
                     "display_order": img.display_order,
-                    "url": img.source_url,
+                    "url": _signed_url(img.source_url),
                     "width": img.width,
                     "height": img.height,
                     "mime_type": img.mime_type,
@@ -573,7 +644,7 @@ async def upload_parameter_attachment(
     if file.content_type not in ALLOWED_PARAMETER_MIME:
         raise AppError("unsupported_file_type", http_status=400)
 
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     source_url, width, height, mime_type, file_size = storage.save_upload(
         session_id=session_id,
         original_name=file.filename or "parameter-attachment",
@@ -606,7 +677,7 @@ async def upload_parameter_attachment(
                     "attachment_id": item.id,
                     "display_order": item.display_order,
                     "original_name": item.original_name,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                 }
                 for item in attachments
             ],
@@ -635,7 +706,7 @@ def list_parameter_attachments(
                     "attachment_id": item.id,
                     "display_order": item.display_order,
                     "original_name": item.original_name,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                     "width": item.width,
                     "height": item.height,
                     "mime_type": item.mime_type,
@@ -698,7 +769,7 @@ async def upload_strategy_reference_image(
     if file.content_type not in ALLOWED_MIME:
         raise AppError("unsupported_file_type", http_status=400)
 
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     source_url, width, height, mime_type, file_size = storage.save_upload(
         session_id=session_id,
         original_name=file.filename or "strategy-reference.jpg",
@@ -728,7 +799,7 @@ async def upload_strategy_reference_image(
                 {
                     "image_id": item.id,
                     "display_order": item.display_order,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                 }
                 for item in images
             ],
@@ -756,7 +827,7 @@ def list_strategy_reference_images(
                 {
                     "image_id": item.id,
                     "display_order": item.display_order,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                     "width": item.width,
                     "height": item.height,
                     "mime_type": item.mime_type,
@@ -918,6 +989,13 @@ def extract_parameters(
             "job_type": job.job_type,
             "status": job.status,
             "session_id": session.id,
+            "overwrite_mode": "replace_all",
+            "applied_copy_fields": [
+                "hero_scene",
+                "core_selling_points",
+                "key_parameters",
+                "product_advantages",
+            ],
         }
     )
 
@@ -935,7 +1013,14 @@ def get_parameters(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    return success_response({"session_id": session.id, "parameter_snapshot": session.parameter_snapshot or {}})
+    return success_response(
+        {
+            "session_id": session.id,
+            "parameter_snapshot": session.parameter_snapshot or {},
+            "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "overwrite_mode": "replace_all",
+        }
+    )
 
 
 @router.put(
@@ -953,10 +1038,19 @@ def put_parameters(
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
     session.parameter_snapshot = payload or {}
+    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
+    refresh_session_search_cache(session)
     session.strategy_preview = None
     session.detail_strategy_preview = None
     db.commit()
-    return success_response({"session_id": session.id, "parameter_snapshot": session.parameter_snapshot or {}})
+    return success_response(
+        {
+            "session_id": session.id,
+            "parameter_snapshot": session.parameter_snapshot or {},
+            "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "overwrite_mode": "replace_all",
+        }
+    )
 
 
 @router.put(
@@ -1008,8 +1102,7 @@ def put_platform_selection(
 )
 def get_copy_form(session_id: str, db: Session = Depends(get_db), user_id=Depends(get_current_user_id)) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    copy_data = normalize_copy_payload(session.confirmed_copy)
-    return success_response(copy_data)
+    return success_response(_copy_response_payload(session, db))
 
 
 @router.put(
@@ -1027,7 +1120,17 @@ def put_copy_form(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    session.confirmed_copy = normalize_copy_payload(req.model_dump())
+    payload = normalize_copy_payload(req.model_dump())
+    preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"), str(user_id))
+    if payload.get("style_preset_id") and preset is None:
+        raise AppError("invalid_request", "style preset not found", 404)
+    payload["resolved_style_preset"] = serialize_prompt_preset(preset) if preset is not None else None
+    if preset is not None and not payload.get("style_choice"):
+        payload["style_choice"] = preset.name
+    session.confirmed_copy = normalize_copy_payload(payload)
+    refresh_session_search_cache(session)
+    session.strategy_preview = None
+    session.detail_strategy_preview = None
     if session.status in {"platform_selected", "copy_ready", "analyzed"}:
         session.status = "copy_ready"
     session.current_step = max(session.current_step, 4)
@@ -1099,7 +1202,7 @@ def get_copy_regenerate_result(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    job = get_job_or_404(db, job_id)
+    job = get_job_for_user_or_404(db, job_id, str(user_id))
     if job.session_id != session.id or job.job_type != "regenerate_copy":
         raise AppError("job_not_found", http_status=404)
 
@@ -1149,14 +1252,15 @@ def build_strategy(
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
     preview = build_strategy_preview(
-        session.confirmed_copy,
+        _resolved_copy_for_session(session, db),
         session.active_platform_id,
+        db=db,
         session_images=images,
         analysis_snapshot=session.analysis_snapshot or {},
         parameter_snapshot=session.parameter_snapshot or {},
         planner_instruction=payload.get("planner_instruction"),
         slot_preferences=payload.get("slot_preferences") or [],
-        prompt_overrides=_serialized_session_overrides(db, session.id),
+        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
         strategy_reference_images=list_active_strategy_reference_images(db, session.id),
     )
     session.strategy_preview = preview
@@ -1204,14 +1308,15 @@ def build_detail_strategy(
     style_images = list_active_detail_style_images(db, session.id)
 
     preview = build_detail_strategy_preview(
-        merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+        _resolved_copy_for_session(session, db),
+        db=db,
         product_images=product_images,
         style_images=style_images,
         analysis_snapshot=session.analysis_snapshot or {},
         planner_instruction=payload.get("planner_instruction"),
         panel_preferences=payload.get("panel_preferences") or [],
         active_platform_id=session.active_platform_id,
-        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
     )
     session.detail_strategy_preview = preview
     db.commit()
@@ -1231,7 +1336,7 @@ def get_strategy_overrides(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
-    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id)})
+    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id, user_id=session.user_id)})
 
 
 @router.put(
@@ -1271,7 +1376,7 @@ def put_strategy_overrides(
             )
             db.add(record)
         if override.applied_preset_id:
-            get_prompt_preset_or_404(db, override.applied_preset_id)
+            get_prompt_preset_or_404(db, override.applied_preset_id, session.user_id)
         record.copy_blocks_override = override.copy_blocks_override or {}
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
@@ -1285,20 +1390,21 @@ def put_strategy_overrides(
     db.flush()
     if session.confirmed_copy and session.active_platform_id:
         preview = build_strategy_preview(
-            session.confirmed_copy,
+            _resolved_copy_for_session(session, db),
             session.active_platform_id,
+            db=db,
             session_images=list_active_session_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
             parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=(session.strategy_preview or {}).get("planner_instruction"),
             slot_preferences=(session.strategy_preview or {}).get("slot_preferences") or [],
-            prompt_overrides=_serialized_session_overrides(db, session.id),
+            prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
         )
         session.strategy_preview = preview
 
     db.commit()
-    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id)})
+    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id, user_id=session.user_id)})
 
 
 @router.get(
@@ -1317,7 +1423,7 @@ def get_detail_strategy_overrides(
     return success_response(
         {
             "session_id": session.id,
-            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page"),
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
         }
     )
 
@@ -1359,7 +1465,7 @@ def put_detail_strategy_overrides(
             )
             db.add(record)
         if override.applied_preset_id:
-            get_prompt_preset_or_404(db, override.applied_preset_id)
+            get_prompt_preset_or_404(db, override.applied_preset_id, session.user_id)
         record.copy_blocks_override = override.copy_blocks_override or {}
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
@@ -1373,14 +1479,15 @@ def put_detail_strategy_overrides(
     db.flush()
     if session.confirmed_copy and session.active_platform_id:
         preview = build_detail_strategy_preview(
-            merge_parameter_snapshot_into_copy(session.confirmed_copy, session.parameter_snapshot),
+            _resolved_copy_for_session(session, db),
+            db=db,
             product_images=list_active_session_images(db, session.id),
             style_images=list_active_detail_style_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
             planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
             panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
             active_platform_id=session.active_platform_id,
-            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page"),
+            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
         )
         session.detail_strategy_preview = preview
 
@@ -1388,7 +1495,7 @@ def put_detail_strategy_overrides(
     return success_response(
         {
             "session_id": session.id,
-            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page"),
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
         }
     )
 
@@ -1408,21 +1515,23 @@ def preview_prompts(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
+    resolved_copy = _resolved_copy_for_session(session, db)
     strategy_preview = _effective_strategy_preview(session, db)
     if not strategy_preview.get("reference_manifest"):
         strategy_preview = build_strategy_preview(
-            session.confirmed_copy or {},
+            resolved_copy,
             session.active_platform_id or "temu",
+            db=db,
             session_images=list_active_session_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
             parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=strategy_preview.get("planner_instruction"),
             slot_preferences=strategy_preview.get("slot_preferences") or [],
-            prompt_overrides=_serialized_session_overrides(db, session.id),
+            prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
         )
     prompts = build_prompt_previews(
-        confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        confirmed_copy=resolved_copy,
         strategy_preview=strategy_preview,
         instruction=req.instruction,
     )
@@ -1456,6 +1565,12 @@ def preview_prompts(
         {
             "session_id": session.id,
             "active_platform_id": session.active_platform_id,
+            "hero_scene": resolved_copy.get("hero_scene", ""),
+            "core_selling_points": resolved_copy.get("core_selling_points", []),
+            "key_parameters": resolved_copy.get("key_parameters", []),
+            "product_advantages": resolved_copy.get("product_advantages", []),
+            "style_preset_id": resolved_copy.get("style_preset_id"),
+            "style_custom": resolved_copy.get("style_custom", ""),
             "model": settings.whatai_image_model,
             "image_size": "1024x1024",
             "reference_manifest": strategy_preview.get("reference_manifest", []),
@@ -1480,11 +1595,13 @@ def preview_detail_prompts(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
+    resolved_copy = _resolved_copy_for_session(session, db)
     detail_strategy_preview = _effective_detail_strategy_preview(session, db)
     prompts = build_detail_prompt_previews(
-        confirmed_copy=merge_parameter_snapshot_into_copy(session.confirmed_copy or {}, session.parameter_snapshot),
+        confirmed_copy=resolved_copy,
         strategy_preview=detail_strategy_preview,
         instruction=req.instruction,
+        db=db,
     )
 
     latest_assets: list[dict] = []
@@ -1514,6 +1631,12 @@ def preview_detail_prompts(
             "use_case": detail_strategy_preview.get("use_case", DETAIL_PAGE_USE_CASE),
             "aspect_ratio": detail_strategy_preview.get("aspect_ratio", DETAIL_PAGE_ASPECT_RATIO),
             "panel_count": detail_strategy_preview.get("panel_count", DETAIL_PAGE_PANEL_COUNT),
+            "hero_scene": resolved_copy.get("hero_scene", ""),
+            "core_selling_points": resolved_copy.get("core_selling_points", []),
+            "key_parameters": resolved_copy.get("key_parameters", []),
+            "product_advantages": resolved_copy.get("product_advantages", []),
+            "style_preset_id": resolved_copy.get("style_preset_id"),
+            "style_custom": resolved_copy.get("style_custom", ""),
             "model": settings.whatai_image_model,
             "image_size": DETAIL_PAGE_IMAGE_SIZE,
             "product_reference_manifest": detail_strategy_preview.get("product_reference_manifest", []),
@@ -1554,9 +1677,14 @@ def generate_gallery(
             raise AppError("invalid_request", f"invalid slot_ids: {invalid_slot_ids}", 400)
 
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
-
+    pricing_rule = get_pricing_rule("generate_gallery")
     payload = req.model_dump()
-    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+    payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": None,
+    }
 
     idem_record = None
     if idempotency_key:
@@ -1570,22 +1698,42 @@ def generate_gallery(
         if hit:
             return success_response(cached)
 
-    job = create_job(
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
         db,
-        session_id=session.id,
         user_id=str(user_id),
-        job_type="generate_gallery",
-        input_payload=payload,
-        idempotency_key=idempotency_key,
+        action="generate_gallery",
+        session_id=session.id,
+        payload={"slot_ids": req.slot_ids},
     )
+    payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    payload["lock_keys"] = lock_keys
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type="generate_gallery",
+            input_payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
     session.latest_generate_job_id = job.id
-    response_data = {
-        "job_id": job.id,
-        "job_type": job.job_type,
-        "status": job.status,
-        "session_id": session.id,
-        "generation_round": session.generation_round + 1,
-    }
+    if transaction is not None:
+        payload["pricing"]["job_id"] = job.id
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = _generation_response_data(
+        job_id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        session_id=session.id,
+        generation_round=session.generation_round + 1,
+        charged_credits=pricing_rule.credits,
+        balance_after=int(wallet.balance),
+        pricing_rule_id=pricing_rule.rule_id,
+    )
     if idem_record is not None:
         idem_record.response_payload = response_data
 
@@ -1617,6 +1765,7 @@ def generate_detail_page(
     if not list_active_session_images(db, session.id):
         raise AppError("missing_required_images", http_status=400)
 
+    pricing_rule = get_pricing_rule("generate_detail_page")
     payload = req.model_dump()
 
     idem_record = None
@@ -1632,24 +1781,45 @@ def generate_detail_page(
             return success_response(cached)
 
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
-    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
-
-    job = create_job(
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
         db,
-        session_id=session.id,
         user_id=str(user_id),
-        job_type="generate_detail_page",
-        input_payload=payload,
-        idempotency_key=idempotency_key,
+        action="generate_detail_page",
+        session_id=session.id,
     )
-    session.latest_detail_generate_job_id = job.id
-    response_data = {
-        "job_id": job.id,
-        "job_type": job.job_type,
-        "status": job.status,
-        "session_id": session.id,
-        "detail_generation_round": session.detail_generation_round + 1,
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    payload["lock_keys"] = lock_keys
+    payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": transaction.id if transaction else None,
     }
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type="generate_detail_page",
+            input_payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
+    session.latest_detail_generate_job_id = job.id
+    if transaction is not None:
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = _generation_response_data(
+        job_id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        session_id=session.id,
+        detail_generation_round=session.detail_generation_round + 1,
+        charged_credits=pricing_rule.credits,
+        balance_after=int(wallet.balance),
+        pricing_rule_id=pricing_rule.rule_id,
+    )
     if idem_record is not None:
         idem_record.response_payload = response_data
 
@@ -1697,8 +1867,8 @@ def get_results(
                     "render_total_ms": (asset.generation_snapshot or {}).get("timing", {}).get("render_total_ms"),
                     "status": asset.status,
                     "display_order": asset.display_order,
-                    "image_url": asset.image_url,
-                    "thumbnail_url": asset.thumbnail_url,
+                    "image_url": _signed_url(asset.image_url),
+                    "thumbnail_url": _signed_url(asset.thumbnail_url),
                     "width": asset.width,
                     "height": asset.height,
                     "version_no": asset.version_no,
@@ -1762,8 +1932,8 @@ def get_detail_page_results(
                     "render_total_ms": (asset.generation_snapshot or {}).get("timing", {}).get("render_total_ms"),
                     "status": asset.status,
                     "display_order": asset.display_order,
-                    "image_url": asset.image_url,
-                    "thumbnail_url": asset.thumbnail_url,
+                    "image_url": _signed_url(asset.image_url),
+                    "thumbnail_url": _signed_url(asset.thumbnail_url),
                     "width": asset.width,
                     "height": asset.height,
                     "version_no": asset.version_no,
@@ -1775,8 +1945,8 @@ def get_detail_page_results(
                     "asset_id": stitched_asset.id,
                     "status": stitched_asset.status,
                     "display_order": stitched_asset.display_order,
-                    "image_url": stitched_asset.image_url,
-                    "thumbnail_url": stitched_asset.thumbnail_url,
+                    "image_url": _signed_url(stitched_asset.image_url),
+                    "thumbnail_url": _signed_url(stitched_asset.thumbnail_url),
                     "width": stitched_asset.width,
                     "height": stitched_asset.height,
                     "version_no": stitched_asset.version_no,
@@ -1810,9 +1980,14 @@ def global_edit(
 
     if req.scope == "selected" and not req.asset_ids:
         raise AppError("invalid_request", "asset_ids required when scope is selected", 400)
-
+    pricing_rule = get_pricing_rule("global_edit")
     payload = req.model_dump()
-    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+    payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": None,
+    }
 
     idem_record = None
     if idempotency_key:
@@ -1826,15 +2001,38 @@ def global_edit(
         if hit:
             return success_response(cached)
 
-    job = create_job(
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
         db,
-        session_id=session.id,
         user_id=str(user_id),
-        job_type="global_edit",
-        input_payload=payload,
-        idempotency_key=idempotency_key,
+        action="global_edit",
+        session_id=session.id,
+        payload={"scope": req.scope, "asset_ids": req.asset_ids},
     )
-    response_data = {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+    payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    payload["lock_keys"] = lock_keys
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type="global_edit",
+            input_payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
+    if transaction is not None:
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = _generation_response_data(
+        job_id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        charged_credits=pricing_rule.credits,
+        balance_after=int(wallet.balance),
+        pricing_rule_id=pricing_rule.rule_id,
+    )
     if idem_record is not None:
         idem_record.response_payload = response_data
 
@@ -1862,9 +2060,14 @@ def regenerate_gallery(
     if session.latest_result_version <= 0:
         raise AppError("invalid_session_status", "results not ready", 400)
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
-
+    pricing_rule = get_pricing_rule("regenerate_gallery")
     payload = req.model_dump()
-    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+    payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": None,
+    }
 
     idem_record = None
     if idempotency_key:
@@ -1878,15 +2081,37 @@ def regenerate_gallery(
         if hit:
             return success_response(cached)
 
-    job = create_job(
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
         db,
-        session_id=session.id,
         user_id=str(user_id),
-        job_type="regenerate_gallery",
-        input_payload=payload,
-        idempotency_key=idempotency_key,
+        action="regenerate_gallery",
+        session_id=session.id,
     )
-    response_data = {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+    payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    payload["lock_keys"] = lock_keys
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type="regenerate_gallery",
+            input_payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
+    if transaction is not None:
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = _generation_response_data(
+        job_id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        charged_credits=pricing_rule.credits,
+        balance_after=int(wallet.balance),
+        pricing_rule_id=pricing_rule.rule_id,
+    )
     if idem_record is not None:
         idem_record.response_payload = response_data
 
