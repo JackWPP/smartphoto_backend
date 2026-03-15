@@ -12,8 +12,10 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 - **并发与幂等保护**：通过 HTTP 侧的 `Idempotency-Key`、DB 全局锁与 Redis 分布式锁三重保护提供企业级的可靠性。
 - **多资产族（Family）隔离**：支持`主图库(main_gallery)`和`详情页(detail_page)`的独立闭环生成及管理。
 - **批量异步提速链路**：主图和详情页都采用“批量提交上游任务 -> 集中轮询 -> 并发下载”的执行方式，默认拆分 `q.generation.main` / `q.generation.detail` 两个队列。
+- **上线级存储接入能力**：支持 `StorageAdapter` 切换到 S3 兼容对象存储，浏览器上传走 `presign -> 直传 -> complete`，结果图默认私有桶签名读。
 - **Step 3 参数附件链路**：支持说明书/参数图/PDF 上传、鲁棒参数提取和策略参考图补充输入。
 - **前台用户与账户中心能力**：支持邮箱密码登录、`/api/v2/account` 账户概览、资产历史、站内通知、密码修改、设置、购买记录与额度台账。
+- **用户商业化闭环**：已补齐额度价格规则、生成前余额校验、消费流水与失败自动退款，真实支付网关暂不接入。
 - **独立后台管理能力**：支持 `/api/admin/v1` 管理接口、SQLite 管理员账号库、审计日志、资产归档、模板与规则包后台化。
 
 ## 架构选型
@@ -23,7 +25,7 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 - **持久化层**: PostgreSQL + SQLAlchemy (ORM)
 - **数据库迁移**: Alembic
 - **API 集成层**: `httpx` (封装 `WhataiClient`)
-- **存储介质**: 本地文件系统（通过 `StorageAdapter` 抽象层实现，可平滑迁移至 S3）
+- **存储介质**: `StorageAdapter` 抽象层，开发默认本地文件系统，线上可切 S3 兼容私有对象存储
 
 ## 实现状态一览
 
@@ -61,6 +63,12 @@ cp .env.example .env
 # [必须修改] 配置真实的 API KEY，例如: 
 # WHATAI_API_KEY=sk-xxxxxx
 # WHATAI_API_BASE=https://api.whatai.cc
+# [上线推荐] 切到对象存储：
+# STORAGE_BACKEND=s3
+# S3_ENDPOINT=https://your-oss-endpoint
+# S3_BUCKET=smartphoto-private
+# S3_ACCESS_KEY=xxx
+# S3_SECRET_KEY=xxx
 # [可选] 用户鉴权相关：
 # USER_JWT_SECRET=change-me
 # ALLOW_DEV_AUTH_BYPASS=true
@@ -93,8 +101,10 @@ cd /home/wppjkw/smartphoto_backend
 遇到对接和运行问题，可以在这几份设计文档中找到完整答案，本系统严格贯彻**以代码为第一解释权，文档和逻辑强对齐**的原则。
 
 - 🚀 [API 接口字段字典、错误码与联调指南](./docs/API_联调指南.md)
+- ☁️ [OSS 对接与上线指南](./docs/OSS_对接与上线指南.md)
 - 🧠 [生图 Agent 工作流架构与长程协作逻辑分析](./docs/生图Agent协作逻辑.md)
 - ⚙️ [主线生图与调度系统技术深度解构报告](./docs/生图架构核心技术报告.md)
+- ⚡ [生图提速优化报告（客户版）](./docs/生图提速优化报告_客户版.md)
 - 🤝 [甲方框架手册项目对齐说明（对外版）](./docs/甲方框架手册_项目对齐说明_对外版.md)
 - 🧾 [甲方框架手册项目对齐说明（内部评估版）](./docs/甲方框架手册_项目对齐说明_内部评估版.md)
 - 🛠 [项目运行、本地报错诊断与常见运维排障手册](./docs/运行与排障手册.md)
@@ -127,3 +137,5 @@ npm run dev
 - 调试前端已适配 `/api/v2/auth`，首次进入会先尝试 refresh-cookie 恢复登录
 - 登录后会显示账户概览、最近资产、最近通知，并继续复用原有 6 步调试流程
 - Job 事件流与 ZIP 下载已改为带鉴权请求，不再依赖匿名访问
+- 浏览器上传默认改走 `/api/v2/uploads/presign -> 直传对象存储 -> /api/v2/uploads/complete`
+- 若用户钱包额度不足，生成类接口会直接返回 `40201 insufficient_credits`

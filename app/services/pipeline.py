@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import logging
+import tempfile
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 from PIL import Image
@@ -38,7 +40,7 @@ from app.services.prompts import compose_prompt
 from app.services.repo import list_visible_prompt_presets_by_ids
 from app.services.reference_images import load_reference_images, select_reference_images_for_role
 from app.services.state_machine import ensure_session_transition
-from app.services.storage import LocalStorageAdapter
+from app.services.storage import get_storage_adapter
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
@@ -159,31 +161,36 @@ def _snapshot_string_list(snapshot: dict, key: str) -> list[str]:
     return []
 
 
-def _attachment_markdown(path, mime_type: str) -> str:
+def _attachment_markdown(original_name: str, content: bytes, mime_type: str) -> str:
     if mime_type.startswith("image/"):
         return ""
     if mime_type == "application/pdf":
-        try:
-            import pymupdf4llm  # type: ignore
+        suffix = Path(original_name).suffix or ".pdf"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+            tmp.write(content)
+            tmp.flush()
+            path = tmp.name
+            try:
+                import pymupdf4llm  # type: ignore
 
-            markdown = str(pymupdf4llm.to_markdown(str(path)) or "").strip()
-            if markdown:
-                return markdown[:12000]
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            import fitz  # type: ignore
+                markdown = str(pymupdf4llm.to_markdown(path) or "").strip()
+                if markdown:
+                    return markdown[:12000]
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                import fitz  # type: ignore
 
-            doc = fitz.open(str(path))
-            pages = [page.get_text("text") for page in doc]
-            text = "\n\n".join(part.strip() for part in pages if part and part.strip())
-            if text:
-                return text[:12000]
-        except Exception:  # noqa: BLE001
+                doc = fitz.open(path)
+                pages = [page.get_text("text") for page in doc]
+                text = "\n\n".join(part.strip() for part in pages if part and part.strip())
+                if text:
+                    return text[:12000]
+            except Exception:  # noqa: BLE001
+                return ""
             return ""
-        return ""
     try:
-        return path.read_text(encoding="utf-8")[:12000]
+        return content.decode("utf-8")[:12000]
     except Exception:  # noqa: BLE001
         return ""
 
@@ -278,7 +285,7 @@ def run_analysis_job(db: Session, job_id: str) -> None:
 
 def run_extract_parameters_job(db: Session, job_id: str) -> None:
     client = WhataiClient()
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     job = _require_job(db, job_id)
     session = _require_session(db, job.session_id)
 
@@ -302,14 +309,14 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
     loaded_images = load_reference_images(image_attachments, storage=storage) if image_attachments else []
     file_attachments = []
     for attachment in attachments:
-        path = storage.resolve_url_to_path(attachment.source_url)
+        content = storage.read_bytes(attachment.source_url)
         file_attachments.append(
             {
                 "attachment_id": attachment.id,
                 "original_name": attachment.original_name,
                 "mime_type": attachment.mime_type,
                 "file_size": attachment.file_size,
-                "markdown_content": _attachment_markdown(path, attachment.mime_type),
+                "markdown_content": _attachment_markdown(attachment.original_name, content, attachment.mime_type),
             }
         )
 
@@ -503,7 +510,7 @@ def _clone_asset_for_version(
 
 
 def run_generate_family_job(db: Session, job_id: str) -> None:
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
 
     job = _require_job(db, job_id)
     session = _require_session(db, job.session_id)
@@ -1092,7 +1099,7 @@ def _render_single_asset(
 
 
 def run_generate_detail_page_job(db: Session, job_id: str) -> None:
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     job = _require_job(db, job_id)
     session = _require_session(db, job.session_id)
     payload = job.input_payload or {}
@@ -1222,7 +1229,7 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             db.add(asset)
             db.flush()
             created_assets.append(asset)
-            panel_bytes_for_stitch.append((asset.display_order, storage.resolve_url_to_path(source_asset.image_url).read_bytes()))
+            panel_bytes_for_stitch.append((asset.display_order, storage.read_bytes(source_asset.image_url)))
             progress_index += 1
             update_job_status(db, job, status="running", progress=int((progress_index / total_assets) * 85), stage="generating")
             append_job_event(

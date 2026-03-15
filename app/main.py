@@ -29,6 +29,7 @@ app = FastAPI(
         {"name": "platforms", "description": "平台能力与默认配置。"},
         {"name": "auth", "description": "前台用户注册、登录、刷新、退出与当前用户信息。"},
         {"name": "account", "description": "用户中心、资产历史、站内通知、安全与额度台账。"},
+        {"name": "uploads", "description": "浏览器直传 OSS/本地存储的 presign 与 complete 握手。"},
         {"name": "sessions", "description": "主业务流程接口，覆盖 Step 1 到 Step 6。"},
         {"name": "jobs", "description": "异步任务状态查询与 SSE 事件流。"},
         {"name": "assets", "description": "单图级别的重生成接口。"},

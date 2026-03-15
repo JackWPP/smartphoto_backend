@@ -6,6 +6,9 @@ from app.admin_db import session as admin_db_session
 from app.admin_models.admin_user import AdminUserModel
 from app.core.admin_auth import hash_password
 from app.core.config import get_settings
+from app.core.errors import AppError
+from app.db import session as db_session
+from app.services.user_accounts import adjust_wallet_balance
 
 
 def make_image_bytes(size=(1200, 1200), color=(240, 240, 240)) -> bytes:
@@ -76,6 +79,13 @@ def create_ready_session(client, headers: dict, platform_id: str = "temu") -> st
     return sid
 
 
+def grant_credits_to_user(client, headers: dict, credits: int = 100) -> None:
+    me = client.get("/api/v2/auth/me", headers=headers).json()["data"]
+    with db_session.SessionLocal() as db:
+        adjust_wallet_balance(db, user_id=me["user_id"], credits_delta=credits, note="test topup", source="test_seed")
+        db.commit()
+
+
 def test_auth_register_login_refresh_logout_and_change_password(client):
     register = client.post(
         "/api/v2/auth/register",
@@ -132,6 +142,7 @@ def test_unauthorized_when_dev_bypass_disabled(client, monkeypatch):
 def test_cross_user_access_is_denied_for_jobs_events_presets_and_assets(client):
     headers_a = register_user(client, "alice@example.com", display_name="Alice")
     headers_b = register_user(client, "bob@example.com", display_name="Bob")
+    grant_credits_to_user(client, headers_a)
     sid = create_ready_session(client, headers_a)
 
     analysis_job_id = client.get(f"/api/v2/sessions/{sid}", headers=headers_a).json()["data"]["latest_generate_job_id"]
@@ -173,6 +184,7 @@ def test_cross_user_access_is_denied_for_jobs_events_presets_and_assets(client):
 
 def test_account_assets_filters_counts_and_versions(client):
     headers = register_user(client, "asset@example.com", display_name="Assets")
+    grant_credits_to_user(client, headers)
     sid = create_ready_session(client, headers, platform_id="temu")
 
     client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "主图一轮"}, headers=headers)
@@ -249,3 +261,76 @@ def test_account_orders_wallet_notifications_and_admin_user_endpoints(client):
     detail = client.get(f"/api/admin/v1/users/{user_id}", headers=admin_headers)
     assert detail.status_code == 200
     assert detail.json()["data"]["wallet"]["balance"] == 60
+
+
+def test_local_presign_upload_complete_flow(client):
+    headers = register_user(client, "upload@example.com", display_name="Uploader")
+    session_id = client.post("/api/v2/sessions", headers=headers).json()["data"]["session_id"]
+    image_bytes = make_image_bytes()
+
+    presign = client.post(
+        "/api/v2/uploads/presign",
+        json={
+            "session_id": session_id,
+            "upload_kind": "session_image",
+            "original_name": "front.jpg",
+            "content_type": "image/jpeg",
+            "size_bytes": len(image_bytes),
+            "display_order": 1,
+            "slot_type": "front",
+        },
+        headers=headers,
+    )
+    assert presign.status_code == 200, presign.text
+    upload_data = presign.json()["data"]
+
+    uploaded = client.put(upload_data["upload_url"], content=image_bytes, headers=upload_data.get("headers") or {})
+    assert uploaded.status_code == 200, uploaded.text
+
+    completed = client.post("/api/v2/uploads/complete", json={"upload_id": upload_data["upload_id"]}, headers=headers)
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["data"]["upload_kind"] == "session_image"
+
+    images = client.get(f"/api/v2/sessions/{session_id}/images", headers=headers).json()["data"]["images"]
+    assert len(images) == 1
+    assert images[0]["slot_type"] == "front"
+    assert images[0]["url"].startswith("/storage/")
+
+
+def test_insufficient_credits_and_failed_job_refund(client, monkeypatch):
+    headers = register_user(client, "pricing@example.com", display_name="Pricing")
+    session_id = create_ready_session(client, headers)
+
+    insufficient = client.post(f"/api/v2/sessions/{session_id}/generations", json={"instruction": "生成一轮"}, headers=headers)
+    assert insufficient.status_code == 402
+    assert insufficient.json()["code"] == 40201
+
+    refund_headers = register_user(client, "refund@example.com", display_name="Refund")
+    grant_credits_to_user(client, refund_headers, credits=20)
+    refund_session_id = create_ready_session(client, refund_headers)
+
+    from app.workers import tasks as worker_tasks
+
+    def fail_generation(_db, _job_id):
+        raise AppError("upstream_image_error", "forced failure", 502)
+
+    monkeypatch.setattr(worker_tasks, "run_generate_family_job", fail_generation)
+    generated = client.post(
+        f"/api/v2/sessions/{refund_session_id}/generations",
+        json={"instruction": "生成一轮"},
+        headers=refund_headers,
+    )
+    assert generated.status_code == 200, generated.text
+    job_id = generated.json()["data"]["job_id"]
+
+    job = client.get(f"/api/v2/jobs/{job_id}", headers=refund_headers)
+    assert job.status_code == 200
+    assert job.json()["data"]["status"] == "failed"
+
+    wallet = client.get("/api/v2/account/wallet", headers=refund_headers).json()["data"]
+    assert wallet["balance"] == 20
+
+    pricing = client.get("/api/v2/account/pricing", headers=refund_headers)
+    assert pricing.status_code == 200
+    actions = {item["action"] for item in pricing.json()["data"]["items"]}
+    assert "generate_gallery" in actions

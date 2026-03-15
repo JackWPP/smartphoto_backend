@@ -3,6 +3,17 @@
 ## 1. 基础约定
 
 ### 1.0 本轮联调重点
+- 浏览器上传推荐改为：
+  - `POST /uploads/presign`
+  - 直传对象存储
+  - `POST /uploads/complete`
+- 业务表中持久化的是稳定 `object_key`，接口返回的 `url/image_url/thumbnail_url` 已改为临时可访问 URL
+- 账户中心新增 `GET /account/pricing`
+- 生成类接口响应新增：
+  - `charged_credits`
+  - `balance_after`
+  - `pricing_rule_id`
+- 余额不足时，生成类接口返回 `40201 insufficient_credits`
 - 主图与详情页结果接口都已支持：
   - `requested_version`
   - `available_versions`
@@ -66,6 +77,7 @@
 - `40006` `unsupported_file_type`
 - `40007` `file_too_large`
 - `40008` `missing_required_images`
+- `40201` `insufficient_credits`
 - `40401` `session_not_found`
 - `40402` `job_not_found`
 - `40403` `asset_not_found`
@@ -80,8 +92,19 @@
 - 前置状态：`created` 或 `images_uploaded`
 - 接口：
   - `POST /sessions`
+  - `POST /uploads/presign`
+  - `POST /uploads/complete`
   - `POST /sessions/{session_id}/images`
   - `DELETE /sessions/{session_id}/images/{image_id}`
+- 推荐生产模式：
+  - 前端先调用 `POST /uploads/presign`
+  - 再直传 OSS / S3 兼容对象存储
+  - 最后调用 `POST /uploads/complete`
+- `upload_kind`：
+  - `session_image`
+  - `detail_style_image`
+  - `parameter_attachment`
+  - `strategy_reference_image`
 - 关键字段：
   - `slot_type`: `front | angle45 | side | extra`
   - `display_order`: 建议按前端展示顺序传入
@@ -92,6 +115,9 @@
 - 成功后：session 从 `created` 进入 `images_uploaded`
 - 常见错误：`40005` `40006` `40007`
 - 并发/幂等：无 Idempotency-Key
+- 兼容说明：
+  - 旧的 multipart 上传接口仍保留给本地/dev fallback
+  - 生产环境不建议继续让浏览器把大文件经 API 进程转发
 
 ### Step 2 分析
 - 前置状态：建议至少 1 张未删除图片
@@ -572,6 +598,7 @@ data: {"event":"job_succeeded","job_id":"..."}
   - `GET /account/overview`
   - `GET|PUT /account/profile`
   - `GET /account/assets`
+  - `GET /account/pricing`
   - `GET /account/notifications`
   - `POST /account/notifications/{id}/read`
   - `POST /account/notifications/read-all`
@@ -584,6 +611,10 @@ data: {"event":"job_succeeded","job_id":"..."}
   - 返回按 `session` 聚合的卡片，不按单 asset 平铺
   - 支持筛选参数：`q` `platform_id` `image_type` `style_tag` `brand_name` `page` `page_size`
   - `image_type` 当前支持：`original` `main` `detail` `white_bg`
+- 用户商业化闭环说明：
+  - 当前已实现额度价格规则、生成前余额校验、消费流水和失败自动退款
+  - 价格以 `GET /account/pricing` 为准，不建议前端硬编码
+  - 退款条件：任务最终 `failed` 且未产出任何 ready asset
 - 安全收口说明：
   - `GET /jobs/{job_id}` 与 `GET /jobs/{job_id}/events` 已按当前登录用户做归属校验
   - `prompt-presets` 当前只返回“系统模板 + 当前用户模板”；系统模板对用户侧只读
@@ -619,6 +650,7 @@ data: {"event":"job_succeeded","job_id":"..."}
 6. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
 7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
 8. `adminfront/` 已提供最小可用后台，更偏运营/排障工作台，不是完整设计系统化的正式 B 端产品。
+9. 当前已实现浏览器直传对象存储、`GET /account/pricing`、生成扣费与失败退款；仍未接真实支付、邮箱验证、找回密码和设备会话管理。
 
 ## 5. 联调最短路径
 1. `POST /sessions`

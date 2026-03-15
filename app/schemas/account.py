@@ -163,6 +163,18 @@ class WalletData(BaseModel):
     balance: int
 
 
+class PricingRuleItem(BaseModel):
+    action: str
+    pricing_rule_id: str
+    credits: int
+    description: str
+
+
+class PricingListData(BaseModel):
+    items: list[PricingRuleItem]
+    total: int
+
+
 class WalletTransactionItem(BaseModel):
     transaction_id: str
     order_id: str | None = None
