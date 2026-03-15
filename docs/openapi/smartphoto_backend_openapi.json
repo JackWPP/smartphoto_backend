@@ -2354,6 +2354,107 @@
         }
       }
     },
+    "/api/v2/account/pricing": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Get Pricing",
+        "operationId": "getAccountPricing",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_PricingListData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/account/wallet": {
       "get": {
         "tags": [
@@ -2549,6 +2650,296 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/APIResponse_WalletTransactionListData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/uploads/presign": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Presign Upload",
+        "operationId": "presignUpload",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-Dev-User-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadPresignRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_UploadPresignData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/uploads/complete": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Complete Upload",
+        "operationId": "completeUpload",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-Dev-User-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadCompleteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_UploadCompleteData_"
                 }
               }
             }
@@ -17846,6 +18237,37 @@
         ],
         "title": "APIResponse[PlatformSelectionData]"
       },
+      "APIResponse_PricingListData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/PricingListData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[PricingListData]"
+      },
       "APIResponse_PromptPresetData_": {
         "properties": {
           "code": {
@@ -18156,6 +18578,37 @@
         ],
         "title": "APIResponse[StrategyReferenceImagesData]"
       },
+      "APIResponse_UploadCompleteData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/UploadCompleteData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[UploadCompleteData]"
+      },
       "APIResponse_UploadDetailStyleImageData_": {
         "properties": {
           "code": {
@@ -18217,6 +18670,37 @@
           "data"
         ],
         "title": "APIResponse[UploadParameterAttachmentData]"
+      },
+      "APIResponse_UploadPresignData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/UploadPresignData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[UploadPresignData]"
       },
       "APIResponse_UploadSessionImageData_": {
         "properties": {
@@ -20286,6 +20770,30 @@
             "type": "integer",
             "title": "Detail Generation Round",
             "description": "触发后预期进入的详情页轮次。"
+          },
+          "charged_credits": {
+            "type": "integer",
+            "title": "Charged Credits",
+            "description": "本次接受任务时扣减的额度。",
+            "default": 0
+          },
+          "balance_after": {
+            "type": "integer",
+            "title": "Balance After",
+            "description": "扣费后的余额。",
+            "default": 0
+          },
+          "pricing_rule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pricing Rule Id",
+            "description": "本次匹配的定价规则 ID。"
           }
         },
         "type": "object",
@@ -21267,6 +21775,30 @@
             "type": "integer",
             "title": "Generation Round",
             "description": "触发后预期进入的轮次。"
+          },
+          "charged_credits": {
+            "type": "integer",
+            "title": "Charged Credits",
+            "description": "本次接受任务时扣减的额度。",
+            "default": 0
+          },
+          "balance_after": {
+            "type": "integer",
+            "title": "Balance After",
+            "description": "扣费后的余额。",
+            "default": 0
+          },
+          "pricing_rule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pricing Rule Id",
+            "description": "本次匹配的定价规则 ID。"
           }
         },
         "type": "object",
@@ -21295,6 +21827,30 @@
             "type": "string",
             "title": "Status",
             "description": "任务状态。"
+          },
+          "charged_credits": {
+            "type": "integer",
+            "title": "Charged Credits",
+            "description": "本次接受任务时扣减的额度。",
+            "default": 0
+          },
+          "balance_after": {
+            "type": "integer",
+            "title": "Balance After",
+            "description": "扣费后的余额。",
+            "default": 0
+          },
+          "pricing_rule_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pricing Rule Id",
+            "description": "本次匹配的定价规则 ID。"
           }
         },
         "type": "object",
@@ -21990,6 +22546,55 @@
           "active_platform_id"
         ],
         "title": "PlatformSelectionRequest"
+      },
+      "PricingListData": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PricingRuleItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "PricingListData"
+      },
+      "PricingRuleItem": {
+        "properties": {
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "pricing_rule_id": {
+            "type": "string",
+            "title": "Pricing Rule Id"
+          },
+          "credits": {
+            "type": "integer",
+            "title": "Credits"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "action",
+          "pricing_rule_id",
+          "credits",
+          "description"
+        ],
+        "title": "PricingRuleItem"
       },
       "PromptPresetCreateRequest": {
         "properties": {
@@ -23664,6 +24269,70 @@
         ],
         "title": "StrategyReferenceImagesData"
       },
+      "UploadCompleteData": {
+        "properties": {
+          "upload_id": {
+            "type": "string",
+            "title": "Upload Id",
+            "description": "本次完成的上传 ID。"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "所属会话 ID。"
+          },
+          "upload_kind": {
+            "type": "string",
+            "title": "Upload Kind",
+            "description": "上传资源类型。"
+          },
+          "object_key": {
+            "type": "string",
+            "title": "Object Key",
+            "description": "稳定对象 key。"
+          },
+          "completed": {
+            "type": "boolean",
+            "title": "Completed",
+            "description": "是否完成。"
+          },
+          "resource_id": {
+            "type": "string",
+            "title": "Resource Id",
+            "description": "落库后的业务资源 ID。"
+          },
+          "resource": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Resource",
+            "description": "落库后的业务资源摘要。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload_id",
+          "session_id",
+          "upload_kind",
+          "object_key",
+          "completed",
+          "resource_id"
+        ],
+        "title": "UploadCompleteData"
+      },
+      "UploadCompleteRequest": {
+        "properties": {
+          "upload_id": {
+            "type": "string",
+            "title": "Upload Id",
+            "description": "预签名阶段返回的一次性上传 ID。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload_id"
+        ],
+        "title": "UploadCompleteRequest"
+      },
       "UploadDetailStyleImageData": {
         "properties": {
           "image_id": {
@@ -23721,6 +24390,124 @@
           "uploaded_attachments"
         ],
         "title": "UploadParameterAttachmentData"
+      },
+      "UploadPresignData": {
+        "properties": {
+          "upload_id": {
+            "type": "string",
+            "title": "Upload Id",
+            "description": "一次性上传 ID。"
+          },
+          "object_key": {
+            "type": "string",
+            "title": "Object Key",
+            "description": "稳定对象 key。"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method",
+            "description": "建议上传方法，当前固定 PUT。"
+          },
+          "upload_url": {
+            "type": "string",
+            "title": "Upload Url",
+            "description": "直传目标地址。"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Headers",
+            "description": "直传时需要附带的请求头。"
+          },
+          "form_fields": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Form Fields",
+            "description": "兼容表单上传模式的附加字段。"
+          },
+          "expires_at": {
+            "type": "string",
+            "title": "Expires At",
+            "description": "上传凭证过期时间。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "upload_id",
+          "object_key",
+          "method",
+          "upload_url",
+          "expires_at"
+        ],
+        "title": "UploadPresignData"
+      },
+      "UploadPresignRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "所属会话 ID。"
+          },
+          "upload_kind": {
+            "type": "string",
+            "enum": [
+              "session_image",
+              "detail_style_image",
+              "parameter_attachment",
+              "strategy_reference_image"
+            ],
+            "title": "Upload Kind",
+            "description": "上传资源类型。"
+          },
+          "original_name": {
+            "type": "string",
+            "title": "Original Name",
+            "description": "原始文件名。"
+          },
+          "content_type": {
+            "type": "string",
+            "title": "Content Type",
+            "description": "文件 MIME 类型。"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Size Bytes",
+            "description": "文件大小。"
+          },
+          "display_order": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Display Order",
+            "description": "显示顺序。"
+          },
+          "slot_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Type",
+            "description": "仅 session_image 需要的槽位。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "upload_kind",
+          "original_name",
+          "content_type",
+          "size_bytes",
+          "display_order"
+        ],
+        "title": "UploadPresignRequest"
       },
       "UploadSessionImageData": {
         "properties": {
@@ -23987,6 +24774,10 @@
     {
       "name": "account",
       "description": "用户中心、资产历史、站内通知、安全与额度台账。"
+    },
+    {
+      "name": "uploads",
+      "description": "浏览器直传 OSS/本地存储的 presign 与 complete 握手。"
     },
     {
       "name": "sessions",

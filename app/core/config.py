@@ -23,6 +23,17 @@ class Settings(BaseSettings):
 
     storage_root: Path = Path("./storage")
     public_base_url: str = "http://localhost:8000"
+    storage_backend: str = "local"
+    s3_endpoint: str = ""
+    s3_region: str = "auto"
+    s3_bucket: str = ""
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_force_path_style: bool = False
+    s3_signed_url_ttl_seconds: int = Field(default=900, ge=60, le=86400)
+    s3_presign_upload_ttl_seconds: int = Field(default=900, ge=60, le=86400)
+    s3_prefix_uploads: str = "uploads"
+    s3_prefix_generated: str = "generated"
 
     test_user_id: str = "00000000-0000-0000-0000-000000000001"
     tasks_eager: bool = False
@@ -50,6 +61,9 @@ class Settings(BaseSettings):
     generation_submit_concurrency: int = Field(default=6, ge=1, le=16)
     image_task_timeout_seconds: int = Field(default=450, ge=60, le=1800)
     image_poll_profile: str = Field(default='[{"interval_seconds":5,"attempts":6},{"interval_seconds":10,"attempts":12},{"interval_seconds":15,"attempts":20}]')
+    credit_pricing_rules: str = Field(
+        default='{"generate_gallery":{"credits":10,"description":"主图整组生成"},"generate_detail_page":{"credits":16,"description":"详情页整组生成"},"global_edit":{"credits":8,"description":"主图全局修改"},"regenerate_asset":{"credits":3,"description":"单张主图重生成"},"regenerate_detail_panel":{"credits":4,"description":"单张详情页 panel 重生成"},"regenerate_gallery":{"credits":10,"description":"主图整组重生成"}}'
+    )
 
     def parsed_image_poll_profile(self) -> list[dict[str, int]]:
         try:
@@ -67,6 +81,24 @@ class Settings(BaseSettings):
             if interval_seconds > 0 and attempts > 0:
                 normalized.append({"interval_seconds": interval_seconds, "attempts": attempts})
         return normalized or [{"interval_seconds": 5, "attempts": 6}, {"interval_seconds": 10, "attempts": 12}, {"interval_seconds": 15, "attempts": 20}]
+
+    def parsed_credit_pricing_rules(self) -> dict[str, dict[str, object]]:
+        try:
+            value = json.loads(self.credit_pricing_rules)
+        except json.JSONDecodeError:
+            value = None
+        if not isinstance(value, dict):
+            value = {}
+        normalized: dict[str, dict[str, object]] = {}
+        for action, config in value.items():
+            if not isinstance(config, dict):
+                continue
+            credits = int(config.get("credits") or 0)
+            normalized[str(action)] = {
+                "credits": max(0, credits),
+                "description": str(config.get("description") or action),
+            }
+        return normalized
 
 
 def _module_exists(name: str) -> bool:
@@ -123,4 +155,5 @@ def get_settings() -> Settings:
     settings = Settings()
     settings.storage_root.mkdir(parents=True, exist_ok=True)
     settings.database_url = resolve_database_url(settings.database_url)
+    settings.storage_backend = (settings.storage_backend or "local").strip().lower()
     return settings

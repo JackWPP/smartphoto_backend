@@ -25,6 +25,7 @@ ERRORS = {
     "job_already_running": ErrorDef(40901, "job_already_running"),
     "duplicate_idempotency_key": ErrorDef(40902, "duplicate_idempotency_key"),
     "copy_validation_failed": ErrorDef(42201, "copy_validation_failed"),
+    "insufficient_credits": ErrorDef(40201, "insufficient_credits"),
     "rate_limited": ErrorDef(42901, "rate_limited"),
     "internal_error": ErrorDef(50001, "internal_error"),
     "upstream_llm_error": ErrorDef(50201, "upstream_llm_error"),

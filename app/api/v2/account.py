@@ -33,11 +33,14 @@ from app.schemas.account import (
     NotificationListData,
     NotificationReadAllData,
     NotificationReadData,
+    PricingListData,
     PurchaseOrderListData,
     WalletData,
     WalletTransactionListData,
 )
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
+from app.services.pricing import list_pricing_rules
+from app.services.storage import public_url_for
 from app.services.user_accounts import (
     backfill_session_search_cache,
     get_or_create_user_settings,
@@ -277,7 +280,7 @@ def list_assets(
                 "counts": counts,
                 "previews": [
                     {
-                        "image_url": asset.thumbnail_url or asset.image_url,
+                        "image_url": public_url_for(asset.thumbnail_url or asset.image_url),
                         "asset_family": asset.asset_family,
                         "role": asset.asset_role,
                     }
@@ -422,6 +425,25 @@ def list_purchases(
         .all()
     )
     return success_response({"items": [_serialize_order(item) for item in items], "total": len(items)})
+
+
+@router.get("/pricing", response_model=APIResponse[PricingListData], operation_id="getAccountPricing", responses={**OPENAPI_ERROR_RESPONSES})
+def get_pricing() -> dict:
+    rules = list_pricing_rules()
+    return success_response(
+        {
+            "items": [
+                {
+                    "action": item.action,
+                    "pricing_rule_id": item.rule_id,
+                    "credits": item.credits,
+                    "description": item.description,
+                }
+                for item in rules
+            ],
+            "total": len(rules),
+        }
+    )
 
 
 @router.get("/wallet", response_model=APIResponse[WalletData], operation_id="getAccountWallet", responses={**OPENAPI_ERROR_RESPONSES})

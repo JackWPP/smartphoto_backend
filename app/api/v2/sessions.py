@@ -56,6 +56,10 @@ from app.schemas.session import (
     StrategyPreviewRequest,
     StrategyPreviewData,
     UploadParameterAttachmentData,
+    UploadPresignData,
+    UploadPresignRequest,
+    UploadCompleteData,
+    UploadCompleteRequest,
     UploadDetailStyleImageData,
     UploadStrategyReferenceImageData,
     UploadSessionImageData,
@@ -83,6 +87,7 @@ from app.services.parameter_snapshot import (
     parameter_snapshot_to_copy_fields,
 )
 from app.services.platforms import get_platform_or_none
+from app.services.pricing import get_pricing_rule
 from app.services.prompts import build_prompt_previews
 from app.services.prompt_repo import list_prompt_presets
 from app.services.repo import (
@@ -98,10 +103,10 @@ from app.services.repo import (
     list_session_prompt_overrides,
 )
 from app.services.state_machine import ensure_session_transition
-from app.services.storage import LocalStorageAdapter
+from app.services.storage import get_storage_adapter, public_url_for
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
-from app.services.user_accounts import refresh_session_search_cache
+from app.services.user_accounts import charge_wallet_for_action, refresh_session_search_cache
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -111,6 +116,31 @@ ALLOWED_SLOT = {"front", "angle45", "side", "extra"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_SESSION_IMAGES = 6
 MAX_DETAIL_STYLE_IMAGES = 4
+
+
+def _signed_url(value: str | None) -> str | None:
+    return public_url_for(value)
+
+
+def _generation_response_data(
+    *,
+    job_id: str,
+    job_type: str,
+    status: str,
+    charged_credits: int,
+    balance_after: int,
+    pricing_rule_id: str | None,
+    **extra: int | str,
+) -> dict:
+    return {
+        "job_id": job_id,
+        "job_type": job_type,
+        "status": status,
+        "charged_credits": charged_credits,
+        "balance_after": balance_after,
+        "pricing_rule_id": pricing_rule_id,
+        **extra,
+    }
 
 
 def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
@@ -377,7 +407,7 @@ async def upload_session_image(
     if file.content_type not in ALLOWED_MIME:
         raise AppError("unsupported_file_type", http_status=400)
 
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     source_url, width, height, mime_type, file_size = storage.save_upload(
         session_id=session_id,
         original_name=file.filename or "upload.jpg",
@@ -420,7 +450,7 @@ async def upload_session_image(
                     "image_id": item.id,
                     "slot_type": item.slot_type,
                     "display_order": item.display_order,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                 }
                 for item in images
             ],
@@ -483,7 +513,7 @@ def list_session_images(
                 "image_id": img.id,
                 "slot_type": img.slot_type,
                 "display_order": img.display_order,
-                "url": img.source_url,
+                "url": _signed_url(img.source_url),
                 "width": img.width,
                 "height": img.height,
                 "mime_type": img.mime_type,
@@ -520,7 +550,7 @@ async def upload_detail_style_image(
     if file.content_type not in ALLOWED_MIME:
         raise AppError("unsupported_file_type", http_status=400)
 
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     source_url, width, height, mime_type, file_size = storage.save_upload(
         session_id=session_id,
         original_name=file.filename or "style.jpg",
@@ -548,7 +578,7 @@ async def upload_detail_style_image(
                 {
                     "image_id": item.id,
                     "display_order": item.display_order,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                 }
                 for item in images
             ],
@@ -577,7 +607,7 @@ def list_detail_style_images(
                 {
                     "image_id": img.id,
                     "display_order": img.display_order,
-                    "url": img.source_url,
+                    "url": _signed_url(img.source_url),
                     "width": img.width,
                     "height": img.height,
                     "mime_type": img.mime_type,
@@ -614,7 +644,7 @@ async def upload_parameter_attachment(
     if file.content_type not in ALLOWED_PARAMETER_MIME:
         raise AppError("unsupported_file_type", http_status=400)
 
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     source_url, width, height, mime_type, file_size = storage.save_upload(
         session_id=session_id,
         original_name=file.filename or "parameter-attachment",
@@ -647,7 +677,7 @@ async def upload_parameter_attachment(
                     "attachment_id": item.id,
                     "display_order": item.display_order,
                     "original_name": item.original_name,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                 }
                 for item in attachments
             ],
@@ -676,7 +706,7 @@ def list_parameter_attachments(
                     "attachment_id": item.id,
                     "display_order": item.display_order,
                     "original_name": item.original_name,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                     "width": item.width,
                     "height": item.height,
                     "mime_type": item.mime_type,
@@ -739,7 +769,7 @@ async def upload_strategy_reference_image(
     if file.content_type not in ALLOWED_MIME:
         raise AppError("unsupported_file_type", http_status=400)
 
-    storage = LocalStorageAdapter()
+    storage = get_storage_adapter()
     source_url, width, height, mime_type, file_size = storage.save_upload(
         session_id=session_id,
         original_name=file.filename or "strategy-reference.jpg",
@@ -769,7 +799,7 @@ async def upload_strategy_reference_image(
                 {
                     "image_id": item.id,
                     "display_order": item.display_order,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                 }
                 for item in images
             ],
@@ -797,7 +827,7 @@ def list_strategy_reference_images(
                 {
                     "image_id": item.id,
                     "display_order": item.display_order,
-                    "url": item.source_url,
+                    "url": _signed_url(item.source_url),
                     "width": item.width,
                     "height": item.height,
                     "mime_type": item.mime_type,
@@ -1647,9 +1677,15 @@ def generate_gallery(
             raise AppError("invalid_request", f"invalid slot_ids: {invalid_slot_ids}", 400)
 
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
-
+    pricing_rule = get_pricing_rule("generate_gallery")
     payload = req.model_dump()
     payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+    payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": None,
+    }
 
     idem_record = None
     if idempotency_key:
@@ -1663,6 +1699,15 @@ def generate_gallery(
         if hit:
             return success_response(cached)
 
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
+        db,
+        user_id=str(user_id),
+        action="generate_gallery",
+        session_id=session.id,
+        payload={"slot_ids": req.slot_ids},
+    )
+    payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+
     job = create_job(
         db,
         session_id=session.id,
@@ -1672,13 +1717,19 @@ def generate_gallery(
         idempotency_key=idempotency_key,
     )
     session.latest_generate_job_id = job.id
-    response_data = {
-        "job_id": job.id,
-        "job_type": job.job_type,
-        "status": job.status,
-        "session_id": session.id,
-        "generation_round": session.generation_round + 1,
-    }
+    if transaction is not None:
+        payload["pricing"]["job_id"] = job.id
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = _generation_response_data(
+        job_id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        session_id=session.id,
+        generation_round=session.generation_round + 1,
+        charged_credits=pricing_rule.credits,
+        balance_after=int(wallet.balance),
+        pricing_rule_id=pricing_rule.rule_id,
+    )
     if idem_record is not None:
         idem_record.response_payload = response_data
 
@@ -1710,6 +1761,7 @@ def generate_detail_page(
     if not list_active_session_images(db, session.id):
         raise AppError("missing_required_images", http_status=400)
 
+    pricing_rule = get_pricing_rule("generate_detail_page")
     payload = req.model_dump()
 
     idem_record = None
@@ -1725,7 +1777,19 @@ def generate_detail_page(
             return success_response(cached)
 
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
+        db,
+        user_id=str(user_id),
+        action="generate_detail_page",
+        session_id=session.id,
+    )
     payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+    payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": transaction.id if transaction else None,
+    }
 
     job = create_job(
         db,
@@ -1736,13 +1800,18 @@ def generate_detail_page(
         idempotency_key=idempotency_key,
     )
     session.latest_detail_generate_job_id = job.id
-    response_data = {
-        "job_id": job.id,
-        "job_type": job.job_type,
-        "status": job.status,
-        "session_id": session.id,
-        "detail_generation_round": session.detail_generation_round + 1,
-    }
+    if transaction is not None:
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = _generation_response_data(
+        job_id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        session_id=session.id,
+        detail_generation_round=session.detail_generation_round + 1,
+        charged_credits=pricing_rule.credits,
+        balance_after=int(wallet.balance),
+        pricing_rule_id=pricing_rule.rule_id,
+    )
     if idem_record is not None:
         idem_record.response_payload = response_data
 
@@ -1790,8 +1859,8 @@ def get_results(
                     "render_total_ms": (asset.generation_snapshot or {}).get("timing", {}).get("render_total_ms"),
                     "status": asset.status,
                     "display_order": asset.display_order,
-                    "image_url": asset.image_url,
-                    "thumbnail_url": asset.thumbnail_url,
+                    "image_url": _signed_url(asset.image_url),
+                    "thumbnail_url": _signed_url(asset.thumbnail_url),
                     "width": asset.width,
                     "height": asset.height,
                     "version_no": asset.version_no,
@@ -1855,8 +1924,8 @@ def get_detail_page_results(
                     "render_total_ms": (asset.generation_snapshot or {}).get("timing", {}).get("render_total_ms"),
                     "status": asset.status,
                     "display_order": asset.display_order,
-                    "image_url": asset.image_url,
-                    "thumbnail_url": asset.thumbnail_url,
+                    "image_url": _signed_url(asset.image_url),
+                    "thumbnail_url": _signed_url(asset.thumbnail_url),
                     "width": asset.width,
                     "height": asset.height,
                     "version_no": asset.version_no,
@@ -1868,8 +1937,8 @@ def get_detail_page_results(
                     "asset_id": stitched_asset.id,
                     "status": stitched_asset.status,
                     "display_order": stitched_asset.display_order,
-                    "image_url": stitched_asset.image_url,
-                    "thumbnail_url": stitched_asset.thumbnail_url,
+                    "image_url": _signed_url(stitched_asset.image_url),
+                    "thumbnail_url": _signed_url(stitched_asset.thumbnail_url),
                     "width": stitched_asset.width,
                     "height": stitched_asset.height,
                     "version_no": stitched_asset.version_no,
@@ -1903,9 +1972,15 @@ def global_edit(
 
     if req.scope == "selected" and not req.asset_ids:
         raise AppError("invalid_request", "asset_ids required when scope is selected", 400)
-
+    pricing_rule = get_pricing_rule("global_edit")
     payload = req.model_dump()
     payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+    payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": None,
+    }
 
     idem_record = None
     if idempotency_key:
@@ -1919,6 +1994,15 @@ def global_edit(
         if hit:
             return success_response(cached)
 
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
+        db,
+        user_id=str(user_id),
+        action="global_edit",
+        session_id=session.id,
+        payload={"scope": req.scope, "asset_ids": req.asset_ids},
+    )
+    payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+
     job = create_job(
         db,
         session_id=session.id,
@@ -1927,7 +2011,16 @@ def global_edit(
         input_payload=payload,
         idempotency_key=idempotency_key,
     )
-    response_data = {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+    if transaction is not None:
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = _generation_response_data(
+        job_id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        charged_credits=pricing_rule.credits,
+        balance_after=int(wallet.balance),
+        pricing_rule_id=pricing_rule.rule_id,
+    )
     if idem_record is not None:
         idem_record.response_payload = response_data
 
@@ -1955,9 +2048,15 @@ def regenerate_gallery(
     if session.latest_result_version <= 0:
         raise AppError("invalid_session_status", "results not ready", 400)
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
-
+    pricing_rule = get_pricing_rule("regenerate_gallery")
     payload = req.model_dump()
     payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+    payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": None,
+    }
 
     idem_record = None
     if idempotency_key:
@@ -1971,6 +2070,14 @@ def regenerate_gallery(
         if hit:
             return success_response(cached)
 
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
+        db,
+        user_id=str(user_id),
+        action="regenerate_gallery",
+        session_id=session.id,
+    )
+    payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+
     job = create_job(
         db,
         session_id=session.id,
@@ -1979,7 +2086,16 @@ def regenerate_gallery(
         input_payload=payload,
         idempotency_key=idempotency_key,
     )
-    response_data = {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+    if transaction is not None:
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = _generation_response_data(
+        job_id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        charged_credits=pricing_rule.credits,
+        balance_after=int(wallet.balance),
+        pricing_rule_id=pricing_rule.rule_id,
+    )
     if idem_record is not None:
         idem_record.response_payload = response_data
 

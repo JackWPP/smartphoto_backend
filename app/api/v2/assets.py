@@ -14,6 +14,7 @@ from app.services.jobs import create_job
 from app.services.locking import acquire_generation_locks
 from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
 from app.services.detail_pages import normalize_detail_strategy_preview
+from app.services.pricing import get_pricing_rule
 from app.services.strategy import normalize_strategy_preview
 from app.services.repo import (
     get_asset_or_404,
@@ -23,6 +24,7 @@ from app.services.repo import (
     list_session_prompt_overrides,
 )
 from app.services.strategy_overrides import serialize_session_override
+from app.services.user_accounts import charge_wallet_for_action
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -105,6 +107,7 @@ def regenerate_asset(
         }
         job_type = "regenerate_asset"
         queue_name = "q.generation.main"
+        pricing_action = "regenerate_asset"
     else:
         detail_preview = normalize_detail_strategy_preview(
             session.detail_strategy_preview,
@@ -148,6 +151,15 @@ def regenerate_asset(
         }
         job_type = "regenerate_detail_panel"
         queue_name = "q.generation.detail"
+        pricing_action = "regenerate_detail_panel"
+
+    pricing_rule = get_pricing_rule(pricing_action)
+    input_payload["pricing"] = {
+        "action": pricing_rule.action,
+        "pricing_rule_id": pricing_rule.rule_id,
+        "charged_credits": pricing_rule.credits,
+        "wallet_transaction_id": None,
+    }
 
     idem_record = None
     if idempotency_key:
@@ -161,6 +173,15 @@ def regenerate_asset(
         if hit:
             return success_response(cached)
 
+    wallet, transaction, pricing_rule = charge_wallet_for_action(
+        db,
+        user_id=str(user_id),
+        action=pricing_action,
+        session_id=session.id,
+        payload={"asset_id": asset.id},
+    )
+    input_payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+
     job = create_job(
         db,
         session_id=session.id,
@@ -169,7 +190,16 @@ def regenerate_asset(
         input_payload=input_payload,
         idempotency_key=idempotency_key,
     )
-    response_data = {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+    if transaction is not None:
+        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
+    response_data = {
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "status": job.status,
+        "charged_credits": pricing_rule.credits,
+        "balance_after": int(wallet.balance),
+        "pricing_rule_id": pricing_rule.rule_id,
+    }
     if idem_record is not None:
         idem_record.response_payload = response_data
 

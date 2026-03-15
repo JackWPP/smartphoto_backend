@@ -16,6 +16,7 @@ from app.models.session import SessionModel
 from app.models.user import UserModel
 from app.models.user_notification import UserNotificationModel
 from app.models.user_setting import UserSettingModel
+from app.services.pricing import PricingRule, get_pricing_rule
 
 
 def get_user_or_404(db: Session, user_id: str) -> UserModel:
@@ -80,6 +81,10 @@ def ensure_dev_user_exists(db: Session, user_id: str | None = None) -> UserModel
         db.add(user)
         db.flush()
     ensure_user_defaults(db, user)
+    wallet = get_or_create_wallet(db, user.id)
+    if settings.app_env == "dev" and int(wallet.balance) <= 0:
+        wallet.balance = 200
+        db.flush()
     return user
 
 
@@ -312,6 +317,117 @@ def adjust_wallet_balance(
         )
     db.flush()
     return wallet, transaction
+
+
+def charge_wallet_for_action(
+    db: Session,
+    *,
+    user_id: str,
+    action: str,
+    session_id: str,
+    job_id: str | None = None,
+    payload: dict | None = None,
+) -> tuple[CreditWalletModel, CreditTransactionModel | None, PricingRule]:
+    user = get_user_or_404(db, user_id)
+    wallet = get_or_create_wallet(db, user.id)
+    rule = get_pricing_rule(action)
+    if rule.credits <= 0:
+        return wallet, None, rule
+    if int(wallet.balance) < int(rule.credits):
+        raise AppError("insufficient_credits", "insufficient credits", 402)
+    wallet.balance -= int(rule.credits)
+    timestamp = now_utc()
+    transaction = CreditTransactionModel(
+        user_id=user.id,
+        order_id=None,
+        transaction_type="debit",
+        credits_delta=-int(rule.credits),
+        balance_after=wallet.balance,
+        note=f"{rule.description} 扣费",
+        source="generation_charge",
+        payload={
+            "action": action,
+            "pricing_rule_id": rule.rule_id,
+            "session_id": session_id,
+            "job_id": job_id,
+            **(payload or {}),
+        },
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    db.add(transaction)
+    db.flush()
+    return wallet, transaction, rule
+
+
+def refund_generation_charge(
+    db: Session,
+    *,
+    user_id: str,
+    job_id: str,
+    session_id: str,
+) -> CreditTransactionModel | None:
+    charged = (
+        db.query(CreditTransactionModel)
+        .filter(
+            CreditTransactionModel.user_id == user_id,
+            CreditTransactionModel.source == "generation_charge",
+        )
+        .order_by(CreditTransactionModel.created_at.desc())
+        .all()
+    )
+    charge = next((item for item in charged if (item.payload or {}).get("job_id") == job_id), None)
+    if charge is None:
+        return None
+    refund_for_charge = (
+        db.query(CreditTransactionModel)
+        .filter(
+            CreditTransactionModel.user_id == user_id,
+            CreditTransactionModel.source == "generation_refund",
+        )
+        .order_by(CreditTransactionModel.created_at.desc())
+        .all()
+    )
+    if any((item.payload or {}).get("refund_for_transaction_id") == charge.id for item in refund_for_charge):
+        return None
+
+    credits_to_refund = abs(int(charge.credits_delta))
+    if credits_to_refund <= 0:
+        return None
+    wallet = get_or_create_wallet(db, user_id)
+    wallet.balance += credits_to_refund
+    timestamp = now_utc()
+    transaction = CreditTransactionModel(
+        user_id=user_id,
+        order_id=None,
+        transaction_type="credit",
+        credits_delta=credits_to_refund,
+        balance_after=wallet.balance,
+        note="生成失败自动退款",
+        source="generation_refund",
+        payload={
+            "job_id": job_id,
+            "session_id": session_id,
+            "refund_for_transaction_id": charge.id,
+            "pricing_rule_id": (charge.payload or {}).get("pricing_rule_id"),
+            "action": (charge.payload or {}).get("action"),
+        },
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    db.add(transaction)
+    settings_record = get_or_create_user_settings(db, user_id)
+    if settings_record.notify_order_updates:
+        create_notification(
+            db,
+            user_id=user_id,
+            category="generation_refund",
+            title="生成失败已退款",
+            content=f"会话 {session_id} 的失败任务已自动退回 {credits_to_refund} 点额度。",
+            payload={"job_id": job_id, "session_id": session_id, "credits_delta": credits_to_refund},
+        )
+    db.flush()
+    return transaction
 
 
 def list_visible_users(db: Session, *, q: str | None = None) -> list[UserModel]:

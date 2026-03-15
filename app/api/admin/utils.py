@@ -12,6 +12,7 @@ from app.models.rule_pack import RulePackModel
 from app.models.rule_pack_version import RulePackVersionModel
 from app.models.session import SessionModel
 from app.models.user import UserModel
+from app.services.storage import public_url_for
 
 
 def serialize_admin_user(user) -> dict[str, Any]:
@@ -64,8 +65,8 @@ def serialize_asset(asset: AssetModel) -> dict[str, Any]:
         "archived_at": asset.archived_at.isoformat() if asset.archived_at else None,
         "archived_by": asset.archived_by,
         "archive_reason": asset.archive_reason,
-        "image_url": asset.image_url,
-        "thumbnail_url": asset.thumbnail_url,
+        "image_url": public_url_for(asset.image_url),
+        "thumbnail_url": public_url_for(asset.thumbnail_url),
         "width": asset.width,
         "height": asset.height,
         "generation_snapshot": asset.generation_snapshot,

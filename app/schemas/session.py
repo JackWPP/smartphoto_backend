@@ -38,6 +38,40 @@ class UploadSessionImageData(BaseModel):
     uploaded_images: list[SessionImageSummary] = Field(description="当前 session 下所有有效图片。")
 
 
+class UploadPresignRequest(BaseModel):
+    session_id: str = Field(description="所属会话 ID。")
+    upload_kind: Literal["session_image", "detail_style_image", "parameter_attachment", "strategy_reference_image"] = Field(description="上传资源类型。")
+    original_name: str = Field(description="原始文件名。")
+    content_type: str = Field(description="文件 MIME 类型。")
+    size_bytes: int = Field(ge=1, description="文件大小。")
+    display_order: int = Field(ge=1, description="显示顺序。")
+    slot_type: str | None = Field(default=None, description="仅 session_image 需要的槽位。")
+
+
+class UploadPresignData(BaseModel):
+    upload_id: str = Field(description="一次性上传 ID。")
+    object_key: str = Field(description="稳定对象 key。")
+    method: str = Field(description="建议上传方法，当前固定 PUT。")
+    upload_url: str = Field(description="直传目标地址。")
+    headers: dict[str, str] = Field(default_factory=dict, description="直传时需要附带的请求头。")
+    form_fields: dict[str, str] = Field(default_factory=dict, description="兼容表单上传模式的附加字段。")
+    expires_at: str = Field(description="上传凭证过期时间。")
+
+
+class UploadCompleteRequest(BaseModel):
+    upload_id: str = Field(description="预签名阶段返回的一次性上传 ID。")
+
+
+class UploadCompleteData(BaseModel):
+    upload_id: str = Field(description="本次完成的上传 ID。")
+    session_id: str = Field(description="所属会话 ID。")
+    upload_kind: str = Field(description="上传资源类型。")
+    object_key: str = Field(description="稳定对象 key。")
+    completed: bool = Field(description="是否完成。")
+    resource_id: str = Field(description="落库后的业务资源 ID。")
+    resource: dict[str, Any] = Field(default_factory=dict, description="落库后的业务资源摘要。")
+
+
 class DeleteSessionImageData(BaseModel):
     image_id: str = Field(description="被删除的图片 ID。")
     deleted: bool = Field(description="是否删除成功。", examples=[True])
@@ -472,6 +506,9 @@ class GenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
     generation_round: int = Field(description="触发后预期进入的轮次。")
+    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
+    balance_after: int = Field(default=0, description="扣费后的余额。")
+    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
 
 
 class DetailGenerationJobData(BaseModel):
@@ -480,12 +517,18 @@ class DetailGenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
     detail_generation_round: int = Field(description="触发后预期进入的详情页轮次。")
+    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
+    balance_after: int = Field(default=0, description="扣费后的余额。")
+    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
 
 
 class GenericGenerationJobData(BaseModel):
     job_id: str = Field(description="任务 ID。")
     job_type: str = Field(description="任务类型。")
     status: str = Field(description="任务状态。")
+    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
+    balance_after: int = Field(default=0, description="扣费后的余额。")
+    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
 
 
 class GalleryRegenerateRequest(BaseModel):
