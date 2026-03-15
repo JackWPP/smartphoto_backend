@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from PIL import Image
@@ -37,6 +38,16 @@ def _normalize_rel_key(value: str | None) -> str:
         return text
     if text.startswith("/storage/"):
         return text.replace("/storage/", "", 1)
+    if text.startswith("http://") or text.startswith("https://"):
+        parsed = urlparse(text)
+        path = (parsed.path or "").lstrip("/")
+        if path.startswith("storage/"):
+            return path.replace("storage/", "", 1)
+        settings = get_settings()
+        bucket = (settings.s3_bucket or "").strip("/")
+        if bucket and path.startswith(f"{bucket}/"):
+            return path.replace(f"{bucket}/", "", 1)
+        return path
     return text.lstrip("/")
 
 
@@ -287,10 +298,11 @@ class S3CompatibleStorageAdapter(StorageAdapter):
                 "aws_access_key_id": self.settings.s3_access_key,
                 "aws_secret_access_key": self.settings.s3_secret_key,
             }
-            if self.settings.s3_force_path_style:
-                from botocore.config import Config
+            from botocore.config import Config
 
-                kwargs["config"] = Config(s3={"addressing_style": "path"})
+            kwargs["config"] = Config(
+                s3={"addressing_style": "path" if self.settings.s3_force_path_style else "virtual"}
+            )
             self._client = boto3.client(**kwargs)
         return self._client
 

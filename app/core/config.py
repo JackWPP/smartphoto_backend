@@ -52,8 +52,11 @@ class Settings(BaseSettings):
     whatai_api_base: str = "https://api.whatai.cc"
     whatai_api_key: str = ""
     whatai_chat_model: str = "gpt-4.1-mini"
+    whatai_analysis_model: str = "gpt-4.1-mini"
+    whatai_planner_model: str = "gpt-4.1-mini"
     whatai_image_model: str = "gpt-image-1"
     whatai_parameter_model: str = "gemini-3.1-flash-lite-preview"
+    whatai_request_timeout_seconds: int = Field(default=180, ge=30, le=1800)
 
     generation_lock_ttl_seconds: int = Field(default=600, ge=30)
     main_generation_concurrency: int = Field(default=4, ge=1, le=12)
