@@ -63,6 +63,9 @@ cp .env.example .env
 # [必须修改] 配置真实的 API KEY，例如: 
 # WHATAI_API_KEY=sk-xxxxxx
 # WHATAI_API_BASE=https://api.whatai.cc
+# WHATAI_ANALYSIS_MODEL=gpt-4.1-mini
+# WHATAI_PLANNER_MODEL=gpt-4.1-mini
+# WHATAI_REQUEST_TIMEOUT_SECONDS=180
 # [上线推荐] 切到对象存储：
 # STORAGE_BACKEND=s3
 # S3_ENDPOINT=https://your-oss-endpoint

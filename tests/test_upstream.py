@@ -1,3 +1,4 @@
+import io
 import httpx
 import pytest
 from pathlib import Path
@@ -465,6 +466,7 @@ def test_request_multipart_json_with_retry_marks_transport_errors_retryable(monk
 def test_analyze_images_builds_inline_image_payload(monkeypatch):
     client = WhataiClient()
     monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    monkeypatch.setattr(client.settings, "whatai_analysis_model", "analysis-fast-model")
     captured: dict[str, object] = {}
 
     def fake_post_chat_json(payload, _error_key):
@@ -488,9 +490,37 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
     )
     client.analyze_images([image], "temu")
 
+    assert captured["payload"]["model"] == "analysis-fast-model"
     message_content = captured["payload"]["messages"][0]["content"]
     assert any(part.get("type") == "image_url" for part in message_content)
     assert any("data:image/jpeg;base64," in part.get("image_url", {}).get("url", "") for part in message_content)
+
+
+def test_optimized_data_uri_downsizes_large_reference_images():
+    client = WhataiClient()
+    large = Image.new("RGB", (2200, 1800), (230, 230, 230))
+    buf = io.BytesIO()
+    large.save(buf, format="JPEG", quality=95)
+    original_bytes = buf.getvalue()
+
+    image = LoadedReferenceImage(
+        "img-front",
+        "front",
+        1,
+        "/storage/front.jpg",
+        2200,
+        1800,
+        "image/jpeg",
+        len(original_bytes),
+        "front.jpg",
+        Path("front.jpg"),
+        original_bytes,
+    )
+
+    data_uri = client._optimized_data_uri(image)
+
+    assert data_uri.startswith("data:image/jpeg;base64,")
+    assert len(data_uri) < len(image.to_data_uri())
 
 
 def test_merge_analysis_result_normalizes_scalar_sections():

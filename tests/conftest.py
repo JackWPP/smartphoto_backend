@@ -18,6 +18,7 @@ TEST_STORAGE = TMP_ROOT / "storage"
 os.environ["DATABASE_URL"] = TEST_DB
 os.environ["ADMIN_DATABASE_URL"] = ADMIN_TEST_DB
 os.environ["TASKS_EAGER"] = "true"
+os.environ["STORAGE_BACKEND"] = "local"
 os.environ["STORAGE_ROOT"] = str(TEST_STORAGE)
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
 os.environ["WHATAI_API_KEY"] = ""

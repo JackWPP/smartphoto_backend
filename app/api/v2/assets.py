@@ -11,7 +11,7 @@ from app.services.dispatcher import dispatch_job
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
 from app.services.jobs import create_job
-from app.services.locking import acquire_generation_locks
+from app.services.locking import acquire_generation_locks, release_locks
 from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
 from app.services.detail_pages import normalize_detail_strategy_preview
 from app.services.pricing import get_pricing_rule
@@ -63,7 +63,6 @@ def regenerate_asset(
 
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
 
-    lock_keys = acquire_generation_locks(session.id, str(user_id))
     if asset_family == "main_gallery":
         strategy_preview = normalize_strategy_preview(
             session.strategy_preview,
@@ -103,7 +102,6 @@ def regenerate_asset(
                 "expression_mode": asset.expression_mode,
                 "platform_rule_pack": asset.rule_pack_id,
             },
-            "lock_keys": lock_keys,
         }
         job_type = "regenerate_asset"
         queue_name = "q.generation.main"
@@ -147,7 +145,6 @@ def regenerate_asset(
                 "slot_id": asset.slot_id or asset.asset_role,
                 "display_order": asset.display_order,
             },
-            "lock_keys": lock_keys,
         }
         job_type = "regenerate_detail_panel"
         queue_name = "q.generation.detail"
@@ -181,15 +178,20 @@ def regenerate_asset(
         payload={"asset_id": asset.id},
     )
     input_payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-
-    job = create_job(
-        db,
-        session_id=session.id,
-        user_id=str(user_id),
-        job_type=job_type,
-        input_payload=input_payload,
-        idempotency_key=idempotency_key,
-    )
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    input_payload["lock_keys"] = lock_keys
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type=job_type,
+            input_payload=input_payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
     if transaction is not None:
         transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
     response_data = {

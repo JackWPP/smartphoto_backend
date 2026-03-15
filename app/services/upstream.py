@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 class WhataiClient:
     REQUEST_RETRYABLE_ERRORS = (httpx.TransportError,)
     IMAGE_EDIT_REQUEST_ATTEMPTS = 4
+    CHAT_IMAGE_MAX_EDGE = 1024
+    CHAT_IMAGE_JPEG_QUALITY = 82
     IMAGE_EDIT_ALLOWED_ASPECT_RATIOS = {
         "1:1",
         "1:4",
@@ -67,7 +69,7 @@ class WhataiClient:
             *self._build_chat_image_parts(normalized_images),
         ]
         payload = {
-            "model": self.settings.whatai_chat_model,
+            "model": self.settings.whatai_analysis_model or self.settings.whatai_chat_model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.2,
         }
@@ -131,7 +133,7 @@ class WhataiClient:
             *self._build_chat_image_parts(supplemental_reference_images or []),
         ]
         payload = {
-            "model": self.settings.whatai_chat_model,
+            "model": self.settings.whatai_planner_model or self.settings.whatai_chat_model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.3,
         }
@@ -205,7 +207,7 @@ class WhataiClient:
                 "type": "text",
                 "text": "Image 1 is the product multi-angle grid.",
             },
-            {"type": "image_url", "image_url": {"url": product_grid.to_data_uri()}},
+            {"type": "image_url", "image_url": {"url": self._optimized_data_uri(product_grid)}},
         ]
         if style_grid is not None:
             content.extend(
@@ -214,12 +216,12 @@ class WhataiClient:
                         "type": "text",
                         "text": "Image 2 is the style/font reference grid.",
                     },
-                    {"type": "image_url", "image_url": {"url": style_grid.to_data_uri()}},
+                    {"type": "image_url", "image_url": {"url": self._optimized_data_uri(style_grid)}},
                 ]
             )
 
         payload = {
-            "model": self.settings.whatai_chat_model,
+            "model": self.settings.whatai_planner_model or self.settings.whatai_chat_model,
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.4,
         }
@@ -651,7 +653,7 @@ class WhataiClient:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                with httpx.Client(base_url=base_url, timeout=90) as client:
+                with httpx.Client(base_url=base_url, timeout=self.settings.whatai_request_timeout_seconds) as client:
                     response = client.request(method, path, json=payload, headers=headers, params=params)
                     response.raise_for_status()
                     return response.json()
@@ -850,8 +852,30 @@ class WhataiClient:
                     ),
                 }
             )
-            content.append({"type": "image_url", "image_url": {"url": image.to_data_uri()}})
+            content.append({"type": "image_url", "image_url": {"url": self._optimized_data_uri(image)}})
         return content
+
+    def _optimized_data_uri(self, image: LoadedReferenceImage) -> str:
+        try:
+            with Image.open(io.BytesIO(image.content)) as img:
+                if img.mode not in {"RGB", "L"}:
+                    base = Image.new("RGB", img.size, (255, 255, 255))
+                    base.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
+                    img = base
+                elif img.mode != "RGB":
+                    img = img.convert("RGB")
+
+                if max(img.size) > self.CHAT_IMAGE_MAX_EDGE:
+                    scaled = img.copy()
+                    scaled.thumbnail((self.CHAT_IMAGE_MAX_EDGE, self.CHAT_IMAGE_MAX_EDGE))
+                    img = scaled
+
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=self.CHAT_IMAGE_JPEG_QUALITY, optimize=True)
+                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+                return f"data:image/jpeg;base64,{encoded}"
+        except Exception:  # noqa: BLE001
+            return image.to_data_uri()
 
     def _parse_json_object(self, text: str) -> dict[str, Any] | None:
         stripped = text.strip()

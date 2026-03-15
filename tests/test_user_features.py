@@ -1,6 +1,7 @@
 import io
 
 from PIL import Image
+from redis import Redis
 
 from app.admin_db import session as admin_db_session
 from app.admin_models.admin_user import AdminUserModel
@@ -304,6 +305,12 @@ def test_insufficient_credits_and_failed_job_refund(client, monkeypatch):
     insufficient = client.post(f"/api/v2/sessions/{session_id}/generations", json={"instruction": "生成一轮"}, headers=headers)
     assert insufficient.status_code == 402
     assert insufficient.json()["code"] == 40201
+    redis = Redis.from_url(get_settings().redis_url, decode_responses=True)
+    assert redis.keys("lock:*generation") == []
+
+    grant_credits_to_user(client, headers, credits=20)
+    retried = client.post(f"/api/v2/sessions/{session_id}/generations", json={"instruction": "再试一轮"}, headers=headers)
+    assert retried.status_code == 200, retried.text
 
     refund_headers = register_user(client, "refund@example.com", display_name="Refund")
     grant_credits_to_user(client, refund_headers, credits=20)

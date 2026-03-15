@@ -241,6 +241,7 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     client = WhataiClient()
     job = _require_job(db, job_id)
     session = _require_session(db, job.session_id)
+    started_at = time.perf_counter()
 
     ensure_session_transition(session.status, "analyzing")
     session.status = "analyzing"
@@ -262,8 +263,26 @@ def run_analysis_job(db: Session, job_id: str) -> None:
         append_job_event(db, job.id, "job_failed", {"event": "job_failed", "error": "missing images"})
         raise AppError("missing_required_images", http_status=400)
 
+    load_started_at = time.perf_counter()
     loaded_images = load_reference_images(images)
+    load_ms = int((time.perf_counter() - load_started_at) * 1000)
+    logger.info(
+        "analysis_job loaded reference images: job_id=%s session_id=%s image_count=%s load_ms=%s",
+        job.id,
+        session.id,
+        len(loaded_images),
+        load_ms,
+    )
+
+    analyze_started_at = time.perf_counter()
     snapshot = client.analyze_images(loaded_images, session.active_platform_id)
+    analyze_ms = int((time.perf_counter() - analyze_started_at) * 1000)
+    logger.info(
+        "analysis_job upstream analysis completed: job_id=%s session_id=%s analyze_ms=%s",
+        job.id,
+        session.id,
+        analyze_ms,
+    )
     snapshot["reanalysis_required"] = False
 
     update_job_status(db, job, status="running", progress=80, stage="finalizing")
@@ -281,6 +300,14 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     result_payload = {"analysis_snapshot": snapshot}
     update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+    logger.info(
+        "analysis_job finished: job_id=%s session_id=%s total_ms=%s load_ms=%s analyze_ms=%s",
+        job.id,
+        session.id,
+        int((time.perf_counter() - started_at) * 1000),
+        load_ms,
+        analyze_ms,
+    )
 
 
 def run_extract_parameters_job(db: Session, job_id: str) -> None:

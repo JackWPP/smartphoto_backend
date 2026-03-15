@@ -80,7 +80,7 @@ from app.services.download import build_zip_for_assets
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
 from app.services.jobs import append_job_event, create_job, update_job_status
-from app.services.locking import acquire_generation_locks
+from app.services.locking import acquire_generation_locks, release_locks
 from app.services.parameter_snapshot import (
     apply_parameter_snapshot_to_copy,
     merge_parameter_snapshot_into_copy,
@@ -1679,7 +1679,6 @@ def generate_gallery(
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
     pricing_rule = get_pricing_rule("generate_gallery")
     payload = req.model_dump()
-    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
     payload["pricing"] = {
         "action": pricing_rule.action,
         "pricing_rule_id": pricing_rule.rule_id,
@@ -1707,15 +1706,20 @@ def generate_gallery(
         payload={"slot_ids": req.slot_ids},
     )
     payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-
-    job = create_job(
-        db,
-        session_id=session.id,
-        user_id=str(user_id),
-        job_type="generate_gallery",
-        input_payload=payload,
-        idempotency_key=idempotency_key,
-    )
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    payload["lock_keys"] = lock_keys
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type="generate_gallery",
+            input_payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
     session.latest_generate_job_id = job.id
     if transaction is not None:
         payload["pricing"]["job_id"] = job.id
@@ -1783,22 +1787,26 @@ def generate_detail_page(
         action="generate_detail_page",
         session_id=session.id,
     )
-    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    payload["lock_keys"] = lock_keys
     payload["pricing"] = {
         "action": pricing_rule.action,
         "pricing_rule_id": pricing_rule.rule_id,
         "charged_credits": pricing_rule.credits,
         "wallet_transaction_id": transaction.id if transaction else None,
     }
-
-    job = create_job(
-        db,
-        session_id=session.id,
-        user_id=str(user_id),
-        job_type="generate_detail_page",
-        input_payload=payload,
-        idempotency_key=idempotency_key,
-    )
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type="generate_detail_page",
+            input_payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
     session.latest_detail_generate_job_id = job.id
     if transaction is not None:
         transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
@@ -1974,7 +1982,6 @@ def global_edit(
         raise AppError("invalid_request", "asset_ids required when scope is selected", 400)
     pricing_rule = get_pricing_rule("global_edit")
     payload = req.model_dump()
-    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
     payload["pricing"] = {
         "action": pricing_rule.action,
         "pricing_rule_id": pricing_rule.rule_id,
@@ -2002,15 +2009,20 @@ def global_edit(
         payload={"scope": req.scope, "asset_ids": req.asset_ids},
     )
     payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-
-    job = create_job(
-        db,
-        session_id=session.id,
-        user_id=str(user_id),
-        job_type="global_edit",
-        input_payload=payload,
-        idempotency_key=idempotency_key,
-    )
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    payload["lock_keys"] = lock_keys
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type="global_edit",
+            input_payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
     if transaction is not None:
         transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
     response_data = _generation_response_data(
@@ -2050,7 +2062,6 @@ def regenerate_gallery(
     ensure_no_running_generation_jobs(db, session.id, str(user_id))
     pricing_rule = get_pricing_rule("regenerate_gallery")
     payload = req.model_dump()
-    payload["lock_keys"] = acquire_generation_locks(session.id, str(user_id))
     payload["pricing"] = {
         "action": pricing_rule.action,
         "pricing_rule_id": pricing_rule.rule_id,
@@ -2077,15 +2088,20 @@ def regenerate_gallery(
         session_id=session.id,
     )
     payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-
-    job = create_job(
-        db,
-        session_id=session.id,
-        user_id=str(user_id),
-        job_type="regenerate_gallery",
-        input_payload=payload,
-        idempotency_key=idempotency_key,
-    )
+    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    payload["lock_keys"] = lock_keys
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            user_id=str(user_id),
+            job_type="regenerate_gallery",
+            input_payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
     if transaction is not None:
         transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
     response_data = _generation_response_data(
