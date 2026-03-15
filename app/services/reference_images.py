@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.services.storage import LocalStorageAdapter
+from app.services.storage import StorageAdapter, get_storage_adapter, public_url_for
 
 SLOT_PRIORITY = {"front": 0, "angle45": 1, "side": 2, "extra": 3}
 ROLE_REFERENCE_SLOT_PREFERENCES = {
@@ -32,7 +32,7 @@ class LoadedReferenceImage:
     mime_type: str
     file_size: int
     file_name: str
-    path: Path
+    path: Path | None
     content: bytes
 
     def to_manifest_item(self) -> dict[str, Any]:
@@ -40,7 +40,7 @@ class LoadedReferenceImage:
             "image_id": self.image_id,
             "slot_type": self.slot_type,
             "display_order": self.display_order,
-            "source_url": self.source_url,
+            "source_url": public_url_for(self.source_url),
             "width": self.width,
             "height": self.height,
             "mime_type": self.mime_type,
@@ -63,7 +63,7 @@ def build_reference_manifest(images: list[Any]) -> list[dict[str, Any]]:
                 "image_id": str(getattr(image, "id")),
                 "slot_type": str(getattr(image, "slot_type", "style")),
                 "display_order": int(getattr(image, "display_order", 0)),
-                "source_url": str(getattr(image, "source_url")),
+                "source_url": public_url_for(str(getattr(image, "source_url"))),
                 "width": int(getattr(image, "width")),
                 "height": int(getattr(image, "height")),
                 "mime_type": str(getattr(image, "mime_type")),
@@ -76,14 +76,15 @@ def build_reference_manifest(images: list[Any]) -> list[dict[str, Any]]:
 def load_reference_images(
     images: list[Any],
     *,
-    storage: LocalStorageAdapter | None = None,
+    storage: StorageAdapter | None = None,
 ) -> list[LoadedReferenceImage]:
-    adapter = storage or LocalStorageAdapter()
+    adapter = storage or get_storage_adapter()
     loaded: list[LoadedReferenceImage] = []
     for image in images:
-        path = adapter.resolve_url_to_path(image.source_url)
-        content = path.read_bytes()
-        mime_type = image.mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        object_key = adapter.normalize_object_key(image.source_url)
+        content = adapter.read_bytes(object_key)
+        file_name = Path(object_key).name
+        mime_type = image.mime_type or mimetypes.guess_type(file_name)[0] or "image/jpeg"
         loaded.append(
             LoadedReferenceImage(
                 image_id=str(getattr(image, "id")),
@@ -94,8 +95,8 @@ def load_reference_images(
                 height=int(getattr(image, "height")),
                 mime_type=mime_type,
                 file_size=int(getattr(image, "file_size")),
-                file_name=path.name,
-                path=path,
+                file_name=file_name,
+                path=None,
                 content=content,
             )
         )

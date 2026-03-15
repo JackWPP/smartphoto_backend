@@ -31,6 +31,13 @@ def get_job_or_404(db: Session, job_id: str) -> JobModel:
     return job
 
 
+def get_job_for_user_or_404(db: Session, job_id: str, user_id: str) -> JobModel:
+    job = db.query(JobModel).filter(JobModel.id == job_id, JobModel.user_id == user_id).one_or_none()
+    if not job:
+        raise AppError("job_not_found", http_status=404)
+    return job
+
+
 def get_asset_or_404(db: Session, asset_id: str) -> AssetModel:
     asset = db.query(AssetModel).filter(AssetModel.id == asset_id).one_or_none()
     if not asset:
@@ -86,11 +93,32 @@ def list_session_prompt_overrides(db: Session, session_id: str, *, asset_family:
     )
 
 
-def get_prompt_preset_or_404(db: Session, preset_id: str) -> PromptPresetModel:
-    preset = db.query(PromptPresetModel).filter(PromptPresetModel.id == preset_id).one_or_none()
+def get_prompt_preset_or_404(db: Session, preset_id: str, user_id: str | None = None) -> PromptPresetModel:
+    query = db.query(PromptPresetModel).filter(PromptPresetModel.id == preset_id)
+    if user_id is not None:
+        query = query.filter((PromptPresetModel.is_system.is_(True)) | (PromptPresetModel.created_by == user_id))
+    preset = query.one_or_none()
     if not preset:
         raise AppError("invalid_request", "prompt preset not found", 404)
     return preset
+
+
+def get_prompt_preset_or_none(db: Session, preset_id: str | None, user_id: str | None = None) -> PromptPresetModel | None:
+    if not preset_id:
+        return None
+    query = db.query(PromptPresetModel).filter(PromptPresetModel.id == preset_id)
+    if user_id is not None:
+        query = query.filter((PromptPresetModel.is_system.is_(True)) | (PromptPresetModel.created_by == user_id))
+    return query.one_or_none()
+
+
+def list_visible_prompt_presets_by_ids(db: Session, preset_ids: list[str], user_id: str | None = None) -> list[PromptPresetModel]:
+    if not preset_ids:
+        return []
+    query = db.query(PromptPresetModel).filter(PromptPresetModel.id.in_(preset_ids))
+    if user_id is not None:
+        query = query.filter((PromptPresetModel.is_system.is_(True)) | (PromptPresetModel.created_by == user_id))
+    return query.all()
 
 
 def get_latest_job_by_type(db: Session, session_id: str, job_type: str) -> JobModel | None:

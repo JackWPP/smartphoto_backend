@@ -142,7 +142,7 @@
   - `aspect_ratio` 固定为 `21:9`
   - `panel_count` 固定为 `8`
   - `panel_plan` 当前带 `slot_id/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used`
-  - 未上传风格图时，回退使用 `style_choice/style_custom`
+  - 未上传风格图时，优先使用 `style_preset_id` 解析出的风格摘要，再拼接 `style_custom`；仅兼容回退 `style_choice`
   - 生图默认使用 1 张商品 grid；有风格图时追加 1 张 style/font grid
 - Job / 事件语义：
   - `job_type = generate_detail_page`
@@ -258,6 +258,7 @@ sequenceDiagram
 6. Prompt 可追溯：最终写入 `assets.prompt_snapshot` 的是实际提交给上游的 `final_prompt`。
 7. 引用可追溯：`assets.generation_snapshot` 必须记录 `reference_image_ids/reference_slots/upstream_endpoint/planner_instruction/size`。
 8. 槽位可追溯：主图资产需写 `slot_id/expression_mode/rule_pack_id`；详情页资产需写 `slot_id/panel_type`。
+9. 后台资产归档不物理删除，只修改 `visibility_status` 并记录后台审计日志。
 
 ## 6.1 Prompt Debug 只读接口
 - 入口：`POST /sessions/{session_id}/prompts/preview`
@@ -278,3 +279,4 @@ sequenceDiagram
 - 当前仅实现“逻辑 Agent 协作”，不是独立 Agent 微服务编排。
 - success validator、平台合规检测、自动纠偏链路尚未接入。
 - `scope=selected` 的局部全局修改尚未在执行层生效（当前按整组处理）。
+- 规则包运行时现在支持“DB 发布优先 + 代码 seed 兜底”；后台改规则只影响后续策略和新生成结果，不回写历史资产。

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.orm import Session
+
+from app.services.rule_packs import DETAIL_RULE_PACK_ID, load_published_rule_pack_config
+
 
 DETAIL_PANEL_TYPE_LIBRARY: dict[str, dict[str, str]] = {
     "brand_authority": {"label": "品牌背书", "layout_template": "authority_banner", "copy_policy": "headline_plus_supporting"},
@@ -80,12 +84,16 @@ DETAIL_PANEL_SLOT_PRESETS: list[dict[str, Any]] = [
 ]
 
 
-def list_detail_panel_slots() -> list[dict[str, Any]]:
-    return [{**item} for item in DETAIL_PANEL_SLOT_PRESETS]
+def list_detail_panel_slots(*, db: Session | None = None) -> list[dict[str, Any]]:
+    _, _, config = load_published_rule_pack_config(asset_family="detail_page", rule_pack_key=DETAIL_RULE_PACK_ID, db=db)
+    slot_plan = (config or {}).get("slot_plan") or DETAIL_PANEL_SLOT_PRESETS
+    return [{**item} for item in slot_plan]
 
 
-def panel_type_metadata(panel_type: str) -> dict[str, Any]:
-    value = DETAIL_PANEL_TYPE_LIBRARY.get(panel_type, {})
+def panel_type_metadata(panel_type: str, *, db: Session | None = None) -> dict[str, Any]:
+    _, _, config = load_published_rule_pack_config(asset_family="detail_page", rule_pack_key=DETAIL_RULE_PACK_ID, db=db)
+    library = (config or {}).get("panel_type_library") or DETAIL_PANEL_TYPE_LIBRARY
+    value = library.get(panel_type, {})
     return {
         "panel_type": panel_type,
         "panel_type_label": value.get("label", panel_type),
@@ -100,6 +108,7 @@ def recommend_panel_types(
     analysis_snapshot: dict[str, Any],
     platform_id: str,
     style_images_present: bool,
+    db: Session | None = None,
 ) -> list[dict[str, Any]]:
     selling_points = _split_points(confirmed_copy.get("selling_points"))
     usage_scenes = _split_points(confirmed_copy.get("usage_scenes"))
@@ -108,7 +117,7 @@ def recommend_panel_types(
     must_keep = _analysis_value(analysis_snapshot, "reference_summary", "must_keep")
 
     recommended: list[dict[str, Any]] = []
-    for slot in DETAIL_PANEL_SLOT_PRESETS:
+    for slot in list_detail_panel_slots(db=db):
         slot_id = slot["slot_id"]
         panel_type = slot["default_panel_type"]
         reason = "按默认详情页推荐组合生成。"
@@ -147,9 +156,10 @@ def recommend_panel_types(
     return recommended
 
 
-def resolve_panel_preferences(incoming: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
-    valid_slots = {item["slot_id"] for item in DETAIL_PANEL_SLOT_PRESETS}
-    valid_panel_types = set(DETAIL_PANEL_TYPE_LIBRARY)
+def resolve_panel_preferences(incoming: list[dict[str, Any]] | None, *, db: Session | None = None) -> dict[str, dict[str, Any]]:
+    valid_slots = {item["slot_id"] for item in list_detail_panel_slots(db=db)}
+    _, _, config = load_published_rule_pack_config(asset_family="detail_page", rule_pack_key=DETAIL_RULE_PACK_ID, db=db)
+    valid_panel_types = set(((config or {}).get("panel_type_library") or DETAIL_PANEL_TYPE_LIBRARY))
     resolved: dict[str, dict[str, Any]] = {}
     for item in incoming or []:
         if not isinstance(item, dict):
