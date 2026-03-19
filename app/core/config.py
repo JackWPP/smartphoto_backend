@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     storage_root: Path = Path("./storage")
     public_base_url: str = "http://localhost:8000"
+    cors_allow_origins: str = ""
     storage_backend: str = "local"
     s3_endpoint: str = ""
     s3_region: str = "auto"
@@ -101,6 +102,28 @@ class Settings(BaseSettings):
                 "credits": max(0, credits),
                 "description": str(config.get("description") or action),
             }
+        return normalized
+
+    def parsed_cors_allow_origins(self) -> list[str]:
+        raw_value = (self.cors_allow_origins or "").strip()
+        if not raw_value:
+            return []
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            value = None
+        candidates: list[str]
+        if isinstance(value, list):
+            candidates = [str(item).strip() for item in value]
+        else:
+            candidates = [item.strip() for item in raw_value.split(",")]
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            if not item or item in seen:
+                continue
+            normalized.append(item)
+            seen.add(item)
         return normalized
 
 

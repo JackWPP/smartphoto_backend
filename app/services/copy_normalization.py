@@ -19,6 +19,35 @@ COPY_LIST_FIELDS = (
     "core_selling_points",
     "product_advantages",
 )
+POINT_SEPARATORS = ("｜", "|", "；", ";", "、", "\n", ",", "，", "/")
+PLACEHOLDER_PARAMETER_RE = re.compile(r"参数\s*[A-ZＡ-Ｚ一二三四五六七八九十甲乙丙丁]")
+GENERIC_VISIBLE_COPY_PATTERNS = (
+    "核心功能突出",
+    "视觉清爽",
+    "易于理解",
+    "高效体验，稳定品质",
+    "高效体验稳定品质",
+)
+GENERIC_PREFIXES = ("这款", "本款")
+LOW_SIGNAL_DESCRIPTOR_TOKENS = (
+    "现代",
+    "简约",
+    "风格",
+    "白色",
+    "黑色",
+    "高清",
+    "高保真",
+    "视觉",
+    "清爽",
+    "简洁",
+    "整体",
+    "设计",
+    "产品",
+    "商品",
+    "款",
+    "这款",
+    "本款",
+)
 
 
 def normalize_copy_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -89,10 +118,7 @@ def normalize_string_list(value: Any) -> list[str]:
         for item in value:
             items.extend(normalize_string_list(item))
         return items
-    text = normalize_copy_text(value)
-    if not text:
-        return []
-    return split_copy_points(text)
+    return split_copy_points(value)
 
 
 def split_copy_points(value: Any) -> list[str]:
@@ -103,12 +129,78 @@ def split_copy_points(value: Any) -> list[str]:
         for item in value:
             points.extend(split_copy_points(item))
         return points
-    text = normalize_copy_text(value)
+    text = repair_broken_text(value)
     if not text:
         return []
-    for separator in ("｜", "|", "；", ";", "、", "\n", ",", "，", "/"):
+    for separator in POINT_SEPARATORS:
         text = text.replace(separator, "\n")
-    return [item.strip() for item in text.splitlines() if item.strip()]
+    return _dedupe_preserve_order([item.strip() for item in text.splitlines() if item.strip()])
+
+
+def normalize_phrase_list(value: Any) -> list[str]:
+    return normalize_string_list(value)
+
+
+def repair_broken_text(value: Any) -> str:
+    cleaned = normalize_copy_text(value)
+    if not cleaned:
+        return ""
+    tokens = [item.strip() for item in re.split(r"[｜|；;/、\n]+", cleaned) if item.strip()]
+    if _looks_like_character_splitting(tokens):
+        compact = "".join(tokens)
+        compact = re.sub(r"\s+", " ", compact)
+        return compact.strip()
+    return cleaned
+
+
+def is_placeholder_copy_text(value: Any) -> bool:
+    cleaned = repair_broken_text(value)
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if any(pattern in cleaned for pattern in GENERIC_VISIBLE_COPY_PATTERNS):
+        return True
+    if PLACEHOLDER_PARAMETER_RE.search(cleaned):
+        return True
+    if re.search(r"\b\d+\s*unit\b", lowered):
+        return True
+    if re.search(r"\bparam(?:eter)?\s*[a-z0-9]+\b", lowered):
+        return True
+    return False
+
+
+def is_low_information_copy_text(
+    value: Any,
+    *,
+    product_name: str = "",
+    allow_product_name_only: bool = False,
+    allow_placeholder_copy: bool = False,
+) -> bool:
+    cleaned = repair_broken_text(value)
+    if not cleaned:
+        return True
+    if not allow_placeholder_copy and is_placeholder_copy_text(cleaned):
+        return True
+
+    normalized = _copy_signature(cleaned)
+    if not normalized:
+        return True
+
+    product = _copy_signature(product_name)
+    if product and normalized == product:
+        return not allow_product_name_only
+
+    if product and product in normalized:
+        remainder = normalized.replace(product, "")
+        for token in LOW_SIGNAL_DESCRIPTOR_TOKENS:
+            remainder = remainder.replace(_copy_signature(token), "")
+        if len(remainder) <= 2:
+            return True
+
+    if any(cleaned.startswith(prefix) for prefix in GENERIC_PREFIXES) and product and product in normalized and not re.search(r"\d", cleaned):
+        return True
+
+    return False
 
 
 def key_parameter_strings(value: Any) -> list[str]:
@@ -225,3 +317,28 @@ def _split_value_and_unit(value: str) -> tuple[str, str]:
     if match:
         return match.group("num"), match.group("unit")
     return normalized_value, ""
+
+
+def _looks_like_character_splitting(tokens: list[str]) -> bool:
+    if len(tokens) < 4:
+        return False
+    meaningful = [item for item in tokens if item]
+    if len(meaningful) < 4:
+        return False
+    single_char = sum(1 for item in meaningful if len(item) == 1)
+    return single_char / len(meaningful) >= 0.75
+
+
+def _copy_signature(value: str) -> str:
+    return re.sub(r"[\W_]+", "", value).lower()
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in values:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped

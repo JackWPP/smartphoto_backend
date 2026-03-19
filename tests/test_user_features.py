@@ -1,5 +1,6 @@
 import io
 
+from fastapi.testclient import TestClient
 from PIL import Image
 from redis import Redis
 
@@ -9,6 +10,7 @@ from app.core.admin_auth import hash_password
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db import session as db_session
+from app.main import create_app
 from app.services.user_accounts import adjust_wallet_balance
 
 
@@ -137,6 +139,45 @@ def test_unauthorized_when_dev_bypass_disabled(client, monkeypatch):
     get_settings.cache_clear()
     response = client.get("/api/v2/account/overview")
     assert response.status_code == 401
+    get_settings.cache_clear()
+
+
+def test_cors_preflight_allows_configured_origin(monkeypatch):
+    origin = "http://frontend.example.com:5173"
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", origin)
+    get_settings.cache_clear()
+    test_client = TestClient(create_app())
+
+    response = test_client.options(
+        "/api/v2/auth/login",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,authorization",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+    assert response.headers["access-control-allow-credentials"] == "true"
+    get_settings.cache_clear()
+
+
+def test_cors_preflight_rejects_unknown_origin(monkeypatch):
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "http://frontend.example.com:5173")
+    get_settings.cache_clear()
+    test_client = TestClient(create_app())
+
+    response = test_client.options(
+        "/api/v2/jobs/demo/events",
+        headers={
+            "Origin": "http://unknown.example.com:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
     get_settings.cache_clear()
 
 

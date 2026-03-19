@@ -196,6 +196,25 @@ def _attachment_markdown(original_name: str, content: bytes, mime_type: str) -> 
 
 
 def _analysis_defaults_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    if str(snapshot.get("analysis_source") or "").strip() == "fallback":
+        return normalize_copy_payload(
+            {
+                "product_name": "",
+                "category": "",
+                "headline": "",
+                "hero_scene": "",
+                "core_selling_points": [],
+                "selling_points": "",
+                "usage_scenes": "",
+                "specs": "",
+                "product_advantages": [],
+                "style_preset_id": None,
+                "style_choice": "",
+                "style_custom": "",
+                "key_parameters": [],
+            }
+        )
+
     draft = _snapshot_section(snapshot, "copy_draft", text_key="headline")
     recognized_product = _snapshot_section(snapshot, "recognized_product", text_key="product_name")
     suggested_styles = _snapshot_string_list(snapshot, "suggested_styles")

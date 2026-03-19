@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.session_image import SessionImageModel
-from app.services.copy_normalization import normalize_copy_payload
+from app.services.copy_normalization import normalize_copy_payload, normalize_phrase_list, repair_broken_text
 from app.services.main_gallery_rules import (
     build_copy_blocks,
     expression_metadata,
@@ -93,7 +93,7 @@ def build_strategy_preview(
         "resolved_style_preset": normalized_copy.get("resolved_style_preset"),
         "style_custom": normalized_copy.get("style_custom", ""),
         "style_summary": _style_summary(normalized_copy),
-        "platform_strategy": f"{platform_name} 主图标准，输出 {len(asset_plan)} 张主图",
+        "platform_strategy": f"{platform_name} 主图标准",
         "image_count": len(asset_plan),
         "planner_instruction": planner_instruction,
         "platform_rule_pack": profile.main_rule_pack_id if profile else "default_main_gallery_v2",
@@ -315,19 +315,53 @@ def _build_default_prompt_plan_item(
 
     slot_id = str(plan_item["slot_id"])
     product_name = confirmed_copy.get("product_name") or "商品"
+    copy_blocks = dict(plan_item.get("copy_blocks") or {})
     selling_points = _split_points(confirmed_copy.get("selling_points"))
     scenes = _split_points(confirmed_copy.get("usage_scenes"))
     specs = _split_points(confirmed_copy.get("specs"))
-    top_point = selling_points[0] if selling_points else "核心卖点"
-    top_scene = scenes[0] if scenes else "真实使用场景"
-    top_spec = specs[0] if specs else "材质与结构"
-    copy_blocks = dict(plan_item.get("copy_blocks") or {})
+    top_point = (
+        copy_blocks.get("headline")
+        or copy_blocks.get("supporting")
+        or (copy_blocks.get("matrix_lines") or [None])[0]
+        or (selling_points[0] if selling_points else "核心卖点")
+    )
+    top_scene = (
+        (copy_blocks.get("matrix_lines") or [None])[0]
+        or (scenes[0] if scenes else "真实使用场景")
+    )
+    top_spec = (
+        (copy_blocks.get("proof_lines") or [None])[0]
+        or (specs[0] if specs else "材质与结构")
+    )
     rule_modules_used = [str(item) for item in plan_item.get("rule_modules_used", []) if str(item).strip()]
+    slot_guardrails_map = {
+        "primary_kv": [
+            "主体占画面约 45%-60%，必须预留主标题区",
+            "底部利益点最多 2 个，且只能做短利益点",
+            "背景不能只是纯空白渲染，可用轻场景或轻材质层次",
+        ],
+        "reason_why": [
+            "至少表达 2 个不同理由点，不要做重复角度的小图拼凑",
+            "优先理由卡、机制卡或能力摘要，不要只用生活场景凑满画面",
+        ],
+        "proof_authority": [
+            "优先参数、证书、面板特写或结构放大，不走泛场景",
+            "没有真实证书素材时，不要堆砌虚假权威认证",
+        ],
+        "benefit_scene_or_compare": [
+            "必须有颜色或光区强化视觉重点，不能做平淡白底陈列图",
+            "没有明确对比对象时，默认走利益场景而不是硬做对比",
+        ],
+        "closing_selling_point": [
+            "承担尾屏收束，不是简单换背景重拍产品",
+            "核心卖点必须居中明显，辅助卖点控制在 1-2 个",
+        ],
+    }
 
     must_keep = [
         f"保持 {product_name} 的主体轮廓、比例和结构特征稳定",
         f"优先保留参考图中的主色和材质信息：{_fallback_text(reference_summary.get('colors'), '以参考图为准')}",
-        f"不要偏离参考图中的关键结构：{_fallback_text(reference_summary.get('must_keep'), '按上传商品图保持一致')}",
+        f"不要偏离参考图中的关键结构：{_fallback_text(repair_broken_text(reference_summary.get('must_keep')), '按上传商品图保持一致')}",
     ]
     if plan_item.get("text_policy") == "short_copy_required":
         must_keep.append("画面允许短文案，但必须短、清晰、与版式高度融合")
@@ -345,11 +379,11 @@ def _build_default_prompt_plan_item(
         "selling_point": f"背景服务于卖点“{top_point}”，只保留最少的功能化辅助元素。",
         "scene": f"在 {top_scene} 中自然展示商品，但环境只能作为陪衬。",
         "detail": "背景简洁或轻微虚化，重点让材质、纹理、做工细节清晰可见。",
-        "primary_kv": "背景可以极简或高级场景化，但必须把标题点击力留给主文案和产品主体。",
-        "reason_why": "背景支持理由卡或机制卡表现，不做纯白无信息背景。",
-        "proof_authority": "背景要服务于证书、实验、参数或实力佐证信息。",
-        "benefit_scene_or_compare": "背景要么是真实场景，要么是对比辅助空间，但不能抽象空泛。",
-        "closing_selling_point": "背景保持干净，方便收束剩余卖点或参数亮点。",
+        "primary_kv": "背景允许极简高级场景或轻材质层次，但不能只是纯空白渲染；必须衬托标题区和底部利益点。",
+        "reason_why": "背景支持理由卡、机制卡或分镜摘要，不做纯白无信息背景，也不要做重复生活场景。",
+        "proof_authority": "背景只服务于参数、证书、面板特写或结构放大，避免人物、大场景和复杂合成。",
+        "benefit_scene_or_compare": "背景必须带出利益场景或对比空间，并通过色块、光区或层次强化视觉重点。",
+        "closing_selling_point": "背景保持干净但要有质感，可用优质场景收束卖点，不能只是平拍产品。",
     }
     composition_rule_map = {
         "hero": "商品完整入镜，主体明确，适合做主图首图。",
@@ -357,11 +391,11 @@ def _build_default_prompt_plan_item(
         "selling_point": f"围绕“{top_point}”做近景或中近景功能化构图。",
         "scene": "构图真实自然，商品清晰可辨，不要让场景喧宾夺主。",
         "detail": f"做局部近景或微距表现，重点展示 {top_spec}。",
-        "primary_kv": "产品主体约占画面一半，上方保留主标题和副标题区。",
-        "reason_why": "用卡片式或摘要式排布解释能力点，让用户快速理解理由。",
-        "proof_authority": "主体卖点旁必须有证明性元素，构图偏信息卡。",
-        "benefit_scene_or_compare": "优先场景代入或左右对比，利益点必须直接可感知。",
-        "closing_selling_point": "以总结式矩阵、尾屏总结或参数亮点收束信息。",
+        "primary_kv": "采用“标题区 + 产品主体 + 背景结构 + 底部利益点”结构，产品主体约占画面一半。",
+        "reason_why": "采用多理由卡、机制卡或小分镜结构，至少表达 2 个不同理由点，不要用重复角度凑画面。",
+        "proof_authority": "采用信息卡式构图，主体卖点旁必须放参数、证书、面板特写或结构放大等证明性元素。",
+        "benefit_scene_or_compare": "采用“颜色强化 + 核心利益点 + 场景/对比”结构，利益点必须直接可感知。",
+        "closing_selling_point": "采用“优质场景 + 核心卖点 + 1-2 个辅助卖点”的收束式构图，不做简单平拍。",
     }
     final_prompt_base_map = {
         "hero": f"以 {product_name} 为唯一主体，生成一张高转化电商主图，突出 {top_point}。",
@@ -369,11 +403,11 @@ def _build_default_prompt_plan_item(
         "selling_point": f"以 {product_name} 为唯一主体，聚焦表达卖点 {top_point}。",
         "scene": f"让 {product_name} 自然置入 {top_scene}，突出真实使用感。",
         "detail": f"放大表现 {product_name} 的 {top_spec}，强调质感与做工。",
-        "primary_kv": f"用一句核心利益点说明 {product_name} 是什么、能解决什么问题，形成强点击首图。",
-        "reason_why": f"解释为什么 {product_name} 能解决“{top_point}”，优先使用理由卡或机制卡。",
-        "proof_authority": f"把 {product_name} 的最强卖点“{top_point}”与认证、参数或证书佐证绑定。",
-        "benefit_scene_or_compare": f"用场景或对比方式说明 {product_name} 能给消费者带来的实际利益。",
-        "closing_selling_point": f"承接剩余卖点和参数亮点，总结 {product_name} 的购买理由。",
+        "primary_kv": f"让 {product_name} 一眼说明“产品是什么、解决什么问题”，形成强点击首图，而不是单纯白底渲染。",
+        "reason_why": f"解释为什么 {product_name} 能解决“{top_point}”，优先使用理由卡、机制卡或多理由分镜。",
+        "proof_authority": f"把 {product_name} 的最强卖点“{top_point}”与参数、证书、面板特写或结构佐证绑定，提升可信度。",
+        "benefit_scene_or_compare": f"用利益场景或对比方式说明 {product_name} 对消费者的实际收益，同时做强视觉重点。",
+        "closing_selling_point": f"用优质场景和核心卖点收束 {product_name} 的购买理由，完成尾屏总结。",
     }
 
     background_rule = background_rule_map.get(slot_id, background_rule_map.get(plan_item["role"], "背景干净，不做复杂拼贴。"))
@@ -385,6 +419,7 @@ def _build_default_prompt_plan_item(
         else "保真优先，必须保持参考商品外形一致，并输出标准白底图。"
     )
     final_prompt_base = final_prompt_base_map.get(slot_id, final_prompt_base_map.get(plan_item["role"], f"围绕 {product_name} 生成电商商品图。"))
+    slot_guardrails = slot_guardrails_map.get(slot_id, [])
 
     if planner_instruction:
         must_keep.append(f"额外遵循本轮策略指令：{planner_instruction}")
@@ -395,6 +430,10 @@ def _build_default_prompt_plan_item(
         resolved_constraints.append("不要生成海报文字、标题字、角标、贴纸或说明文案。")
     else:
         resolved_constraints.append("Visible copy must stay short, high-contrast and integrated into the layout.")
+    if slot_id == "proof_authority":
+        resolved_constraints.append("没有真实证书素材时，优先参数标签、面板特写或结构放大，不伪造权威认证。")
+    if slot_id == "benefit_scene_or_compare":
+        resolved_constraints.append("画面必须有明确视觉强化区域，不允许做平淡白底陈列图。")
 
     return {
         "slot_id": slot_id,
@@ -409,12 +448,18 @@ def _build_default_prompt_plan_item(
         "copy_blocks": copy_blocks,
         "raw_prompt_override": plan_item.get("raw_prompt_override"),
         "applied_preset_id": plan_item.get("applied_preset_id"),
+        "visual_structure": plan_item.get("visual_structure"),
+        "copy_density": plan_item.get("copy_density"),
+        "proof_mode": plan_item.get("proof_mode"),
+        "scene_mode": plan_item.get("scene_mode"),
+        "emphasis_style": plan_item.get("emphasis_style"),
         "platform_overlay": platform_overlay,
         "platform_rule_pack": plan_item.get("platform_rule_pack"),
         "reference_image_ids": reference_image_ids,
         "reference_slots": reference_slots,
         "must_keep": must_keep,
         "must_avoid": must_avoid,
+        "slot_guardrails": slot_guardrails,
         "background_rule": background_rule,
         "composition_rule": composition_rule,
         "lighting_rule": lighting_rule,
@@ -445,14 +490,25 @@ def _merge_prompt_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | Non
     ):
         value = llm_item.get(key)
         if isinstance(value, list):
-            merged[key] = [str(item).strip() for item in value if str(item).strip()]
-        elif isinstance(value, str) and value.strip():
-            merged[key] = value.strip()
+            if key in {"must_keep", "must_avoid"}:
+                merged[key] = _normalize_text_list(value)
+            else:
+                merged[key] = normalize_phrase_list(value)
+        elif value is not None:
+            if key in {"must_keep", "must_avoid"}:
+                normalized = _normalize_text_list(value)
+                if normalized:
+                    merged[key] = normalized
+            else:
+                normalized_text = repair_broken_text(value)
+                if normalized_text:
+                    merged[key] = normalized_text
 
     if isinstance(llm_item.get("reference_image_ids"), list):
         merged["reference_image_ids"] = [str(item) for item in llm_item["reference_image_ids"] if str(item)]
-    if isinstance(llm_item.get("reference_slots"), list):
-        merged["reference_slots"] = [str(item) for item in llm_item["reference_slots"] if str(item)]
+    normalized_reference_slots = normalize_phrase_list(llm_item.get("reference_slots"))
+    if normalized_reference_slots:
+        merged["reference_slots"] = normalized_reference_slots
 
     merged["planner_source"] = "llm"
     return merged
@@ -568,11 +624,17 @@ def _normalize_prompt_plan(
                 "role": str(item.get("role") or base["role"]),
                 "display_order": int(item.get("display_order") or base["display_order"]),
                 "reference_image_ids": [str(v) for v in item.get("reference_image_ids", base["reference_image_ids"])],
-                "reference_slots": [str(v) for v in item.get("reference_slots", base["reference_slots"])],
-                "must_keep": [str(v) for v in item.get("must_keep", base["must_keep"])],
-                "must_avoid": [str(v) for v in item.get("must_avoid", base["must_avoid"])],
+                "reference_slots": _normalize_phrase_list(item.get("reference_slots", base["reference_slots"])),
+                "must_keep": _normalize_text_list(item.get("must_keep", base["must_keep"])),
+                "must_avoid": _normalize_text_list(item.get("must_avoid", base["must_avoid"])),
+                "slot_guardrails": _normalize_text_list(item.get("slot_guardrails", base.get("slot_guardrails", []))),
                 "rule_modules_used": [str(v) for v in item.get("rule_modules_used", base["rule_modules_used"])],
-                "resolved_constraints": [str(v) for v in item.get("resolved_constraints", base["resolved_constraints"])],
+                "resolved_constraints": _normalize_text_list(item.get("resolved_constraints", base["resolved_constraints"])),
+                "background_rule": repair_broken_text(item.get("background_rule", base["background_rule"])),
+                "composition_rule": repair_broken_text(item.get("composition_rule", base["composition_rule"])),
+                "lighting_rule": repair_broken_text(item.get("lighting_rule", base["lighting_rule"])),
+                "fidelity_rule": repair_broken_text(item.get("fidelity_rule", base["fidelity_rule"])),
+                "final_prompt_base": repair_broken_text(item.get("final_prompt_base", base["final_prompt_base"])),
             }
         )
         seen_slots.add(slot_id)
@@ -603,17 +665,7 @@ def select_loaded_reference_images_for_role(
 
 
 def _split_points(value: Any) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, list):
-        points: list[str] = []
-        for item in value:
-            points.extend(_split_points(item))
-        return points
-    text = str(value)
-    for separator in ("｜", "|", "；", ";", "、", "\n", ",", "，"):
-        text = text.replace(separator, "\n")
-    return [item.strip() for item in text.splitlines() if item.strip()]
+    return normalize_phrase_list(value)
 
 
 def _fallback_text(value: Any, fallback: str) -> str:
@@ -621,6 +673,17 @@ def _fallback_text(value: Any, fallback: str) -> str:
         return fallback
     text = str(value).strip()
     return text or fallback
+
+
+def _normalize_text_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [repair_broken_text(item) for item in value if repair_broken_text(item)]
+    text = repair_broken_text(value)
+    return [text] if text else []
+
+
+def _normalize_phrase_list(value: Any) -> list[str]:
+    return normalize_phrase_list(value)
 
 
 def _stable_hash(payload: dict[str, Any]) -> str:
