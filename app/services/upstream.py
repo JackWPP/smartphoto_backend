@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import logging
+import re
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -13,10 +14,35 @@ from PIL import Image, ImageDraw
 
 from app.core.config import get_settings
 from app.core.errors import AppError
-from app.services.copy_normalization import normalize_key_parameters as normalize_structured_key_parameters
+from app.services.copy_normalization import (
+    normalize_key_parameters as normalize_structured_key_parameters,
+    normalize_phrase_list,
+    repair_broken_text,
+)
 from app.services.reference_images import LoadedReferenceImage
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_planner_freeform_text(value: Any) -> str:
+    cleaned = repair_broken_text(value)
+    if not cleaned:
+        return ""
+    text = cleaned
+    for pattern in (
+        r"输出\s*\d+\s*张主图",
+        r"整组统一(?:输出)?",
+        r"保持整组统一(?:质感|风格|审美)?",
+    ):
+        text = re.sub(pattern, "", text)
+    return re.sub(r"\s+", " ", text).strip(" ，,；;。")
+
+
+def _normalize_planner_text_entries(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [_sanitize_planner_freeform_text(item) for item in value if _sanitize_planner_freeform_text(item)]
+    cleaned = _sanitize_planner_freeform_text(value)
+    return [cleaned] if cleaned else []
 
 
 class WhataiClient:
@@ -79,7 +105,9 @@ class WhataiClient:
         parsed = self._parse_json_object(text)
         if not isinstance(parsed, dict):
             return fallback
-        return self._merge_analysis_result(fallback, parsed)
+        merged = self._merge_analysis_result(fallback, parsed)
+        merged["analysis_source"] = "llm"
+        return merged
 
     def plan_prompt_plan(
         self,
@@ -159,14 +187,14 @@ class WhataiClient:
             ]
             by_role[role] = {
                 "reference_image_ids": reference_image_ids,
-                "must_keep": [str(value) for value in item.get("must_keep", []) if str(value).strip()],
-                "must_avoid": [str(value) for value in item.get("must_avoid", []) if str(value).strip()],
-                "background_rule": str(item.get("background_rule") or "").strip(),
-                "composition_rule": str(item.get("composition_rule") or "").strip(),
-                "lighting_rule": str(item.get("lighting_rule") or "").strip(),
-                "fidelity_rule": str(item.get("fidelity_rule") or "").strip(),
-                "final_prompt_base": str(item.get("final_prompt_base") or "").strip(),
-                    "reference_slots": [str(value) for value in item.get("reference_slots", []) if str(value).strip()],
+                "must_keep": _normalize_planner_text_entries(item.get("must_keep")),
+                "must_avoid": _normalize_planner_text_entries(item.get("must_avoid")),
+                "background_rule": _sanitize_planner_freeform_text(item.get("background_rule")),
+                "composition_rule": _sanitize_planner_freeform_text(item.get("composition_rule")),
+                "lighting_rule": _sanitize_planner_freeform_text(item.get("lighting_rule")),
+                "fidelity_rule": _sanitize_planner_freeform_text(item.get("fidelity_rule")),
+                "final_prompt_base": _sanitize_planner_freeform_text(item.get("final_prompt_base")),
+                "reference_slots": normalize_phrase_list(item.get("reference_slots")),
             }
         return by_role
 
@@ -999,16 +1027,12 @@ class WhataiClient:
     def _normalize_string_list(self, value: Any, fallback: list[Any]) -> list[str]:
         parsed = self._decode_json_like(value)
         if isinstance(parsed, list):
-            values = [str(item).strip() for item in parsed if str(item).strip()]
-            return values or [str(item).strip() for item in fallback if str(item).strip()]
+            values = normalize_phrase_list(parsed)
+            return values or normalize_phrase_list(fallback)
         if isinstance(parsed, str) and parsed.strip():
-            parts = [
-                item.strip()
-                for item in parsed.replace("｜", ",").replace("、", ",").replace("/", ",").split(",")
-                if item.strip()
-            ]
-            return parts or [parsed.strip()]
-        return [str(item).strip() for item in fallback if str(item).strip()]
+            parts = normalize_phrase_list(parsed)
+            return parts or [repair_broken_text(parsed)]
+        return normalize_phrase_list(fallback)
 
     def _normalize_key_parameters(self, value: Any, fallback: list[Any]) -> list[dict[str, Any]]:
         parsed = self._decode_json_like(value)
@@ -1037,6 +1061,7 @@ class WhataiClient:
         slots = [image.slot_type for image in reference_images or []]
         slot_hint = "、".join(slots) if slots else "front"
         return {
+            "analysis_source": "fallback",
             "recognized_product": {
                 "product_name": "智能产品",
                 "category": "家居用品",
