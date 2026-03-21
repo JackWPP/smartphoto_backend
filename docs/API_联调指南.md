@@ -30,6 +30,7 @@
 - 健康检查：`GET /healthz`
 - OpenAPI：`GET /openapi.json`
 - Apifox 导入文件：`docs/openapi/smartphoto_backend_openapi.json`
+- 若前端与后端跨域部署，后端必须显式配置 `CORS_ALLOW_ORIGINS`，且前端请求需启用 credentials
 
 ### 1.1.1 OpenAPI 导出
 ```bash
@@ -247,8 +248,19 @@
     - `copy_policy`
     - `layout_policy`
     - `proof_policy`
+    - `visual_structure`
+    - `copy_density`
+    - `proof_mode`
+    - `scene_mode`
+    - `emphasis_style`
     - `requires_white_bg_validation`
     - `platform_rule_pack`
+  - 阿里系 5 槽位当前收口为 PDF 式结构语义：
+    - `primary_kv`：`标题区 + 产品主体 + 背景结构 + 底部利益点`
+    - `reason_why`：`多理由卡 / 多场景小分镜 / 机制说明`
+    - `proof_authority`：`参数佐证 / 证书资质 / 屏幕特写 / 局部结构放大`
+    - `benefit_scene_or_compare`：`颜色强化 + 核心利益点 + 对比/场景二选一`
+    - `closing_selling_point`：`优质场景 + 核心卖点 + 1-2 个辅助卖点`
   - 同步返回并落库：
     - `platform_rule_pack`
     - `platform_overlay`
@@ -275,12 +287,18 @@
       - `copy_blocks`
       - `raw_prompt_override`
       - `applied_preset_id`
+      - `visual_structure`
+      - `copy_density`
+      - `proof_mode`
+      - `scene_mode`
+      - `emphasis_style`
       - `platform_overlay`
       - `platform_rule_pack`
       - `reference_image_ids`
       - `reference_slots`
       - `must_keep`
       - `must_avoid`
+      - `slot_guardrails`
       - `background_rule`
       - `composition_rule`
       - `lighting_rule`
@@ -317,8 +335,16 @@
     - `background_mode`
     - `text_policy`
     - `composition_hint`
+    - `visual_structure`
+    - `copy_density`
+    - `proof_mode`
+    - `scene_mode`
+    - `emphasis_style`
     - `blocks`
     - `strategy_fields_used`
+    - `prompt_sections_used`
+    - `copy_policy_applied`
+    - `slot_guardrails`
     - `reference_image_ids`
     - `reference_slots`
     - `reference_images_used`
@@ -333,6 +359,18 @@
     - `platform_overlay`
     - `resolved_constraints`
     - `final_prompt`
+  - `copy_policy_applied` 当前用于解释单图图上 copy 收口：
+    - `headline_max_chars`
+    - `supporting_max_lines`
+    - `benefit_point_max`
+    - `proof_tag_max`
+    - `summary`
+    - `degraded_to_minimal_copy`
+    - `selected_visible_copy_count`
+  - 当前实现补充：
+    - `copy_blocks` 在进入 `final_prompt` 前会经过可见文案质量门禁，默认过滤占位词、低信息短句和假参数短语，例如 `核心功能突出/视觉清爽/参数A 100unit`
+    - 若没有足够高质量的可见文案，`copy_policy_applied.degraded_to_minimal_copy=true`，单图会自动退化为少文案或仅保留产品识别标题
+    - `must_keep/must_avoid/resolved_constraints` 会先做字符拆分修复与脏文本去噪，避免出现 `整；体；圆；柱...` 这类污染 prompt 的异常字符串
   - `blocks` 当前固定为：
     - `goal`
     - `subject`
@@ -594,6 +632,7 @@ data: {"event":"job_succeeded","job_id":"..."}
   - 刷新令牌使用 `HttpOnly` Cookie：`user_refresh_token`
   - `dev` 环境默认允许 `ALLOW_DEV_AUTH_BYPASS=true`，未带 token 时回落到固定开发用户；联调前建议关闭
   - `/platforms`、`/healthz`、`/openapi.json` 保持公开，其余 `/api/v2` 默认要求登录或 dev bypass
+  - 若前后端跨域，后端需将前端 Origin 加入 `CORS_ALLOW_ORIGINS`，且浏览器请求需携带 `credentials: "include"`
 - 账户中心接口：
   - `GET /account/overview`
   - `GET|PUT /account/profile`
@@ -626,6 +665,7 @@ data: {"event":"job_succeeded","job_id":"..."}
   - `POST /auth/refresh`
   - `POST /auth/logout`
   - `GET /auth/me`
+- 若后台前端和后端跨域，同样受 `CORS_ALLOW_ORIGINS` allowlist 控制
 - 后台管理对象：
   - `GET /dashboard/summary`
   - `GET /sessions` / `GET /sessions/{id}`
@@ -651,6 +691,7 @@ data: {"event":"job_succeeded","job_id":"..."}
 7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
 8. `adminfront/` 已提供最小可用后台，更偏运营/排障工作台，不是完整设计系统化的正式 B 端产品。
 9. 当前已实现浏览器直传对象存储、`GET /account/pricing`、生成扣费与失败退款；仍未接真实支付、邮箱验证、找回密码和设备会话管理。
+10. 当前 CORS 为显式 allowlist 模式，不支持 `*`；跨域联调前必须先在后端配置实际前端 Origin。
 
 ## 5. 联调最短路径
 1. `POST /sessions`

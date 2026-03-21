@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.services.copy_normalization import (
+    is_low_information_copy_text,
+    is_placeholder_copy_text,
+    normalize_phrase_list,
+    repair_broken_text,
+)
 from app.services.platforms import PlatformProfile, get_platform_or_none
 from app.services.rule_packs import load_published_rule_pack_config
 
 
 DEFAULT_MAIN_RULE_PACK_ID = "default_main_gallery_v2"
 ALIBABA_MAIN_RULE_PACK_ID = "alibaba_core_5_slot"
+VISIBLE_COPY_GENERIC_BLACKLIST = {
+    "高效体验，稳定品质",
+    "高效体验稳定品质",
+}
 
 MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
     DEFAULT_MAIN_RULE_PACK_ID: [
@@ -26,6 +37,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "minimal",
             "layout_policy": "single_subject",
             "proof_policy": "soft",
+            "visual_structure": "产品主体 + 轻背景层次",
+            "copy_density": "none",
+            "proof_mode": "soft_optional",
+            "scene_mode": "light_scene_optional",
+            "emphasis_style": "single_subject_focus",
             "requires_white_bg_validation": False,
             "reference_role_hint": "hero",
             "candidate_expression_modes": ["clean_conversion_kv", "floating_focus", "lifestyle_kv"],
@@ -43,6 +59,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "none",
             "layout_policy": "single_subject",
             "proof_policy": "none",
+            "visual_structure": "单主体完整展示",
+            "copy_density": "none",
+            "proof_mode": "none",
+            "scene_mode": "scene_disallowed",
+            "emphasis_style": "catalog_clean",
             "requires_white_bg_validation": True,
             "reference_role_hint": "white_bg",
             "candidate_expression_modes": ["pure_white_standard", "pure_white_shadow"],
@@ -60,6 +81,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "headline_optional",
             "layout_policy": "feature_focus",
             "proof_policy": "medium",
+            "visual_structure": "单卖点特写 + 功能辅助元素",
+            "copy_density": "headline_optional",
+            "proof_mode": "feature_support",
+            "scene_mode": "minimal_scene",
+            "emphasis_style": "feature_focus",
             "requires_white_bg_validation": False,
             "reference_role_hint": "selling_point",
             "candidate_expression_modes": ["single_feature_focus", "benefit_proof_card", "feature_matrix"],
@@ -77,6 +103,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "headline_optional",
             "layout_policy": "immersive_scene",
             "proof_policy": "soft",
+            "visual_structure": "真实场景 + 产品主体",
+            "copy_density": "headline_optional",
+            "proof_mode": "soft_optional",
+            "scene_mode": "immersive_scene",
+            "emphasis_style": "scene_immersion",
             "requires_white_bg_validation": False,
             "reference_role_hint": "scene",
             "candidate_expression_modes": ["immersive_scene", "benefit_scene", "comparison_scene"],
@@ -94,6 +125,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "headline_optional",
             "layout_policy": "macro_closeup",
             "proof_policy": "medium",
+            "visual_structure": "局部特写 + 材质细节",
+            "copy_density": "headline_optional",
+            "proof_mode": "detail_support",
+            "scene_mode": "scene_disallowed",
+            "emphasis_style": "macro_detail",
             "requires_white_bg_validation": False,
             "reference_role_hint": "detail",
             "candidate_expression_modes": ["macro_texture_closeup", "structure_cutaway", "material_process_focus"],
@@ -113,6 +149,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "headline_plus_supporting",
             "layout_policy": "headline_first",
             "proof_policy": "soft",
+            "visual_structure": "标题区 + 产品主体 + 背景结构 + 底部利益点",
+            "copy_density": "headline_plus_benefits",
+            "proof_mode": "soft_optional",
+            "scene_mode": "light_scene_optional",
+            "emphasis_style": "headline_first",
             "requires_white_bg_validation": False,
             "reference_role_hint": "hero",
             "candidate_expression_modes": ["click_through_headline", "benefit_kv", "problem_solution_kv"],
@@ -130,6 +171,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "headline_plus_supporting",
             "layout_policy": "reason_card",
             "proof_policy": "medium",
+            "visual_structure": "多理由卡 / 多场景小分镜 / 机制说明",
+            "copy_density": "multi_reason_short_copy",
+            "proof_mode": "reason_card",
+            "scene_mode": "scene_disallowed",
+            "emphasis_style": "reason_cards",
             "requires_white_bg_validation": False,
             "reference_role_hint": "selling_point",
             "candidate_expression_modes": ["reason_card", "mechanism_card", "what_you_get"],
@@ -147,6 +193,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "headline_plus_proof",
             "layout_policy": "proof_card",
             "proof_policy": "hard",
+            "visual_structure": "参数佐证 / 证书资质 / 屏幕特写 / 局部结构放大",
+            "copy_density": "proof_tag_dense",
+            "proof_mode": "parameter_or_cert",
+            "scene_mode": "scene_disallowed",
+            "emphasis_style": "proof_stack",
             "requires_white_bg_validation": False,
             "reference_role_hint": "selling_point",
             "candidate_expression_modes": ["certificate_proof", "lab_proof", "spec_proof"],
@@ -164,6 +215,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "benefit_copy",
             "layout_policy": "scene_or_compare",
             "proof_policy": "medium",
+            "visual_structure": "颜色强化 + 核心利益点 + 对比/场景二选一",
+            "copy_density": "benefit_short_copy",
+            "proof_mode": "benefit_supporting",
+            "scene_mode": "real_scene_or_compare",
+            "emphasis_style": "color_block_focus",
             "requires_white_bg_validation": False,
             "reference_role_hint": "scene",
             "candidate_expression_modes": ["real_scene_benefit", "compare_superiority", "coverage_scene"],
@@ -181,6 +237,11 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "copy_policy": "matrix_copy",
             "layout_policy": "matrix_or_summary",
             "proof_policy": "medium",
+            "visual_structure": "优质场景 + 核心卖点 + 1-2 个辅助卖点",
+            "copy_density": "summary_short_copy",
+            "proof_mode": "summary_supporting",
+            "scene_mode": "premium_scene_required",
+            "emphasis_style": "summary_closure",
             "requires_white_bg_validation": False,
             "reference_role_hint": "detail",
             "candidate_expression_modes": ["selling_point_matrix", "parameter_highlight", "tail_summary"],
@@ -444,12 +505,19 @@ def get_main_gallery_slot_blueprints(platform_id: str, *, db: Session | None = N
         platform_id=platform_id,
         db=db,
     )
-    slot_blueprints = (config or {}).get("slot_plan") or MAIN_GALLERY_SLOT_PRESETS.get(
+    seed_slot_blueprints = MAIN_GALLERY_SLOT_PRESETS.get(
         rule_pack_id,
         MAIN_GALLERY_SLOT_PRESETS[DEFAULT_MAIN_RULE_PACK_ID],
     )
+    seed_by_slot = {
+        str(item.get("slot_id") or item.get("compat_role") or ""): item
+        for item in seed_slot_blueprints
+        if str(item.get("slot_id") or item.get("compat_role") or "")
+    }
+    slot_blueprints = (config or {}).get("slot_plan") or seed_slot_blueprints
     return [
         {
+            **seed_by_slot.get(str(item.get("slot_id") or item.get("compat_role") or ""), {}),
             **item,
             "platform_rule_pack": rule_pack.id if rule_pack is not None else rule_pack_id,
             "platform_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else rule_pack_id,
@@ -543,65 +611,116 @@ def build_copy_blocks(
 ) -> dict[str, Any]:
     product_name = _text(confirmed_copy.get("product_name"), "产品")
     headline = _text(confirmed_copy.get("headline"), product_name)
-    selling_points = _split_points(confirmed_copy.get("selling_points"))
-    usage_scenes = _split_points(confirmed_copy.get("usage_scenes"))
+    selling_points = _split_points(confirmed_copy.get("core_selling_points") or confirmed_copy.get("selling_points"))
+    usage_scenes = _split_points(confirmed_copy.get("hero_scene") or confirmed_copy.get("usage_scenes"))
     specs = _split_points(confirmed_copy.get("specs"))
+    product_advantages = _split_points(confirmed_copy.get("product_advantages"))
     key_parameters = _key_parameter_strings(confirmed_copy.get("key_parameters"))
     overlay = get_platform_overlay(platform_id)
     copy_language = overlay.get("copy_language", "zh")
-
-    hero_subheadline = selling_points[0] if selling_points else product_name
-    reason_lines = selling_points[:2] or specs[:2] or [hero_subheadline]
-    proof_lines = key_parameters[:3] or specs[:3] or selling_points[:2] or [hero_subheadline]
-    benefit_lines = usage_scenes[:2] or selling_points[:2] or [hero_subheadline]
-    closing_lines = (selling_points + proof_lines)[:4] or [headline]
-
     if copy_language == "en":
-        hero_subheadline = _to_brief_english(hero_subheadline)
-        reason_lines = [_to_brief_english(item) for item in reason_lines]
-        proof_lines = [_to_brief_english(item) for item in proof_lines]
-        benefit_lines = [_to_brief_english(item) for item in benefit_lines]
-        closing_lines = [_to_brief_english(item) for item in closing_lines]
         headline = _to_brief_english(headline)
         product_name = _to_brief_english(product_name)
+        selling_points = [_to_brief_english(item) for item in selling_points]
+        usage_scenes = [_to_brief_english(item) for item in usage_scenes]
+        specs = [_to_brief_english(item) for item in specs]
+        product_advantages = [_to_brief_english(item) for item in product_advantages]
+        key_parameters = [_to_brief_english(item) for item in key_parameters]
+
+    headline_candidates = _select_visible_copy_candidates(
+        [headline],
+        product_name=product_name,
+        allow_product_name_only=False,
+        allow_placeholder_parameters=False,
+    )
+    benefit_candidates = _select_visible_copy_candidates(
+        selling_points + product_advantages,
+        product_name=product_name,
+        allow_product_name_only=False,
+        allow_placeholder_parameters=False,
+    )
+    scene_candidates = _select_visible_copy_candidates(
+        usage_scenes,
+        product_name=product_name,
+        allow_product_name_only=False,
+        allow_placeholder_parameters=False,
+    )
+    proof_candidates = _select_visible_copy_candidates(
+        key_parameters + specs,
+        product_name=product_name,
+        allow_product_name_only=False,
+        allow_placeholder_parameters=True,
+    )
+    product_name_candidates = _select_visible_copy_candidates(
+        [product_name],
+        product_name=product_name,
+        allow_product_name_only=True,
+        allow_placeholder_parameters=False,
+    )
+
+    hero_headline = _first_non_empty(headline_candidates, product_name_candidates, benefit_candidates)
+    hero_supporting = _pick_first_distinct(benefit_candidates, hero_headline)
+    hero_matrix = _take_distinct(benefit_candidates, exclude=[hero_headline, hero_supporting], max_items=2)
+
+    reason_headline = _first_non_empty(benefit_candidates, headline_candidates, product_name_candidates)
+    reason_supporting = _pick_first_distinct(benefit_candidates + proof_candidates, reason_headline)
+    reason_matrix = _take_distinct(benefit_candidates + proof_candidates, exclude=[reason_headline, reason_supporting], max_items=2)
+
+    proof_headline = _first_non_empty(proof_candidates, benefit_candidates, headline_candidates, product_name_candidates)
+    proof_supporting = _pick_first_distinct(benefit_candidates + headline_candidates, proof_headline)
+    proof_lines = _take_distinct(proof_candidates, exclude=[proof_headline, proof_supporting], max_items=3)
+
+    benefit_headline = _first_non_empty(benefit_candidates, scene_candidates, headline_candidates, product_name_candidates)
+    benefit_supporting = _pick_first_distinct(scene_candidates + benefit_candidates, benefit_headline)
+    benefit_matrix = _take_distinct(benefit_candidates + scene_candidates, exclude=[benefit_headline, benefit_supporting], max_items=2)
+
+    closing_headline = _first_non_empty(benefit_candidates, headline_candidates, product_name_candidates)
+    closing_scene_candidates = _select_closing_scene_candidates(scene_candidates)
+    closing_supporting = _pick_first_distinct(benefit_candidates + closing_scene_candidates, closing_headline)
+    closing_proof = _take_distinct(proof_candidates, exclude=[closing_headline, closing_supporting], max_items=2)
+    closing_matrix = _take_distinct(
+        benefit_candidates + proof_candidates + closing_scene_candidates,
+        exclude=[closing_headline, closing_supporting, *closing_proof],
+        max_items=2,
+    )
 
     slot_id = str(slot_blueprint["slot_id"])
     if slot_id in {"primary_kv", "hero"}:
-        return {
-            "headline": headline,
-            "supporting": hero_subheadline,
+        return _normalize_copy_blocks_for_slot(slot_id, {
+            "headline": hero_headline,
+            "supporting": hero_supporting,
             "proof_lines": [],
-            "matrix_lines": [],
-        }
+            "matrix_lines": hero_matrix,
+        })
     if slot_id in {"reason_why", "selling_point"}:
-        return {
-            "headline": reason_lines[0],
-            "supporting": reason_lines[1] if len(reason_lines) > 1 else hero_subheadline,
-            "proof_lines": proof_lines[:2],
-            "matrix_lines": [],
-        }
-    if slot_id in {"proof_authority", "detail"}:
-        return {
-            "headline": proof_lines[0],
-            "supporting": proof_lines[1] if len(proof_lines) > 1 else hero_subheadline,
-            "proof_lines": proof_lines[:3],
-            "matrix_lines": [],
-        }
-    if slot_id in {"benefit_scene_or_compare", "scene"}:
-        return {
-            "headline": benefit_lines[0],
-            "supporting": benefit_lines[1] if len(benefit_lines) > 1 else hero_subheadline,
+        return _normalize_copy_blocks_for_slot(slot_id, {
+            "headline": reason_headline,
+            "supporting": reason_supporting,
             "proof_lines": [],
-            "matrix_lines": benefit_lines[:3],
-        }
+            "matrix_lines": reason_matrix,
+        })
+    if slot_id in {"proof_authority", "detail"}:
+        return _normalize_copy_blocks_for_slot(slot_id, {
+            "headline": proof_headline,
+            "supporting": proof_supporting,
+            "proof_lines": proof_lines,
+            "matrix_lines": [],
+        })
+    if slot_id in {"benefit_scene_or_compare", "scene"}:
+        return _normalize_copy_blocks_for_slot(slot_id, {
+            "headline": benefit_headline,
+            "supporting": benefit_supporting,
+            "proof_lines": [],
+            "matrix_lines": benefit_matrix,
+        })
     if slot_id in {"closing_selling_point", "white_bg"}:
-        return {
-            "headline": headline if slot_id == "closing_selling_point" else "",
-            "supporting": hero_subheadline if slot_id == "closing_selling_point" else "",
-            "proof_lines": proof_lines[:2] if slot_id == "closing_selling_point" else [],
-            "matrix_lines": closing_lines if slot_id == "closing_selling_point" else [],
-        }
-    return {"headline": headline, "supporting": hero_subheadline, "proof_lines": [], "matrix_lines": []}
+        return _normalize_copy_blocks_for_slot(slot_id, {
+            "headline": closing_headline if slot_id == "closing_selling_point" else "",
+            "supporting": closing_supporting if slot_id == "closing_selling_point" else "",
+            "proof_lines": closing_proof if slot_id == "closing_selling_point" else [],
+            "matrix_lines": closing_matrix if slot_id == "closing_selling_point" else [],
+        })
+    return _normalize_copy_blocks_for_slot(slot_id, {"headline": hero_headline, "supporting": hero_supporting, "proof_lines": [], "matrix_lines": []})
 
 
 def resolve_slot_preferences(
@@ -669,17 +788,7 @@ def platform_profile(platform_id: str) -> PlatformProfile | None:
 
 
 def _split_points(value: Any) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, list):
-        points: list[str] = []
-        for item in value:
-            points.extend(_split_points(item))
-        return points
-    text = str(value)
-    for separator in ("｜", "|", "；", ";", "、", "\n", ",", "，", "/"):
-        text = text.replace(separator, "\n")
-    return [item.strip() for item in text.splitlines() if item.strip()]
+    return normalize_phrase_list(value)
 
 
 def _key_parameter_strings(value: Any) -> list[str]:
@@ -722,3 +831,145 @@ def _to_brief_english(text: str) -> str:
     if any(char.isascii() and char.isalpha() for char in stripped):
         return stripped[:80]
     return stripped[:40]
+
+
+def _normalize_copy_blocks_for_slot(slot_id: str, blocks: dict[str, Any]) -> dict[str, Any]:
+    policy = {
+        "primary_kv": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 0, "matrix_max": 2},
+        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 0, "matrix_max": 2},
+        "proof_authority": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 3, "matrix_max": 0},
+        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 0, "matrix_max": 2},
+        "closing_selling_point": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 2, "matrix_max": 2},
+    }.get(slot_id, {"headline_cn": 18, "headline_ascii": 32, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 2, "matrix_max": 2})
+
+    headline = _clip_copy_text(blocks.get("headline"), cn_limit=policy["headline_cn"], ascii_limit=policy["headline_ascii"])
+    supporting = _clip_copy_text(blocks.get("supporting"), cn_limit=policy["supporting_cn"], ascii_limit=policy["supporting_ascii"])
+    if _copy_signature(headline) == _copy_signature(supporting):
+        supporting = ""
+    proof_lines = _clip_copy_lines(blocks.get("proof_lines"), max_items=policy["proof_max"], exclude=[headline, supporting])
+    matrix_lines = _clip_copy_lines(blocks.get("matrix_lines"), max_items=policy["matrix_max"], exclude=[headline, supporting, *proof_lines])
+    return {
+        "headline": headline,
+        "supporting": supporting,
+        "proof_lines": proof_lines,
+        "matrix_lines": matrix_lines,
+    }
+
+
+def _clip_copy_lines(value: Any, *, max_items: int, exclude: list[str] | None = None) -> list[str]:
+    if max_items <= 0 or not isinstance(value, list):
+        return []
+    lines = [_clip_copy_text(item, cn_limit=16, ascii_limit=28) for item in value]
+    excluded = {_copy_signature(item) for item in (exclude or []) if _copy_signature(item)}
+    deduped = [item for item in _dedupe_preserve_order(lines) if item and _copy_signature(item) not in excluded]
+    return deduped[:max_items]
+
+
+def _clip_copy_text(value: Any, *, cn_limit: int, ascii_limit: int) -> str:
+    cleaned = repair_broken_text(value)
+    if not cleaned:
+        return ""
+    if cleaned in VISIBLE_COPY_GENERIC_BLACKLIST:
+        return ""
+    if is_placeholder_copy_text(cleaned):
+        return ""
+    cleaned = re.split(r"[。！？；;|｜/\n]", cleaned, maxsplit=1)[0].strip()
+    limit = ascii_limit if _looks_mostly_ascii(cleaned) else cn_limit
+    if len(cleaned) > limit:
+        cleaned = cleaned[:limit].rstrip(" ，,。；;:：-")
+    return cleaned
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in values:
+        signature = _copy_signature(item)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(item)
+    return deduped
+
+
+def _looks_mostly_ascii(value: str) -> bool:
+    if not value:
+        return False
+    ascii_count = sum(1 for char in value if char.isascii())
+    return ascii_count >= max(4, len(value) // 2)
+
+
+def _select_visible_copy_candidates(
+    values: list[str],
+    *,
+    product_name: str,
+    allow_product_name_only: bool,
+    allow_placeholder_parameters: bool,
+) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = _text(value)
+        if not cleaned:
+            continue
+        if cleaned in VISIBLE_COPY_GENERIC_BLACKLIST:
+            continue
+        if is_placeholder_copy_text(cleaned) and not allow_placeholder_parameters:
+            continue
+        if is_low_information_copy_text(
+            cleaned,
+            product_name=product_name,
+            allow_product_name_only=allow_product_name_only,
+            allow_placeholder_copy=allow_placeholder_parameters,
+        ):
+            continue
+        signature = _copy_signature(cleaned)
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        candidates.append(cleaned)
+    return candidates
+
+
+def _first_non_empty(*candidate_groups: list[str]) -> str:
+    for group in candidate_groups:
+        for item in group:
+            if item:
+                return item
+    return ""
+
+
+def _pick_first_distinct(candidates: list[str], current: str) -> str:
+    current_signature = _copy_signature(current)
+    for item in candidates:
+        if _copy_signature(item) and _copy_signature(item) != current_signature:
+            return item
+    return ""
+
+
+def _take_distinct(candidates: list[str], *, exclude: list[str], max_items: int) -> list[str]:
+    excluded = {_copy_signature(item) for item in exclude if _copy_signature(item)}
+    output: list[str] = []
+    seen = set(excluded)
+    for item in candidates:
+        signature = _copy_signature(item)
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        output.append(item)
+        if len(output) >= max_items:
+            break
+    return output
+
+
+def _select_closing_scene_candidates(candidates: list[str]) -> list[str]:
+    selected: list[str] = []
+    for item in candidates:
+        if len(item) <= 3 and not any(char.isdigit() for char in item):
+            continue
+        selected.append(item)
+    return selected
+
+
+def _copy_signature(value: str) -> str:
+    return re.sub(r"[\W_]+", "", value).lower()

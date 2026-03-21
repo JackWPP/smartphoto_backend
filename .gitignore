@@ -67,3 +67,7 @@ docs/甲方框架手册_项目对齐说明_对外版.pdf
 docs/项目对齐说明.pdf
 /doctemp
 node_modules/
+docs/API_联调指南.md
+docs/主图结构剖析.pdf
+docs/生图Agent协作逻辑.md
+runtime/redis/dump.rdb

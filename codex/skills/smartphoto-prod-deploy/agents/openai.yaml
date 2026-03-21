@@ -1,0 +1,4 @@
+interface:
+  display_name: "SmartPhoto Prod Deploy"
+  short_description: "Deploy and update SmartPhoto backend"
+  default_prompt: "Use $smartphoto-prod-deploy to deploy, update, rollback, or troubleshoot the SmartPhoto Backend production stack on a single server."

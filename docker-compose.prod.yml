@@ -1,0 +1,87 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: smartphoto-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-smartphoto}
+      POSTGRES_USER: ${POSTGRES_USER:-smartphoto}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smartphoto}
+    volumes:
+      - ./runtime/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smartphoto} -d ${POSTGRES_DB:-smartphoto}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: smartphoto-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./runtime/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-http://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.tuna.tsinghua.edu.cn}
+    image: smartphoto-backend:${APP_IMAGE_TAG:-latest}
+    container_name: smartphoto-api
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    command: ["bash", "scripts/docker-api.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./runtime/storage:/app/storage
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    image: smartphoto-backend:${APP_IMAGE_TAG:-latest}
+    container_name: smartphoto-worker
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    command: ["bash", "scripts/docker-worker.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./runtime/storage:/app/storage
+
+  migrate:
+    image: smartphoto-backend:${APP_IMAGE_TAG:-latest}
+    container_name: smartphoto-migrate
+    env_file:
+      - .env.prod
+    command: ["bash", "scripts/docker-migrate.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./runtime/storage:/app/storage
+    profiles: ["tools"]
