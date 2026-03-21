@@ -115,13 +115,17 @@ cp .env.prod.example .env.prod
 - `ALLOW_DEV_AUTH_BYPASS=false`
 - `USER_JWT_SECRET` / `ADMIN_JWT_SECRET`
 - `WHATAI_API_KEY`
+- `WHATAI_CHAT_MODEL` / `WHATAI_ANALYSIS_MODEL` / `WHATAI_PLANNER_MODEL` / `WHATAI_IMAGE_MODEL` / `WHATAI_PARAMETER_MODEL`
 - 全部 `S3_*`
 - `POSTGRES_PASSWORD`
 - `DATABASE_URL`
+- `PIP_INDEX_URL`（国内环境默认已指向清华镜像，可按需改）
+- `PIP_TRUSTED_HOST`（若继续用 HTTP 镜像地址，需保留为 `mirrors.tuna.tsinghua.edu.cn`）
 
 说明：
 - 生产默认推荐 `STORAGE_BACKEND=s3`
 - `ADMIN_DATABASE_URL` 默认继续使用 `sqlite:///./storage/admin.sqlite3`，但会随 `./runtime/storage` 持久化
+- 生产示例文件不再替你预填 WhatAI 模型，直接复用你当前已验证过的模型配置
 - 生产不要继续使用开发态默认 secret
 
 ### 2. 首次启动
