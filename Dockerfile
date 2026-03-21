@@ -4,18 +4,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
+ARG PIP_INDEX_URL=http://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+ARG PIP_TRUSTED_HOST=mirrors.tuna.tsinghua.edu.cn
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
 COPY pyproject.toml Readme.md alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
 COPY scripts ./scripts
 
-RUN pip install --upgrade pip \
+RUN python -m pip install --upgrade pip \
+    && pip config set global.index-url "${PIP_INDEX_URL}" \
+    && pip config set global.trusted-host "${PIP_TRUSTED_HOST}" \
     && pip install .
 
 EXPOSE 8000

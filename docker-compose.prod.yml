@@ -32,6 +32,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-http://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.tuna.tsinghua.edu.cn}
     image: smartphoto-backend:${APP_IMAGE_TAG:-latest}
     container_name: smartphoto-api
     restart: unless-stopped
