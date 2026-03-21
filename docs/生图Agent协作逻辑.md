@@ -110,17 +110,24 @@
   - `blocks.selling_points`
   - `blocks.constraints`
   - `blocks.instruction`
+- 主图 visible copy 质量门禁：
+  - `copy_blocks` 在进入 `final_prompt` 前会过滤占位词、弱信息短句和假参数占位，不再把 `核心功能突出/视觉清爽/参数A 100unit` 直接透传到单图 prompt
+  - 当高质量事实不足时，单图允许退化为少文案或仅保留产品识别标题，不强行堆砌泛口号
+  - `must_keep/must_avoid` 与 planner 自由文本会先做字符拆分修复，避免 `整；体；圆；柱...` 这类异常文本继续污染 prompt
+- Analysis fallback 约束：
+  - `analysis_snapshot.analysis_source=fallback` 时，fallback copy 草稿不会再自动写入 `confirmed_copy`
+  - fallback 分析仍保留 `reference_summary` 等弱参考信息，供策略和保真约束使用，但默认不作为主图可见文案来源
 - 一期槽位约束：
   - `hero`：主体与第一卖点优先，背景简洁，不做海报拼贴
   - `white_bg`：独立白底分支，纯白无缝背景，单产品完整展示，无人物无道具无场景
   - `selling_point`：只聚焦单一卖点，不依赖图中文字
   - `scene`：强调真实使用场景，环境不抢主体
   - `detail`：强调局部结构、材质和纹理
-  - `primary_kv`：阿里首图，大字利益点 + 小字 supporting，产品主体约占半屏
-  - `reason_why`：理由卡/机制卡/能力摘要，不做纯白无信息背景
-  - `proof_authority`：最强卖点 + 认证/证书/参数/实验等证明性元素
-  - `benefit_scene_or_compare`：消费者利益场景或对比优势
-  - `closing_selling_point`：尾屏总结、卖点矩阵或参数亮点收束
+  - `primary_kv`：阿里首图改为 `标题区 + 产品主体 + 背景结构 + 底部利益点`；主体约占半屏，底部利益点最多 2 个
+  - `reason_why`：理由卡/机制卡/能力摘要；至少表达 2 个不同理由点，不允许重复角度小图凑数
+  - `proof_authority`：最强卖点 + 参数/证书/面板特写/结构放大；没有真实证书素材时不伪造权威认证
+  - `benefit_scene_or_compare`：消费者利益场景或对比优势；必须有颜色/光区强化视觉重点，不能做平淡白底陈列图
+  - `closing_selling_point`：优质场景 + 核心卖点 + 1-2 个辅助卖点；承担尾屏总结，不是简单换背景重拍
 - 白底分支额外规则：
   - 生成后执行轻量白底校验：边缘白色占比、外环白色占比、主体连通域数量
   - 白底校验不再依赖 `role == white_bg`，而依赖 `requires_white_bg_validation=true`
@@ -272,6 +279,8 @@ sequenceDiagram
   - 不请求上游生图
 - 返回重点：
   - `prompts[]`：当前预览 prompt
+    - 当前会额外回传 `visual_structure/copy_density/proof_mode/scene_mode/emphasis_style`
+    - 当前会额外回传 `prompt_sections_used/copy_policy_applied/slot_guardrails`
   - `reference_manifest[]`：当前可用参考图清单
   - `latest_assets[]`：最近真实出图时保存的 prompt 快照与执行快照
 

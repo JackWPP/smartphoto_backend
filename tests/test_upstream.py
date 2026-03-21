@@ -7,6 +7,8 @@ from PIL import Image
 
 from app.core.errors import AppError
 from app.services.copy_normalization import normalize_key_parameters
+from app.services.main_gallery_rules import build_copy_blocks, get_main_gallery_slot_blueprints
+from app.services.pipeline import _apply_analysis_defaults_to_copy
 from app.services.reference_images import LoadedReferenceImage, select_reference_images_for_role
 from app.services.strategy import build_strategy_preview
 from app.services.upstream import WhataiClient
@@ -84,6 +86,185 @@ def test_white_bg_prompt_has_strict_background_constraints():
     assert "纯白无缝背景" in prompt["blocks"]["background"]
     assert "不要出现人物" in prompt["blocks"]["constraints"]
     assert "不要把白底图做成海报图或场景图" in prompt["blocks"]["constraints"]
+
+
+def test_compose_prompt_does_not_embed_group_output_count_and_normalizes_string_constraints():
+    from app.services.prompts import compose_prompt
+
+    strategy_preview = build_strategy_preview(
+        {
+            "product_name": "空气净化器",
+            "headline": "高效净化",
+            "selling_points": "低噪音｜母婴可用",
+            "usage_scenes": "客厅｜卧室",
+            "specs": "CADR 500m3/h",
+            "style_choice": "现代简约",
+            "style_custom": "",
+        },
+        "1688",
+    )
+    strategy_preview["prompt_plan"][0]["must_keep"] = "整体圆柱形结构"
+    strategy_preview["prompt_plan"][0]["must_avoid"] = "不要出现人物和复杂场景"
+
+    prompt = compose_prompt(
+        {
+            "product_name": "空气净化器",
+            "headline": "高效净化",
+            "selling_points": "低噪音｜母婴可用",
+            "usage_scenes": "客厅｜卧室",
+            "specs": "CADR 500m3/h",
+            "style_choice": "现代简约",
+            "style_custom": "",
+        },
+        strategy_preview,
+        "primary_kv",
+    )
+
+    assert "输出 5 张主图" not in prompt["final_prompt"]
+    assert "整；体；圆；柱" not in prompt["final_prompt"]
+    assert "整体圆柱形结构" in prompt["final_prompt"]
+
+
+def test_alibaba_prompt_exposes_slot_structure_and_copy_policy():
+    from app.services.prompts import compose_prompt
+
+    strategy_preview = build_strategy_preview(
+        {
+            "product_name": "空气净化器",
+            "headline": "净化看得见",
+            "core_selling_points": ["低噪音", "母婴可用", "除甲醛"],
+            "hero_scene": "卧室\n客厅",
+            "product_advantages": ["全屋净化", "静音睡眠"],
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "style_choice": "现代简约",
+            "style_custom": "",
+        },
+        "1688",
+    )
+
+    prompt = compose_prompt(
+        {
+            "product_name": "空气净化器",
+            "headline": "净化看得见",
+            "core_selling_points": ["低噪音", "母婴可用", "除甲醛"],
+            "hero_scene": "卧室\n客厅",
+            "product_advantages": ["全屋净化", "静音睡眠"],
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "style_choice": "现代简约",
+            "style_custom": "",
+        },
+        strategy_preview,
+        "primary_kv",
+    )
+
+    assert prompt["visual_structure"] == "标题区 + 产品主体 + 背景结构 + 底部利益点"
+    assert prompt["copy_density"] == "headline_plus_benefits"
+    assert prompt["emphasis_style"] == "headline_first"
+    assert prompt["copy_policy_applied"]["headline_max_chars"] == 16
+    assert "slot_guardrails" in prompt["prompt_sections_used"]
+    assert "标题区 + 产品主体 + 背景结构 + 底部利益点" in prompt["blocks"]["composition"]
+    assert prompt["slot_guardrails"]
+
+
+def test_proof_authority_prompt_prefers_proof_elements_and_blocks_fake_certificates():
+    from app.services.prompts import compose_prompt
+
+    strategy_preview = build_strategy_preview(
+        {
+            "product_name": "空气净化器",
+            "headline": "净化看得见",
+            "core_selling_points": ["HEPA 过滤", "低噪音"],
+            "hero_scene": "卧室",
+            "product_advantages": ["更安静", "更稳定"],
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "style_choice": "现代简约",
+            "style_custom": "",
+        },
+        "1688",
+    )
+
+    prompt = compose_prompt(
+        {
+            "product_name": "空气净化器",
+            "headline": "净化看得见",
+            "core_selling_points": ["HEPA 过滤", "低噪音"],
+            "hero_scene": "卧室",
+            "product_advantages": ["更安静", "更稳定"],
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "style_choice": "现代简约",
+            "style_custom": "",
+        },
+        strategy_preview,
+        "proof_authority",
+    )
+
+    assert prompt["proof_mode"] == "parameter_or_cert"
+    assert "参数、证书、面板特写或结构放大" in prompt["blocks"]["background"]
+    assert "不要堆砌虚假证书" in prompt["blocks"]["constraints"]
+
+
+def test_copy_blocks_to_text_truncates_long_paragraph_to_brief_copy():
+    from app.services.prompts import _copy_blocks_to_text
+
+    text = _copy_blocks_to_text(
+        {
+            "headline": "这款现代简约风格的白色空气净化器，采用优质材料打造，设计轻巧便携。",
+            "supporting": "能有效净化空气，提升居家环境质量。内置多档风速和定时功能。",
+            "proof_lines": ["CADR 500m3/h", "母婴可用"],
+        }
+    )
+
+    assert "采用优质材料打造" not in text
+    assert "内置多档风速和定时功能" not in text
+    assert "这款现代简约风格的白色空气净化器" in text
+
+
+def test_build_copy_blocks_filters_placeholder_and_low_signal_copy_for_alibaba_slots():
+    primary_slot = next(item for item in get_main_gallery_slot_blueprints("1688") if item["slot_id"] == "primary_kv")
+    closing_slot = next(item for item in get_main_gallery_slot_blueprints("1688") if item["slot_id"] == "closing_selling_point")
+
+    confirmed_copy = {
+        "product_name": "空气净化器",
+        "headline": "这款现代简约风格的白色空气净化器",
+        "core_selling_points": ["核心功能突出", "视觉清爽"],
+        "hero_scene": "客厅",
+        "product_advantages": ["核心功能突出"],
+        "key_parameters": [{"label": "参数A", "value": "100", "unit": "unit"}],
+        "specs": "参数A 100unit",
+    }
+
+    primary_blocks = build_copy_blocks(
+        platform_id="1688",
+        slot_blueprint=primary_slot,
+        confirmed_copy=confirmed_copy,
+        expression_mode="click_through_headline",
+    )
+    closing_blocks = build_copy_blocks(
+        platform_id="1688",
+        slot_blueprint=closing_slot,
+        confirmed_copy=confirmed_copy,
+        expression_mode="tail_summary",
+    )
+
+    assert primary_blocks["headline"] == "空气净化器"
+    assert primary_blocks["supporting"] == ""
+    assert primary_blocks["matrix_lines"] == []
+    assert closing_blocks["headline"] == "空气净化器"
+    assert closing_blocks["proof_lines"] == []
+    assert closing_blocks["matrix_lines"] == []
+
+
+def test_fallback_analysis_does_not_auto_fill_placeholder_copy_defaults():
+    client = WhataiClient()
+    snapshot = client._fake_analysis("temu")
+
+    normalized = _apply_analysis_defaults_to_copy({}, snapshot)
+
+    assert normalized["product_name"] == ""
+    assert normalized["headline"] == ""
+    assert normalized["core_selling_points"] == []
+    assert normalized["key_parameters"] == []
+    assert normalized["style_choice"] == ""
 
 
 def test_extract_text_supports_gemini_response():

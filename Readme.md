@@ -75,6 +75,7 @@ cp .env.example .env
 # [可选] 用户鉴权相关：
 # USER_JWT_SECRET=change-me
 # ALLOW_DEV_AUTH_BYPASS=true
+# CORS_ALLOW_ORIGINS=http://localhost:5173
 ```
 
 ### 4. 数据库自动化迁移
@@ -99,6 +100,62 @@ cd /home/wppjkw/smartphoto_backend
 ./scripts/dev-worker.sh
 ```
 
+## 生产部署（单机 Docker Compose）
+
+适用于“单机 Linux 服务器 + Docker Compose + Git tag 发布”的首发方案。
+
+### 1. 准备生产配置
+```bash
+cp .env.prod.example .env.prod
+```
+
+必须至少改这些值：
+- `PUBLIC_BASE_URL=http://<server_ip>:8000`
+- `CORS_ALLOW_ORIGINS=http://<frontend_host>:<port>`
+- `ALLOW_DEV_AUTH_BYPASS=false`
+- `USER_JWT_SECRET` / `ADMIN_JWT_SECRET`
+- `WHATAI_API_KEY`
+- `WHATAI_CHAT_MODEL` / `WHATAI_ANALYSIS_MODEL` / `WHATAI_PLANNER_MODEL` / `WHATAI_IMAGE_MODEL` / `WHATAI_PARAMETER_MODEL`
+- 全部 `S3_*`
+- `POSTGRES_PASSWORD`
+- `DATABASE_URL`
+- `PIP_INDEX_URL`（国内环境默认已指向清华镜像，可按需改）
+- `PIP_TRUSTED_HOST`（若继续用 HTTP 镜像地址，需保留为 `mirrors.tuna.tsinghua.edu.cn`）
+
+说明：
+- 生产默认推荐 `STORAGE_BACKEND=s3`
+- `ADMIN_DATABASE_URL` 默认继续使用 `sqlite:///./storage/admin.sqlite3`，但会随 `./runtime/storage` 持久化
+- 生产示例文件不再替你预填 WhatAI 模型，直接复用你当前已验证过的模型配置
+- 生产不要继续使用开发态默认 secret
+
+### 2. 首次启动
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml build api
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d postgres redis
+docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d api worker
+```
+
+### 3. 健康检查
+```bash
+curl -s http://127.0.0.1:8000/healthz
+docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+```
+
+### 4. 按 Git Tag 发布与回滚
+```bash
+# 发布指定 tag
+bash scripts/deploy-prod.sh v2026.03.19-01
+
+# 回滚到上一个 tag
+bash scripts/rollback-prod.sh v2026.03.18-02
+```
+
+说明：
+- 服务器应只部署固定 tag，不直接跑浮动分支
+- `deploy-prod.sh` 会做：`git fetch --tags -> git checkout <tag> -> build -> migrate -> up`
+- `rollback-prod.sh` 不会执行迁移；回滚前先确认旧版本能兼容当前数据库 schema
+
 ## API 联调与排障手册索引
 
 遇到对接和运行问题，可以在这几份设计文档中找到完整答案，本系统严格贯彻**以代码为第一解释权，文档和逻辑强对齐**的原则。
@@ -108,9 +165,9 @@ cd /home/wppjkw/smartphoto_backend
 - 🧠 [生图 Agent 工作流架构与长程协作逻辑分析](./docs/生图Agent协作逻辑.md)
 - ⚙️ [主线生图与调度系统技术深度解构报告](./docs/生图架构核心技术报告.md)
 - ⚡ [生图提速优化报告（客户版）](./docs/生图提速优化报告_客户版.md)
+- 🚢 [项目运行、本地报错诊断与生产部署排障手册](./docs/运行与排障手册.md)
 - 🤝 [甲方框架手册项目对齐说明（对外版）](./docs/甲方框架手册_项目对齐说明_对外版.md)
 - 🧾 [甲方框架手册项目对齐说明（内部评估版）](./docs/甲方框架手册_项目对齐说明_内部评估版.md)
-- 🛠 [项目运行、本地报错诊断与常见运维排障手册](./docs/运行与排障手册.md)
 - 📦 [开发规范约束与贡献者约定](./AGENTS.md)
 - 💾 `OpenAPI` JSON 规范定义可以直接在根目录脚本 `scripts/export_openapi.py` 导出。
 

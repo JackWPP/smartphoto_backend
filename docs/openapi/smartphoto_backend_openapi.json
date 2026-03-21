@@ -23241,6 +23241,86 @@
             "title": "Display Order",
             "description": "显示顺序。"
           },
+          "aspect_ratio": {
+            "type": "string",
+            "title": "Aspect Ratio",
+            "description": "当前槽位生成画幅比例。"
+          },
+          "background_mode": {
+            "type": "string",
+            "title": "Background Mode",
+            "description": "当前槽位背景模式。"
+          },
+          "text_policy": {
+            "type": "string",
+            "title": "Text Policy",
+            "description": "当前槽位文字策略。"
+          },
+          "composition_hint": {
+            "type": "string",
+            "title": "Composition Hint",
+            "description": "当前槽位构图提示。"
+          },
+          "visual_structure": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visual Structure",
+            "description": "当前槽位的视觉结构摘要。"
+          },
+          "copy_density": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Density",
+            "description": "当前槽位的文案密度策略。"
+          },
+          "proof_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proof Mode",
+            "description": "当前槽位的佐证模式。"
+          },
+          "scene_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scene Mode",
+            "description": "当前槽位的场景模式。"
+          },
+          "emphasis_style": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Emphasis Style",
+            "description": "当前槽位的视觉强调方式。"
+          },
           "final_prompt": {
             "type": "string",
             "title": "Final Prompt",
@@ -23290,6 +23370,28 @@
             "title": "Strategy Fields Used",
             "description": "本次 prompt 用到的策略字段路径列表。"
           },
+          "prompt_sections_used": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Prompt Sections Used",
+            "description": "本次 prompt 实际启用的结构段落。"
+          },
+          "copy_policy_applied": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Copy Policy Applied",
+            "description": "本次槽位套用的图上 copy 政策。"
+          },
+          "slot_guardrails": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Slot Guardrails",
+            "description": "当前槽位的核心 guardrails。"
+          },
           "reference_images_used": {
             "items": {
               "additionalProperties": true,
@@ -23298,6 +23400,38 @@
             "type": "array",
             "title": "Reference Images Used",
             "description": "本次 prompt 计划使用的参考图。"
+          },
+          "reference_image_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reference Image Ids",
+            "description": "本次 prompt 计划使用的参考图 ID。"
+          },
+          "reference_slots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reference Slots",
+            "description": "本次 prompt 计划使用的参考图槽位。"
+          },
+          "must_keep": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Must Keep",
+            "description": "本次 prompt 必须保留的重点。"
+          },
+          "must_avoid": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Must Avoid",
+            "description": "本次 prompt 必须避免的重点。"
           },
           "planner_source": {
             "anyOf": [
@@ -23310,6 +23444,18 @@
             ],
             "title": "Planner Source",
             "description": "prompt planner 来源，rule_based 或 llm。"
+          },
+          "planner_base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planner Base",
+            "description": "当前槽位的基础生成目标。"
           },
           "expression_mode": {
             "anyOf": [
@@ -23369,6 +23515,10 @@
         "required": [
           "role",
           "display_order",
+          "aspect_ratio",
+          "background_mode",
+          "text_policy",
+          "composition_hint",
           "final_prompt",
           "blocks",
           "strategy_fields_used"

@@ -123,11 +123,16 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
         "benefit_scene_or_compare",
         "closing_selling_point",
     ]
+    assert asset_plan[0]["visual_structure"] == "标题区 + 产品主体 + 背景结构 + 底部利益点"
+    assert asset_plan[0]["copy_density"] == "headline_plus_benefits"
+    assert asset_plan[2]["proof_mode"] == "parameter_or_cert"
+    assert asset_plan[3]["scene_mode"] == "real_scene_or_compare"
     assert asset_plan[2]["expression_mode"] == "certification_badge"
     assert asset_plan[2]["locked"] is True
     assert prompt_plan[0]["platform_overlay"]["overlay_id"] == "1688"
     assert "copy_blocks" in prompt_plan[0]
     assert "rule_modules_used" in prompt_plan[0]
+    assert prompt_plan[0]["slot_guardrails"]
 
     prompt_preview = client.post(
         f"/api/v2/sessions/{sid}/prompts/preview",
@@ -142,6 +147,11 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
     ]
     assert prompt_preview["prompts"][0]["expression_mode"]
     assert prompt_preview["prompts"][0]["platform_overlay"]["overlay_id"] == "1688"
+    assert prompt_preview["prompts"][0]["visual_structure"] == "标题区 + 产品主体 + 背景结构 + 底部利益点"
+    assert prompt_preview["prompts"][0]["copy_policy_applied"]["headline_max_chars"] == 16
+    assert prompt_preview["prompts"][0]["slot_guardrails"]
+    assert "slot_guardrails" in prompt_preview["prompts"][0]["prompt_sections_used"]
+    assert "不要堆砌虚假证书" in prompt_preview["prompts"][2]["blocks"]["constraints"]
 
 
 def test_alibaba_intl_generation_results_include_slot_metadata(client):
@@ -162,6 +172,45 @@ def test_alibaba_intl_generation_results_include_slot_metadata(client):
     }
     assert all(item["rule_pack_id"] == "alibaba_core_5_slot" for item in results["assets"])
     assert all(item["expression_mode"] for item in results["assets"])
+
+
+def test_alibaba_prompt_preview_filters_low_signal_copy_and_placeholder_parameters(client):
+    sid = create_ready_session(client, platform_id="1688")
+
+    copy_payload = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    copy_payload.update(
+        {
+            "product_name": "空气净化器",
+            "category": "家电",
+            "hero_scene": "客厅",
+            "core_selling_points": ["核心功能突出", "视觉清爽"],
+            "product_advantages": ["核心功能突出"],
+            "key_parameters": [{"key": "param_a", "label": "参数A", "value": "100", "unit": "unit"}],
+            "style_custom": "现代简约",
+            "headline": "这款现代简约风格的白色空气净化器",
+            "selling_points": "核心功能突出｜视觉清爽",
+            "specs": "参数A 100unit",
+        }
+    )
+    client.put(f"/api/v2/sessions/{sid}/copy", json=copy_payload)
+    client.post(f"/api/v2/sessions/{sid}/strategy/preview")
+
+    prompt_preview = client.post(
+        f"/api/v2/sessions/{sid}/prompts/preview",
+        json={"instruction": "", "include_latest_assets": False},
+    ).json()["data"]["prompts"]
+
+    primary = next(item for item in prompt_preview if item["slot_id"] == "primary_kv")
+    closing = next(item for item in prompt_preview if item["slot_id"] == "closing_selling_point")
+
+    assert "核心功能突出" not in primary["final_prompt"]
+    assert "视觉清爽" not in primary["final_prompt"]
+    assert "这款现代简约风格的白色空气净化器" not in primary["final_prompt"]
+    assert primary["copy_blocks"]["headline"] == "空气净化器"
+    assert primary["copy_policy_applied"]["degraded_to_minimal_copy"] is True
+    assert "参数A 100unit" not in closing["final_prompt"]
+    assert "参数A 100 unit" not in closing["final_prompt"]
+    assert closing["copy_blocks"]["proof_lines"] == []
 
 
 def test_generate_gallery_with_slot_ids_only_outputs_requested_slot(client):
