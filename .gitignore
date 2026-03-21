@@ -55,7 +55,6 @@ test_storage/
 .DS_Store
 Thumbs.db
 
-/frontend
 AGENTS.md
 SmartPhoto_Backend_SPEC_v2 (1).md
 /ref
