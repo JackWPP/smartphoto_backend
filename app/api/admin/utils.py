@@ -12,6 +12,7 @@ from app.models.rule_pack import RulePackModel
 from app.models.rule_pack_version import RulePackVersionModel
 from app.models.session import SessionModel
 from app.models.user import UserModel
+from app.models.user_notification import UserNotificationModel
 from app.services.storage import public_url_for
 
 
@@ -42,6 +43,8 @@ def serialize_job(job: JobModel) -> dict[str, Any]:
         "timing_snapshot": snapshot,
         "input_payload": job.input_payload,
         "result_payload": job.result_payload,
+        "retry_count": int(job.retry_count or 0),
+        "priority": int(job.priority or 0),
     }
 
 
@@ -205,4 +208,28 @@ def serialize_rule_pack(rule_pack: RulePackModel, version: RulePackVersionModel 
             if version is not None
             else None
         ),
+    }
+
+
+def serialize_notification(item: UserNotificationModel) -> dict[str, Any]:
+    return {
+        "notification_id": item.id,
+        "category": item.category,
+        "title": item.title,
+        "content": item.content,
+        "is_read": bool(item.is_read),
+        "read_at": item.read_at.isoformat() if item.read_at else None,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "payload": item.payload or {},
+    }
+
+
+def paginate(*, total: int, page: int, page_size: int, sort_by: str | None = None, sort_order: str = "desc") -> dict[str, Any]:
+    return {
+        "total": int(total),
+        "page": int(page),
+        "page_size": int(page_size),
+        "has_more": (page * page_size) < total,
+        "sort_by": sort_by,
+        "sort_order": sort_order,
     }

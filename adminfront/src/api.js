@@ -1,104 +1,266 @@
 const API_BASE = import.meta.env.VITE_ADMIN_API_BASE || '/api/admin/v1'
+const TOKEN_STORAGE_KEY = 'smartphoto_admin_access_token'
 
-let accessToken = ''
+let accessToken = localStorage.getItem(TOKEN_STORAGE_KEY) || ''
 
-function headers(extra = {}) {
-  return {
-    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    ...extra,
+function persistAccessToken(token) {
+  accessToken = token || ''
+  if (accessToken) {
+    localStorage.setItem(TOKEN_STORAGE_KEY, accessToken)
+  } else {
+    localStorage.removeItem(TOKEN_STORAGE_KEY)
   }
 }
 
-async function request(method, path, body) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...headers(),
-    },
-    credentials: 'include',
-    body: body && method !== 'GET' ? JSON.stringify(body) : undefined,
-  })
-  const rawText = await response.text()
-  let data = null
-  if (rawText) {
-    try {
-      data = JSON.parse(rawText)
-    } catch {
-      throw new Error(`Invalid ${response.status} response from admin API`)
+function buildQuery(params = {}) {
+  const query = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      return
     }
-  }
-  if (!data) {
+    if (Array.isArray(value)) {
+      value.forEach((item) => query.append(key, item))
+      return
+    }
+    query.set(key, String(value))
+  })
+  const raw = query.toString()
+  return raw ? `?${raw}` : ''
+}
+
+async function parseResponse(response) {
+  const rawText = await response.text()
+  if (!rawText) {
     throw new Error(`Empty ${response.status} response from admin API`)
   }
-  if (!response.ok || data.code !== 0) {
-    throw new Error(data.message || 'Request failed')
+  let payload
+  try {
+    payload = JSON.parse(rawText)
+  } catch {
+    throw new Error(`Invalid ${response.status} response from admin API`)
   }
-  return data.data
+  if (!response.ok || payload.code !== 0) {
+    const error = new Error(payload.message || 'Request failed')
+    error.status = response.status
+    error.code = payload.code
+    error.payload = payload
+    throw error
+  }
+  return payload.data
+}
+
+async function refreshAccessToken() {
+  const response = await fetch(`${API_BASE}/auth/refresh`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  })
+  const data = await parseResponse(response)
+  persistAccessToken(data.access_token)
+  return data
+}
+
+async function request(method, path, options = {}) {
+  const { body, headers = {}, skipRetry = false, signal } = options
+  const response = await fetch(`${API_BASE}${path}`, {
+    method,
+    credentials: 'include',
+    signal,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...headers,
+    },
+    body: body && method !== 'GET' ? JSON.stringify(body) : undefined,
+  })
+  if (
+    response.status === 401 &&
+    !skipRetry &&
+    !path.startsWith('/auth/login') &&
+    !path.startsWith('/auth/refresh') &&
+    !path.startsWith('/auth/logout')
+  ) {
+    try {
+      await refreshAccessToken()
+      return request(method, path, { ...options, skipRetry: true })
+    } catch (error) {
+      persistAccessToken('')
+      throw error
+    }
+  }
+  return parseResponse(response)
 }
 
 export const adminApi = {
-  setAccessToken(token) {
-    accessToken = token || ''
+  getAccessToken() {
+    return accessToken
   },
+  setAccessToken(token) {
+    persistAccessToken(token)
+  },
+  buildQuery,
   login(payload) {
-    return request('POST', '/auth/login', payload)
+    return request('POST', '/auth/login', { body: payload, skipRetry: true })
+  },
+  refresh() {
+    return refreshAccessToken()
   },
   me() {
     return request('GET', '/auth/me')
   },
   logout() {
-    return request('POST', '/auth/logout')
+    return request('POST', '/auth/logout', { skipRetry: true }).finally(() => {
+      persistAccessToken('')
+    })
   },
-  dashboard() {
+  dashboardSummary() {
     return request('GET', '/dashboard/summary')
   },
-  listSessions(params = '') {
-    return request('GET', `/sessions${params ? `?${params}` : ''}`)
+  dashboardOverview() {
+    return request('GET', '/dashboard/overview')
+  },
+  dashboardTrends(params = {}) {
+    return request('GET', `/dashboard/trends${buildQuery(params)}`)
+  },
+  dashboardBusiness() {
+    return request('GET', '/dashboard/business')
+  },
+  listUsers(params = {}) {
+    return request('GET', `/users${buildQuery(params)}`)
+  },
+  getUser(userId) {
+    return request('GET', `/users/${userId}`)
+  },
+  listUserNotifications(userId, params = {}) {
+    return request('GET', `/users/${userId}/notifications${buildQuery(params)}`)
+  },
+  adjustUserWallet(userId, payload) {
+    return request('POST', `/users/${userId}/wallet/adjust`, { body: payload })
+  },
+  createUserOrder(userId, payload) {
+    return request('POST', `/users/${userId}/orders`, { body: payload })
+  },
+  listSessions(params = {}) {
+    return request('GET', `/sessions${buildQuery(params)}`)
   },
   getSession(sessionId) {
     return request('GET', `/sessions/${sessionId}`)
   },
   updateCopy(sessionId, payload) {
-    return request('PUT', `/sessions/${sessionId}/copy`, payload)
+    return request('PUT', `/sessions/${sessionId}/copy`, { body: payload })
   },
-  listJobs(params = '') {
-    return request('GET', `/jobs${params ? `?${params}` : ''}`)
+  updateParameters(sessionId, payload) {
+    return request('PUT', `/sessions/${sessionId}/parameters`, { body: payload })
+  },
+  updateStrategyOverrides(sessionId, payload) {
+    return request('PUT', `/sessions/${sessionId}/strategy/overrides`, { body: payload })
+  },
+  updateDetailStrategyOverrides(sessionId, payload) {
+    return request('PUT', `/sessions/${sessionId}/detail-pages/strategy/overrides`, { body: payload })
+  },
+  buildSessionStrategyPreview(sessionId, payload = {}) {
+    return request('POST', `/sessions/${sessionId}/strategy/preview`, { body: payload })
+  },
+  buildDetailStrategyPreview(sessionId, payload = {}) {
+    return request('POST', `/sessions/${sessionId}/detail-pages/strategy/preview`, { body: payload })
+  },
+  previewSessionPrompts(sessionId, payload = {}) {
+    return request('POST', `/sessions/${sessionId}/prompts/preview`, { body: payload })
+  },
+  previewDetailPrompts(sessionId, payload = {}) {
+    return request('POST', `/sessions/${sessionId}/detail-pages/prompts/preview`, { body: payload })
+  },
+  getSessionResults(sessionId, params = {}) {
+    return request('GET', `/sessions/${sessionId}/results${buildQuery(params)}`)
+  },
+  getSessionDetailResults(sessionId, params = {}) {
+    return request('GET', `/sessions/${sessionId}/detail-pages/results${buildQuery(params)}`)
+  },
+  reanalyzeSession(sessionId, payload) {
+    return request('POST', `/sessions/${sessionId}/actions/reanalyze`, { body: payload })
+  },
+  extractSessionParameters(sessionId, payload) {
+    return request('POST', `/sessions/${sessionId}/actions/extract-parameters`, { body: payload })
+  },
+  regenerateMainGallery(sessionId, payload) {
+    return request('POST', `/sessions/${sessionId}/actions/regenerate-main`, { body: payload })
+  },
+  regenerateDetailPage(sessionId, payload) {
+    return request('POST', `/sessions/${sessionId}/actions/regenerate-detail`, { body: payload })
+  },
+  listJobs(params = {}) {
+    return request('GET', `/jobs${buildQuery(params)}`)
   },
   getJob(jobId) {
     return request('GET', `/jobs/${jobId}`)
   },
-  retryJob(jobId) {
-    return request('POST', `/jobs/${jobId}/retry`)
+  getJobEvents(jobId, params = {}) {
+    return request('GET', `/jobs/${jobId}/events/history${buildQuery(params)}`)
   },
-  listAssets(params = '') {
-    return request('GET', `/assets${params ? `?${params}` : ''}`)
+  retryJob(jobId, payload) {
+    return request('POST', `/jobs/${jobId}/retry`, { body: payload })
+  },
+  listAssets(params = {}) {
+    return request('GET', `/assets${buildQuery(params)}`)
   },
   getAsset(assetId) {
     return request('GET', `/assets/${assetId}`)
   },
-  archiveAsset(assetId, reason) {
-    return request('POST', `/assets/${assetId}/archive`, { reason })
+  archiveAsset(assetId, payload) {
+    return request('POST', `/assets/${assetId}/archive`, { body: payload })
   },
-  restoreAsset(assetId) {
-    return request('POST', `/assets/${assetId}/restore`)
+  restoreAsset(assetId, payload) {
+    return request('POST', `/assets/${assetId}/restore`, { body: payload })
   },
-  regenerateAsset(assetId, reason) {
-    return request('POST', `/assets/${assetId}/actions/regenerate`, { reason })
+  regenerateAsset(assetId, payload) {
+    return request('POST', `/assets/${assetId}/actions/regenerate`, { body: payload })
   },
-  listPromptPresets(params = '') {
-    return request('GET', `/prompt-presets${params ? `?${params}` : ''}`)
+  listPromptPresets(params = {}) {
+    return request('GET', `/prompt-presets${buildQuery(params)}`)
   },
-  listRulePacks(params = '') {
-    return request('GET', `/rule-packs${params ? `?${params}` : ''}`)
+  getPromptPreset(id) {
+    return request('GET', `/prompt-presets/${id}`)
+  },
+  createPromptPreset(payload) {
+    return request('POST', '/prompt-presets', { body: payload })
+  },
+  updatePromptPreset(id, payload) {
+    return request('PUT', `/prompt-presets/${id}`, { body: payload })
+  },
+  archivePromptPreset(id, payload) {
+    return request('POST', `/prompt-presets/${id}/archive`, { body: payload })
+  },
+  clonePromptPreset(id, payload) {
+    return request('POST', `/prompt-presets/${id}/clone`, { body: payload })
+  },
+  listRulePacks(params = {}) {
+    return request('GET', `/rule-packs${buildQuery(params)}`)
   },
   getRulePack(id) {
     return request('GET', `/rule-packs/${id}`)
   },
-  publishRulePack(id) {
-    return request('POST', `/rule-packs/${id}/publish`)
+  createRulePack(payload) {
+    return request('POST', '/rule-packs', { body: payload })
   },
-  listAuditLogs(params = '') {
-    return request('GET', `/audit-logs${params ? `?${params}` : ''}`)
+  updateRulePack(id, payload) {
+    return request('PUT', `/rule-packs/${id}`, { body: payload })
+  },
+  publishRulePack(id, payload) {
+    return request('POST', `/rule-packs/${id}/publish`, { body: payload })
+  },
+  cloneRulePack(id, payload) {
+    return request('POST', `/rule-packs/${id}/clone`, { body: payload })
+  },
+  archiveRulePack(id, payload) {
+    return request('POST', `/rule-packs/${id}/archive`, { body: payload })
+  },
+  listAuditLogs(params = {}) {
+    return request('GET', `/audit-logs${buildQuery(params)}`)
+  },
+  getSystemRuntime() {
+    return request('GET', '/system/runtime')
+  },
+  getSystemPricing() {
+    return request('GET', '/system/pricing')
   },
 }

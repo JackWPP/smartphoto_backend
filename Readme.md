@@ -16,7 +16,7 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 - **Step 3 参数附件链路**：支持说明书/参数图/PDF 上传、鲁棒参数提取和策略参考图补充输入。
 - **前台用户与账户中心能力**：支持邮箱密码登录、`/api/v2/account` 账户概览、资产历史、站内通知、密码修改、设置、购买记录与额度台账。
 - **用户商业化闭环**：已补齐额度价格规则、生成前余额校验、消费流水与失败自动退款，真实支付网关暂不接入。
-- **独立后台管理能力**：支持 `/api/admin/v1` 管理接口、SQLite 管理员账号库、审计日志、资产归档、模板与规则包后台化。
+- **独立后台管理能力**：支持 `/api/admin/v1` 超级控制台接口、SQLite 管理员账号库、经营/运行仪表盘、用户运营、Session/Job/Asset 排障、模板与规则包后台化及高风险操作审计。
 
 ## 架构选型
 
@@ -193,16 +193,32 @@ export COMPOSE_PROJECT_NAME=smartphoto_backend
 ## 后台管理
 
 - 后台 API：`/api/admin/v1`
+- 后台入口：`/admin`
+- 当前 `adminfront/` 已升级为路由化控制台，信息架构固定为：
+  - `Overview`：经营 + 运行概览、趋势图、失败任务与高风险操作
+  - `Users`：用户搜索、详情、通知、手工补单、额度调整
+  - `Sessions`：Session 检索、copy/parameters/overrides 编辑、预览与重跑
+  - `Jobs`：任务详情、事件时间线、失败重试
+  - `Assets`：图片预览、归档/恢复、单资产重生成
+  - `Prompts`：Prompt Preset 列表、编辑、克隆、归档、样例 Session 预览
+  - `Rule Packs`：规则包列表、版本历史、发布、克隆、样例 Session 预览
+  - `Audit`：高风险操作审计、前后快照、备注与风险等级
+  - `System`：运行时配置只读视图、队列压力、定价规则
 - 初始化管理员账号：
 ```bash
 ./.venv/bin/python scripts/create_admin_user.py --username admin --password secret123 --display-name 管理员
 ```
+- 也可以通过 `ADMIN_BOOTSTRAP_USERNAME/ADMIN_BOOTSTRAP_PASSWORD` 在 `GET /api/admin/v1/auth/health` 时自动补齐 bootstrap 管理员。
 - 启动后台前端：
 ```bash
 cd adminfront
 npm install
 npm run dev
 ```
+- 后台接口约束：
+  - 列表接口统一支持 `page/page_size/sort_by/sort_order`
+  - 高风险写操作统一支持 `operator_note`
+  - 审计日志记录 `module/risk_level/operator_note`，用于额度调整、补单、模板/规则发布、Session 干预、资产操作和任务重试留痕
 
 ## 调试前端
 

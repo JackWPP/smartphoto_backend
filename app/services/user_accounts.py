@@ -18,6 +18,9 @@ from app.models.user_notification import UserNotificationModel
 from app.models.user_setting import UserSettingModel
 from app.services.pricing import PricingRule, get_pricing_rule
 
+SIGNUP_BONUS_CREDITS = 100
+SIGNUP_BONUS_SOURCE = "signup_bonus"
+
 
 def get_user_or_404(db: Session, user_id: str) -> UserModel:
     user = db.query(UserModel).filter(UserModel.id == user_id).one_or_none()
@@ -112,7 +115,33 @@ def create_user(
     db.add(user)
     db.flush()
     ensure_user_defaults(db, user)
+    _grant_signup_bonus_via_app_fallback(db, user.id)
     return user
+
+
+def _grant_signup_bonus_via_app_fallback(db: Session, user_id: str) -> None:
+    bind = db.get_bind()
+    dialect_name = bind.dialect.name if bind is not None else ""
+    if dialect_name == "postgresql":
+        return
+    existing = (
+        db.query(CreditTransactionModel.id)
+        .filter(
+            CreditTransactionModel.user_id == user_id,
+            CreditTransactionModel.source == SIGNUP_BONUS_SOURCE,
+        )
+        .first()
+    )
+    if existing is not None:
+        return
+    adjust_wallet_balance(
+        db,
+        user_id=user_id,
+        credits_delta=SIGNUP_BONUS_CREDITS,
+        note=f"注册赠送 {SIGNUP_BONUS_CREDITS} 点额度",
+        source=SIGNUP_BONUS_SOURCE,
+        payload={"bonus_type": "signup", "granted_by": "app_fallback"},
+    )
 
 
 def serialize_user_profile(user: UserModel) -> dict:

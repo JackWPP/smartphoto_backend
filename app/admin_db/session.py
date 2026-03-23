@@ -3,7 +3,6 @@ from collections.abc import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.admin_db.base import AdminBase
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -15,12 +14,9 @@ AdminSessionLocal = sessionmaker(bind=admin_engine, autoflush=False, autocommit=
 
 
 def init_admin_db() -> None:
-    from app.admin_models.admin_audit_log import AdminAuditLogModel
-    from app.admin_models.admin_refresh_token import AdminRefreshTokenModel
-    from app.admin_models.admin_user import AdminUserModel
+    from app.services.admin_setup import init_admin_schema
 
-    _ = (AdminAuditLogModel, AdminRefreshTokenModel, AdminUserModel)
-    AdminBase.metadata.create_all(bind=admin_engine)
+    init_admin_schema()
 
 
 def get_admin_db() -> Generator[Session, None, None]:
