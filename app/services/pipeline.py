@@ -262,6 +262,12 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     session = _require_session(db, job.session_id)
     started_at = time.perf_counter()
 
+    images = _session_images(db, session.id)
+    if session.status == "created" and images:
+        ensure_session_transition("created", "images_uploaded")
+        session.status = "images_uploaded"
+        session.current_step = max(session.current_step, 1)
+
     ensure_session_transition(session.status, "analyzing")
     session.status = "analyzing"
     session.current_step = max(session.current_step, 2)
@@ -269,7 +275,6 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     update_job_status(db, job, status="running", progress=5, stage="analyzing")
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
-    images = _session_images(db, session.id)
     if not images:
         update_job_status(
             db,

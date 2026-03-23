@@ -188,3 +188,8 @@
   - 后台列表接口统一支持 `page/page_size/sort_by/sort_order`，审计日志扩展 `module/risk_level/operator_note`
   - 额度调整、手工补单、Prompt/Rule Pack 变更、Session 干预、资产归档/恢复/重生成、Job 重试统一写后台审计备注
   - 新增后台控制台集成测试，覆盖 Dashboard、System、用户通知、Session 预览/结果、Job 事件历史与审计留痕
+- 2026-03-23 API Reliability:
+  - `POST /api/v2/sessions/{session_id}/analysis` 在 session 仍为 `created` 但已存在上传图片时，会自动补正到 `images_uploaded -> analyzing`，避免 worker 侧再报 `cannot transition created -> analyzing`
+  - `run_analysis_job` 同步补充兜底修复，兼容历史脏状态任务
+  - `POST /api/v2/sessions/{session_id}/strategy/preview` 对同一份输入新增缓存复用：若 `input_hash` 未变化，直接返回已持久化的 `strategy_preview`，减少前端超时重试时重复触发同步 planner
+  - 同步更新 `docs/API_联调指南.md`、`docs/运行与排障手册.md` 与回归测试
