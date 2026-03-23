@@ -1,0 +1,175 @@
+# AGENTS.md
+
+## 项目目标
+- 项目名称：SmartPhoto Backend v2
+- 当前目标：交付以 6 步前端流程为真相源的后端 API + 异步任务系统。
+- 版本范围：当前优先主图组生成闭环；不实现 success validator、平台合规自动校验。
+
+## 架构约束
+- Web: FastAPI
+- DB: PostgreSQL（开发/测试允许 SQLite 覆盖配置）
+- Queue: Celery + Redis
+- 状态真相：`jobs` 与 `sessions` 由数据库持久化；禁止仅依赖进程内内存状态。
+- 存储：通过 `StorageAdapter` 访问，本地实现为默认，后续可切 S3 兼容。
+
+## 代码分层约定
+- `app/api`: HTTP 路由层，仅处理请求解析与响应封装。
+- `app/services`: 业务服务层，含状态机、策略构建、幂等、锁、任务分发。
+- `app/workers`: Celery 执行入口，按 `job_type` 分派任务。
+- `app/models`: SQLAlchemy ORM 模型。
+- `app/db`: 数据库连接、会话与基类。
+- `alembic`: 迁移脚本。
+
+## 接口变更流程
+- 所有 `/api/v2` 接口变更必须同时更新：
+  - `SmartPhoto_Backend_SPEC_v2 (1).md`（如涉及规范变更）
+  - `AGENTS.md` 里程碑日志（记录新增/修改接口）
+  - 对应集成测试
+- 对 job 型接口，必须明确：
+  - job_type
+  - 幂等行为
+  - 并发冲突行为（40901/40902）
+
+## 文档维护规则
+- 文档总入口：`Readme.md`
+- 联调真相文档：`docs/API_联调指南.md`
+- 生图执行语义文档：`docs/生图Agent协作逻辑.md`
+- 运维与排障文档：`docs/运行与排障手册.md`
+- 触发条件与责任：
+  - 新增/修改路由、请求参数、响应结构：必须更新 `docs/API_联调指南.md`
+  - 新增/修改 job_type、事件流、版本语义、锁策略：必须更新 `docs/生图Agent协作逻辑.md`
+  - 新增/修改错误码、诊断路径、运行命令：必须更新 `docs/运行与排障手册.md`
+  - 若实现行为与 SPEC 不一致：必须更新 `docs/API_联调指南.md` 的“实现 vs SPEC 差距清单”
+  - 完成上述更新后，再更新 `AGENTS.md` 里程碑日志
+
+## 测试门禁
+- 至少通过以下检查：
+  - 核心链路集成测试通过
+  - 关键错误码回归（40002/40901/40902）
+  - 任务事件序列可观测（job_queued/job_started/job_progress/asset_ready/job_succeeded|job_failed）
+
+## 里程碑更新日志
+- 2026-03-06 M0:
+  - 初始化 FastAPI + Celery + SQLAlchemy + Alembic 工程骨架
+  - 增加 docker-compose（Postgres + Redis）与本地启动脚本
+- 2026-03-06 M1:
+  - 完成核心表：sessions/session_images/jobs/job_events/assets/idempotency_records
+  - 完成 Job 持久化、SSE 事件持久化、状态机校验基础
+- 2026-03-06 M2-M5:
+  - 完成 Step1~Step6 核心 API
+  - 完成整组生图/整组重生成/全局修改/单图重生成的 job 化
+  - 增加幂等记录与并发保护（DB 检查 + Redis 锁降级）
+- 2026-03-06 Docs:
+  - 重构 `Readme.md` 为文档导航页
+  - 新增 API 联调、Agent 协作、运行排障三份文档
+  - 建立“实现 vs SPEC 差距清单”集中维护机制
+- 2026-03-06 Ops:
+  - WhatAI 上游默认 `WHATAI_API_BASE` 切换为 `https://api.whatai.cc`
+  - `WhataiClient` 增加 `/v1` base path 归一化，兼容带/不带 `/v1` 的配置
+  - 同步更新 `.env.example`、`Readme.md`、`docs/运行与排障手册.md`、SPEC 中的上游地址说明
+  - 上游 HTTP 失败日志追加响应正文，便于定位 WhatAI `400` 类配置错误
+  - `gemini-*` 文本模型改走 Gemini 官方 `generateContent` 协议，兼容 thinking 类模型
+  - 生图链路切换为 WhatAI 异步任务提交 + 结果轮询，优先补拿图片链接而不是重复提交生图请求
+  - 生图轮询窗口调整为约 8 分钟（20 秒一次），兼容 WhatAI 后台已成功但结果 URL 延迟可见的情况
+  - `upstream_image_error` 默认不再触发 Celery 整任务重试，避免重复消耗上游额度
+- 2026-03-07 M6:
+  - 主图组 prompt 体系重构为“角色规范 + 结构化 blocks + final_prompt”
+  - `strategy_preview.asset_plan` 扩展为 5 个固定主图角色及其 prompt 元数据
+  - 新增只读接口 `POST /api/v2/sessions/{session_id}/prompts/preview`
+  - 生成页增加 Prompt Debug 面板，支持查看当前预览 prompt 与最近一次真实 `prompt_snapshot`
+  - 补充 prompt、策略预览、结果追溯相关集成测试与前端 API
+- 2026-03-07 M7:
+  - Step 2 分析链路改为真实携带 session 图片到上游，`analysis_snapshot` 新增 `reference_summary`
+  - Step 5 `POST /api/v2/sessions/{session_id}/strategy/preview` 新增 `planner_instruction` 请求体
+  - Step 5 预览结果扩展为 `reference_manifest + prompt_plan + asset_plan`
+  - 主图组默认顺序调整为 `hero -> white_bg -> selling_point -> scene -> detail`
+  - 生图执行默认优先走参考图驱动的 `/v1/images/edits`，单 role 最多引用 2 张参考图，内部最大并发 `2`
+  - `white_bg` 增加独立白底分支与轻量白底校验，仅对白底图内部重试 1 次
+  - `assets` 新增 `generation_snapshot` 追踪真实使用的 prompt blocks、参考图、上游端点与 planner 指令
+  - Prompt Debug 返回 `reference_manifest`、`prompts[].reference_images_used`、`latest_assets[].generation_snapshot`
+- 2026-03-07 Test:
+  - 测试环境增加每用例 SQLite/Redis/存储目录重置，避免并发锁与 queued job 互相污染
+  - `TASKS_EAGER=true` 时调度器改为保持异步接口语义：worker 失败记录到 job，但异常不直接冒回 HTTP 路由
+- 2026-03-07 Ops:
+  - `dev-api.sh` 与 `dev-worker.sh` 启动前自动执行 `alembic upgrade head`，降低代码升级后遗漏迁移导致的运行时缺列风险
+  - 运行排障手册补充 `assets.generation_snapshot does not exist` 的定位与修复路径
+  - `/images/edits` 传输层断连时，优先做单请求重试与单资产内部重试，不触发整组 Celery 重跑
+  - 补齐 FastAPI OpenAPI 元信息与导出脚本，生成 `docs/openapi/smartphoto_backend_openapi.json` 供 Apifox 直接导入
+- 2026-03-07 M8:
+  - 新增详情页独立生成开关对应后端能力：`/detail-pages/style-images|strategy/preview|prompts/preview|generations|results|download`
+  - `sessions` 增加 `detail_strategy_preview/latest_detail_generate_job_id/detail_generation_round/detail_latest_result_version`
+  - `assets` 增加 `asset_family/main_gallery|detail_page` 与 `asset_kind/panel|stitched`，主图与详情页结果隔离
+  - 新增 `detail_style_images` 表，支持可选风格/字体参考图上传，不混入商品图槽位
+  - 新增 `generate_detail_page` job：固定输出 8 张 `21:9` panel 图和 1 张竖向拼接长图，共用现有幂等与并发保护
+  - 补充详情页链路集成测试、OpenAPI 导出、API 联调指南、Agent 协作逻辑、运行排障手册与 Readme
+- 2026-03-13 M9:
+  - 主图策略升级为“平台规则包 + 槽位计划 + 表达方式模块”，`POST /api/v2/sessions/{session_id}/strategy/preview` 新增 `slot_preferences`
+  - `strategy_preview.asset_plan/prompt_plan` 新增 `slot_id/expression_mode/copy_blocks/rule_modules_used/platform_overlay/resolved_constraints/platform_rule_pack` 等元数据
+  - 新增阿里系 5 槽位规则包 `alibaba_core_5_slot`，覆盖 `1688/taobao/alibaba_intl`
+  - `assets` 增加 `slot_id/expression_mode/rule_pack_id` 持久化字段，结果接口与 Prompt Debug 接口同步回传
+  - 详情页策略升级为 8 个动态槽位 + 14 类 `panel_type`，`POST /api/v2/sessions/{session_id}/detail-pages/strategy/preview` 新增 `panel_preferences`
+  - `detail_strategy_preview.panel_plan` 与详情页 Prompt/Results 增加 `slot_id/panel_type/panel_type_reason/layout_template/rule_modules_used`
+  - 生图执行链路改为“批量提交上游异步任务 -> 集中轮询 -> 并发下载”，新增 `main_generation_concurrency/detail_generation_concurrency/generation_submit_concurrency/image_poll_profile/image_task_timeout_seconds`
+  - 生成队列拆分为 `q.generation.main` 与 `q.generation.detail`，`scripts/dev-worker.sh` 同步更新
+  - 补充阿里规则、详情页偏好、批量提交顺序、能力标记白底校验等集成/单元测试
+- 2026-03-14 M10:
+  - `POST /api/v2/sessions/{session_id}/generations` 新增可选 `slot_ids`，支持只生成单个主图槽位用于调试
+  - 前端主图调试页新增 “Generate This Slot” 按钮，直接按 `slot_id` 触发单槽位生成
+  - 前端主图/详情页结果面板补齐版本同步逻辑，避免 session 已完成但结果区未刷新到最新版本
+- 2026-03-14 M11:
+  - 版本语义修复为不可变快照：历史 `version_no` 可回看；`regenerate_asset` 物化完整新版本并保留旧版本可见
+  - `GET /api/v2/sessions/{session_id}/results` 与 `detail-pages/results` 增加 `requested_version/available_versions/version_summaries`
+  - 新增 `prompt_presets`、`session_prompt_overrides`、`parameter_attachments`、`strategy_reference_images` 数据模型与迁移
+  - 新增 Prompt 仓库接口：`GET|POST|PUT /api/v2/prompt-presets`、`POST /api/v2/prompt-presets/{id}/archive|clone`
+  - 新增主图 override 接口：`GET|PUT /api/v2/sessions/{session_id}/strategy/overrides`
+  - 新增 Step3 参数附件接口：`POST|GET|DELETE /api/v2/sessions/{session_id}/parameter-attachments`
+  - 新增 Step3 参数提取接口：`POST /api/v2/sessions/{session_id}/parameters/extract`、`GET|PUT /api/v2/sessions/{session_id}/parameters`
+  - 商品图变更后自动失效下游快照并自动重触发 `analysis`，`analysis_snapshot` 补充 `reanalysis_required`
+  - 调试前端新增风格预设套用、参数附件上传与提取、主图文字/Prompt override 编辑、模板保存与历史版本切换
+- 2026-03-14 M12:
+  - Step 4 copy 契约收口为 `product_name/category/hero_scene/core_selling_points/key_parameters/product_advantages/style_preset_id/style_custom`
+  - `GET /api/v2/sessions/{session_id}/copy` 改为返回正式字段集合，`style_choice` 仅兼容读取
+  - `PUT /api/v2/sessions/{session_id}/copy` 支持 `style_preset_id` 正式写入；后端策略优先解析 preset，再兼容回退 `style_choice`
+  - `POST|GET|PUT /api/v2/sessions/{session_id}/parameters*` 补充 `applied_copy_fields/overwrite_mode`，参数提取结果默认 `replace_all` 覆盖 Step 4 四个正式字段
+  - 主图/详情页策略预览、Prompt 预览与真实生图快照统一消费并记录 `hero_scene/core_selling_points/key_parameters/product_advantages/style_preset_id/style_custom`
+  - 调试前端 Step 4 改为正式字段编辑器，移除“风格预设 + 风格选择”双入口，仅保留预设选择 + 自定义风格补充
+- 2026-03-14 M13:
+  - 新增后台管理前缀 `/api/admin/v1`，补充管理员登录/刷新/退出/自检接口，后台账号与审计落独立 SQLite 库
+  - 新增后台对象接口：`dashboard/sessions/jobs/assets/prompt-presets/rule-packs/audit-logs`
+  - `assets` 增加 `visibility_status/archived_at/archived_by/archive_reason`，支持后台归档/恢复并默认从用户侧结果与下载中隐藏
+  - 新增 `rule_packs/rule_pack_versions` 数据模型，平台/详情页规则包改为 DB 发布优先、代码 seed 兜底
+  - 新增 `adminfront/` 最小可用后台，支持登录、Session 排障、Job/Asset 查看、模板与规则包管理
+- 2026-03-14 M14:
+  - 新增前台用户体系：`users/user_refresh_tokens/user_settings/user_notifications/purchase_orders/credit_wallets/credit_transactions`
+  - `/api/v2/auth` 补齐 `register/login/refresh/logout/me`，默认 Bearer + Refresh Cookie；`dev` 环境支持 `ALLOW_DEV_AUTH_BYPASS`
+  - `/api/v2/account` 新增 `overview/profile/assets/notifications/security/settings/purchases/wallet` 全量账户中心接口
+  - `/api/v2/jobs/{job_id}`、`/events` 与 `/api/v2/prompt-presets*` 补齐用户归属校验；用户侧系统模板改为只读
+  - `sessions` 增加 `product_name_cache/brand_name_cache/style_tag_cache/last_generated_at`，用于“我的资产”历史页检索与排序
+  - 后台新增 `/api/admin/v1/users`、`/users/{id}`、`/users/{id}/orders`、`/users/{id}/wallet/adjust`，支持人工补单与额度调整
+  - 生成成功/失败与额度入账新增站内通知；补充用户功能集成测试、OpenAPI 导出、API 联调指南与运行排障手册
+- 2026-03-15 M15:
+  - `StorageAdapter` 正式升级为 `local + s3` 双实现，浏览器上传新增 `/api/v2/uploads/presign|complete`，线上可按私有桶 + 签名读/写接入 S3 兼容 OSS
+  - DB 持久化从本地 `/storage/...` URL 语义收口为稳定 `object_key`，读接口统一返回临时可访问 URL；ZIP 下载、参考图读取和 worker 结果写盘均已适配
+  - `/api/v2/account/pricing` 上线，生成类接口补齐 `charged_credits/balance_after/pricing_rule_id`
+  - 生成接单前增加余额校验，新增错误码 `40201 insufficient_credits`
+  - 额度台账补齐生成扣费与失败自动退款；`dev` 环境固定开发用户自动补测试额度便于本地调试
+  - 新增 `docs/OSS_对接与上线指南.md`、`docs/生图提速优化报告_客户版.md`，并同步更新 Readme、API 联调指南、运行排障手册、SPEC 与 OpenAPI
+- 2026-03-19 Ops:
+  - 新增生产部署工件 `Dockerfile`、`docker-compose.prod.yml` 与 `.env.prod.example`，按单机 Docker Compose 运行 `api/worker/postgres/redis`
+  - 新增显式迁移与生产启动脚本：`docker-api.sh`、`docker-worker.sh`、`docker-migrate.sh`
+  - 新增镜像构建热更新脚本：`deploy-prod.sh`、`rollback-prod.sh`
+  - 新增 `CORS_ALLOW_ORIGINS` allowlist 配置，覆盖 `/api/v2`、`/api/admin/v1` 与 SSE 跨域访问
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/运行与排障手册.md`
+- 2026-03-22 Hotfix:
+  - 修复 `regenerate_asset/regenerate_detail_panel` 的 carry-forward 基线版本选择：改为继承 `parent_asset.version_no`
+  - 主图与详情页新增“从历史版本发起单资产重生成”回归测试，覆盖 `generation_snapshot.source_version_no`
+  - 更新 `docs/API_联调指南.md` 与 `docs/生图Agent协作逻辑.md` 中的版本快照与 carry-forward 语义说明
+- 2026-03-22 Ops Package:
+  - 补齐生产部署工件：`Dockerfile`、`docker-compose.prod.yml`、`scripts/docker-{api,worker,migrate}.sh`
+  - 新增镜像构建热更新脚本：`scripts/deploy-prod.sh`、`scripts/rollback-prod.sh`
+  - 新增 `scripts/package-prod.sh` 生成不含 `.env.prod` 的部署包，并更新 `docs/运行与排障手册.md`
+- 2026-03-23 Recovery:
+  - 恢复发布基线到包含 `/api/v2/auth`、`/api/v2/account`、`/api/v2/uploads` 的完整用户版代码线，并保留 3/22 carry-forward hotfix
+  - 新增 `GET /api/admin/v1/auth/health`、`/admin` 后台前端入口、自举管理员初始化逻辑与对应回归测试
+  - 新增 `scripts/preflight-prod.sh`，发布前固定检查 `.env.prod`、`alembic_version`、用户表与 `rule_pack*` schema，防止再把错误迁移链打进生产
+  - 更新 `Readme.md`、`docs/API_联调指南.md`、`docs/运行与排障手册.md`，统一恢复发布与热更新说明

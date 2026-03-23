@@ -139,22 +139,37 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d api worker
 ### 3. 健康检查
 ```bash
 curl -s http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:8000/api/admin/v1/auth/health
 docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 ```
 
-### 4. 按 Git Tag 发布与回滚
+### 4. 发布前预检
 ```bash
-# 发布指定 tag
-bash scripts/deploy-prod.sh v2026.03.19-01
+./scripts/preflight-prod.sh
+```
 
-# 回滚到上一个 tag
-bash scripts/rollback-prod.sh v2026.03.18-02
+若预检输出包含以下任一项，先停止发布并处理数据库兼容问题：
+- `alembic_version` 含 `20260322_0007`
+- 缺少 `users` / `user_refresh_tokens` / `credit_wallets`
+- `rule_packs` / `rule_pack_versions` 出现 `family/draft_payload/payload/change_note` 这一套 3/22 错误 schema
+
+### 5. 热更新发布与回滚
+```bash
+# 纯逻辑/文档/静态资源变更，无 migration
+./scripts/deploy-prod.sh --image-tag recovery-20260323 --skip-migrate
+
+# 如本次包含 migration
+./scripts/deploy-prod.sh --image-tag recovery-20260323
+
+# 回滚到上一镜像
+./scripts/rollback-prod.sh
 ```
 
 说明：
-- 服务器应只部署固定 tag，不直接跑浮动分支
-- `deploy-prod.sh` 会做：`git fetch --tags -> git checkout <tag> -> build -> migrate -> up`
-- `rollback-prod.sh` 不会执行迁移；回滚前先确认旧版本能兼容当前数据库 schema
+- 生产机应保留自己的 `.env.prod`，发布包不要覆盖它
+- `deploy-prod.sh` 会做：本机 `docker build` -> 可选 `migrate` -> 热更新 `api/worker`
+- `rollback-prod.sh` 只替换 `api/worker`，不会动 `postgres/redis/storage` 卷
+- 若这次只是恢复到正确代码线，且预检确认 DB 仍在用户版迁移链，优先使用 `--skip-migrate`
 
 ## API 联调与排障手册索引
 
