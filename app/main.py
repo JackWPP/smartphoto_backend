@@ -2,16 +2,16 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.admin_db.session import init_admin_db
 from app.api.admin.router import router as admin_router
 from app.api.v2.router import router as v2_router
 from app.core.config import get_settings
 from app.core.errors import AppError, ERRORS
 from app.core.logging import configure_logging
 from app.core.response import error_response, success_response
+from app.services.admin_setup import init_admin_schema
 
 configure_logging()
 
@@ -19,7 +19,7 @@ configure_logging()
 def create_app() -> FastAPI:
     current_settings = get_settings()
     Path(current_settings.storage_root).mkdir(parents=True, exist_ok=True)
-    init_admin_db()
+    init_admin_schema()
 
     app = FastAPI(
         title=current_settings.app_name,
@@ -61,6 +61,9 @@ def create_app() -> FastAPI:
     app.include_router(v2_router, prefix=current_settings.api_prefix)
     app.include_router(admin_router, prefix=current_settings.admin_api_prefix)
     app.mount("/storage", StaticFiles(directory=Path(current_settings.storage_root)), name="storage")
+    admin_assets_dir = current_settings.admin_frontend_dist / "assets"
+    if admin_assets_dir.exists():
+        app.mount("/admin/assets", StaticFiles(directory=admin_assets_dir), name="admin-assets")
     return app
 
 
@@ -70,6 +73,15 @@ app = create_app()
 @app.get("/healthz")
 def healthz() -> dict:
     return success_response({"status": "ok"})
+
+
+@app.get("/admin", include_in_schema=False, response_class=HTMLResponse, response_model=None)
+@app.get("/admin/", include_in_schema=False, response_class=HTMLResponse, response_model=None)
+def admin_frontend() -> HTMLResponse | JSONResponse:
+    index_path = get_settings().admin_frontend_dist / "index.html"
+    if not index_path.exists():
+        return JSONResponse(status_code=404, content=error_response(code=40401, message="admin frontend not built"))
+    return HTMLResponse(index_path.read_text(encoding="utf-8"))
 
 
 @app.exception_handler(AppError)

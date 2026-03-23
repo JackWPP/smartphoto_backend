@@ -15,6 +15,7 @@ from app.core.errors import AppError
 from app.core.response import success_response
 from app.schemas.admin import AdminAuthMe, AdminLoginData, AdminLoginRequest
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
+from app.services.admin_setup import ensure_bootstrap_admin, init_admin_schema
 
 router = APIRouter(prefix="/auth", tags=["admin-auth"])
 
@@ -43,9 +44,24 @@ def _set_access_cookie(response: Response, token: str) -> None:
     )
 
 
+@router.get("/health", summary="后台自检")
+def health(db: Session = Depends(get_admin_db)) -> dict:
+    init_admin_schema()
+    admin_user = ensure_bootstrap_admin(db)
+    return success_response(
+        {
+            "status": "ok",
+            "admin_db_url": get_settings().admin_database_url,
+            "bootstrap_ready": admin_user is not None,
+        }
+    )
+
+
 @router.post("/login", response_model=APIResponse[AdminLoginData], operation_id="adminLogin", responses={**OPENAPI_ERROR_RESPONSES})
 def login(req: AdminLoginRequest, response: Response, db: Session = Depends(get_admin_db)) -> dict:
-    admin_user = db.query(AdminUserModel).filter(AdminUserModel.username == req.username).one_or_none()
+    init_admin_schema()
+    ensure_bootstrap_admin(db)
+    admin_user = db.query(AdminUserModel).filter(AdminUserModel.username == req.username.strip()).one_or_none()
     if not admin_user or not admin_user.is_active or not verify_password(req.password, admin_user.password_hash):
         raise AppError("unauthorized", "admin username or password invalid", 401)
     access_token = issue_access_token(admin_user.id, admin_user.username)
