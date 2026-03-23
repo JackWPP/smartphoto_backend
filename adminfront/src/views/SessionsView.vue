@@ -281,7 +281,25 @@ async function openSession(sessionId) {
   selectedSessionId.value = sessionId
   detail.value = await adminApi.getSession(sessionId)
   hydrateEditors(detail.value.session)
-  await Promise.all([loadResults(), loadDetailResults(), loadPreviews()])
+  await Promise.allSettled([loadResults(), loadDetailResults(), loadPreviews()])
+}
+
+function previewBlockedState(session) {
+  if (!session?.confirmed_copy) {
+    return {
+      blocked: true,
+      reason: 'copy not ready',
+      hint: '先在 Step4 Copy 面板补齐 copy，再刷新主图/详情页 prompt 预览。',
+    }
+  }
+  if (!session?.active_platform_id) {
+    return {
+      blocked: true,
+      reason: 'active platform required',
+      hint: '该 session 还没有 active_platform_id，暂时无法生成策略与 prompt 预览。',
+    }
+  }
+  return null
 }
 
 function buildCopyPayload() {
@@ -376,12 +394,24 @@ async function loadPreviews() {
   if (!selectedSessionId.value) {
     return
   }
-  const [mainPrompt, detailPrompt] = await Promise.all([
+  const blocked = previewBlockedState(detail.value.session)
+  if (blocked) {
+    promptPreview.value = blocked
+    detailPromptPreview.value = blocked
+    return
+  }
+  const [mainPrompt, detailPrompt] = await Promise.allSettled([
     adminApi.previewSessionPrompts(selectedSessionId.value, { instruction: actionForm.instruction, include_latest_assets: true }),
     adminApi.previewDetailPrompts(selectedSessionId.value, { instruction: actionForm.instruction, include_latest_assets: true }),
   ])
-  promptPreview.value = mainPrompt
-  detailPromptPreview.value = detailPrompt
+  promptPreview.value =
+    mainPrompt.status === 'fulfilled'
+      ? mainPrompt.value
+      : { error: mainPrompt.reason?.message || 'main prompt preview failed' }
+  detailPromptPreview.value =
+    detailPrompt.status === 'fulfilled'
+      ? detailPrompt.value
+      : { error: detailPrompt.reason?.message || 'detail prompt preview failed' }
 }
 
 async function loadResults() {

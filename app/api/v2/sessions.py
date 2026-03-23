@@ -104,7 +104,7 @@ from app.services.repo import (
 )
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter, public_url_for
-from app.services.strategy import build_strategy_preview, normalize_strategy_preview
+from app.services.strategy import build_strategy_preview, normalize_strategy_preview, strategy_preview_input_hash
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
 from app.services.user_accounts import charge_wallet_for_action, refresh_session_search_cache
 
@@ -907,6 +907,16 @@ def trigger_analysis(
     user_id=Depends(get_current_user_id),
 ) -> dict:
     session = get_session_or_404(db, session_id, str(user_id))
+    images = list_active_session_images(db, session.id)
+    if not images:
+        raise AppError("missing_required_images", http_status=400)
+    if session.status == "created":
+        ensure_session_transition("created", "images_uploaded")
+        session.status = "images_uploaded"
+        session.current_step = max(session.current_step, 1)
+    ensure_session_transition(session.status, "analyzing")
+    session.status = "analyzing"
+    session.current_step = max(session.current_step, 2)
     payload: dict = {}
 
     idem_record = None
@@ -1236,6 +1246,32 @@ def build_strategy(
         raise AppError("invalid_platform", "active platform required", 400)
     payload = req.model_dump() if req is not None else {"planner_instruction": None}
     images = list_active_session_images(db, session.id)
+    strategy_reference_images = list_active_strategy_reference_images(db, session.id)
+    resolved_copy = _resolved_copy_for_session(session, db)
+    input_hash = strategy_preview_input_hash(
+        resolved_copy,
+        session.active_platform_id,
+        db=db,
+        session_images=images,
+        analysis_snapshot=session.analysis_snapshot or {},
+        parameter_snapshot=session.parameter_snapshot or {},
+        planner_instruction=payload.get("planner_instruction"),
+        slot_preferences=payload.get("slot_preferences") or [],
+        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
+        strategy_reference_images=strategy_reference_images,
+    )
+    existing_preview = session.strategy_preview if isinstance(session.strategy_preview, dict) else None
+    if existing_preview and existing_preview.get("input_hash") == input_hash:
+        session.status = "strategy_ready"
+        session.current_step = max(session.current_step, 5)
+        db.commit()
+        return success_response(
+            {
+                "session_id": session.id,
+                "status": session.status,
+                "strategy_preview": existing_preview,
+            }
+        )
 
     job = create_job(
         db,
@@ -1252,7 +1288,7 @@ def build_strategy(
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
     preview = build_strategy_preview(
-        _resolved_copy_for_session(session, db),
+        resolved_copy,
         session.active_platform_id,
         db=db,
         session_images=images,
@@ -1261,7 +1297,7 @@ def build_strategy(
         planner_instruction=payload.get("planner_instruction"),
         slot_preferences=payload.get("slot_preferences") or [],
         prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id),
-        strategy_reference_images=list_active_strategy_reference_images(db, session.id),
+        strategy_reference_images=strategy_reference_images,
     )
     session.strategy_preview = preview
     session.latest_strategy_job_id = job.id

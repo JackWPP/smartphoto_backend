@@ -98,6 +98,46 @@ def test_strategy_preview_contains_prompt_plan_metadata(client):
     assert rebuilt["prompt_plan"][1]["role"] == "white_bg"
 
 
+def test_trigger_analysis_recovers_created_session_with_uploaded_images(client):
+    r = client.post("/api/v2/sessions")
+    sid = r.json()["data"]["session_id"]
+
+    files = {"file": ("p.jpg", make_image_bytes(), "image/jpeg")}
+    data = {"slot_type": "front", "display_order": "1"}
+    client.post(f"/api/v2/sessions/{sid}/images", files=files, data=data)
+    client.put(
+        f"/api/v2/sessions/{sid}/platform-selection",
+        json={"selected_platform_ids": ["temu"], "active_platform_id": "temu"},
+    )
+
+    with db_session.SessionLocal() as db:
+        session = db.get(SessionModel, sid)
+        session.status = "created"
+        session.current_step = 1
+        db.commit()
+
+    analysis = client.post(f"/api/v2/sessions/{sid}/analysis")
+    assert analysis.status_code == 200
+
+    status = client.get(f"/api/v2/sessions/{sid}/analysis").json()["data"]
+    assert status["status"] == "analyzed"
+    assert status["analysis_snapshot"]["recognized_product"]["product_name"]
+
+
+def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, monkeypatch):
+    sid = create_ready_session(client)
+    original = client.get(f"/api/v2/sessions/{sid}").json()["data"]["strategy_preview"]
+
+    def _unexpected_rebuild(*args, **kwargs):
+        raise AssertionError("strategy preview should have been served from cache")
+
+    monkeypatch.setattr("app.api.v2.sessions.build_strategy_preview", _unexpected_rebuild)
+
+    reused = client.post(f"/api/v2/sessions/{sid}/strategy/preview", json={})
+    assert reused.status_code == 200
+    assert reused.json()["data"]["strategy_preview"]["input_hash"] == original["input_hash"]
+
+
 def test_alibaba_rule_pack_and_slot_preferences(client):
     sid = create_ready_session(client, platform_id="1688")
 
@@ -284,7 +324,11 @@ def test_admin_publish_rule_pack_affects_strategy_preview(client):
         },
         headers={"Authorization": f"Bearer {token}"},
     ).json()["data"]["rule_pack"]
-    client.post(f"/api/admin/v1/rule-packs/{created['rule_pack_id']}/publish", headers={"Authorization": f"Bearer {token}"})
+    client.post(
+        f"/api/admin/v1/rule-packs/{created['rule_pack_id']}/publish",
+        json={"operator_note": "publish for strategy preview test"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
 
     preview = client.post(f"/api/v2/sessions/{sid}/strategy/preview").json()["data"]["strategy_preview"]
     assert preview["asset_plan"][0]["goal"] == "后台发布的新规则"

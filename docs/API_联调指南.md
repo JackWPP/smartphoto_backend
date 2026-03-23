@@ -128,6 +128,7 @@
 - 成功后：
   - 生成 `analysis` job（队列 `q.analysis`）
   - session 状态：`analyzing -> analyzed`
+  - 若历史脏数据导致 session 仍停留在 `created`，当前实现会在触发分析时自动补正为 `images_uploaded -> analyzing`，避免 worker 侧再报 `cannot transition created -> analyzing`
   - 自动写入 `analysis_snapshot`
   - 当前实现会把 session 上传图片以内联图像内容的方式发给上游分析模型，不再只传文本
   - `analysis_snapshot` 额外包含 `reference_summary`：
@@ -217,6 +218,10 @@
 - 请求体：
   - `planner_instruction: string | null`
   - `slot_preferences: [{slot_id, expression_mode, locked}]`
+- 当前实现说明：
+  - 该接口仍是同步接口，若配置了 WhatAI planner 且存在参考图，会在请求内同步调用上游 LLM
+  - 若前端部署在带 15~30 秒超时的边缘函数/CDN Worker 前，不建议继续经该层代理此接口；应直连后端 Nginx 或使用更长超时
+  - 对同一 session、同一份输入再次调用时，后端会直接复用已持久化的 `strategy_preview`，避免前端重试时重复触发长耗时 planner
 - 主图文字 override 接口：
   - `GET /sessions/{session_id}/strategy/overrides`
   - `PUT /sessions/{session_id}/strategy/overrides`

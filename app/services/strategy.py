@@ -31,6 +31,45 @@ from app.services.upstream import WhataiClient
 from app.services.strategy_overrides import resolve_session_overrides
 
 
+def strategy_preview_input_hash(
+    confirmed_copy: dict,
+    active_platform_id: str,
+    *,
+    db: Session | None = None,
+    session_images: list[SessionImageModel] | None = None,
+    analysis_snapshot: dict[str, Any] | None = None,
+    parameter_snapshot: dict[str, Any] | None = None,
+    planner_instruction: str | None = None,
+    slot_preferences: list[dict[str, Any]] | None = None,
+    prompt_overrides: list[dict[str, Any]] | None = None,
+    strategy_reference_images: list[Any] | None = None,
+) -> str:
+    normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
+    loaded_reference_images = load_reference_images(session_images or []) if session_images else []
+    loaded_strategy_reference_images = load_reference_images(strategy_reference_images or []) if strategy_reference_images else []
+    reference_manifest = build_reference_manifest(loaded_reference_images)
+    strategy_reference_manifest = build_reference_manifest(loaded_strategy_reference_images)
+    resolved_slot_preferences = resolve_slot_preferences(active_platform_id, slot_preferences, db=db)
+    resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
+    slot_blueprints = get_main_gallery_slot_blueprints(active_platform_id, db=db)
+    payload = preview_hash_payload(
+        platform_id=active_platform_id,
+        confirmed_copy=normalized_copy,
+        analysis_snapshot=analysis_snapshot or {},
+        parameter_snapshot=parameter_snapshot or {},
+        planner_instruction=planner_instruction,
+        slot_preferences=resolved_slot_preferences,
+        reference_manifest=reference_manifest,
+        strategy_reference_manifest=strategy_reference_manifest,
+    )
+    payload["platform_overlay"] = get_platform_overlay(active_platform_id)
+    payload["slot_blueprints"] = slot_blueprints
+    payload["strategy_overrides"] = list(resolved_prompt_overrides.values())
+    return _stable_hash(
+        payload
+    )
+
+
 def build_strategy_preview(
     confirmed_copy: dict,
     active_platform_id: str,
@@ -104,17 +143,17 @@ def build_strategy_preview(
         "strategy_reference_manifest": strategy_reference_manifest,
         "asset_plan": asset_plan,
         "prompt_plan": prompt_plan,
-        "input_hash": _stable_hash(
-            preview_hash_payload(
-                platform_id=active_platform_id,
-                confirmed_copy=normalized_copy,
-                analysis_snapshot=analysis_snapshot or {},
-                parameter_snapshot=parameter_snapshot or {},
-                planner_instruction=planner_instruction,
-                slot_preferences=resolved_slot_preferences,
-                reference_manifest=reference_manifest,
-                strategy_reference_manifest=strategy_reference_manifest,
-            )
+        "input_hash": strategy_preview_input_hash(
+            confirmed_copy,
+            active_platform_id,
+            db=db,
+            session_images=session_images,
+            analysis_snapshot=analysis_snapshot,
+            parameter_snapshot=parameter_snapshot,
+            planner_instruction=planner_instruction,
+            slot_preferences=slot_preferences,
+            prompt_overrides=prompt_overrides,
+            strategy_reference_images=strategy_reference_images,
         ),
     }
 
