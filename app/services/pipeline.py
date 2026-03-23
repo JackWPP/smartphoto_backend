@@ -23,7 +23,7 @@ from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
 from app.models.session_prompt_override import SessionPromptOverrideModel
 from app.models.strategy_reference_image import StrategyReferenceImageModel
-from app.services.copy_normalization import normalize_copy_payload
+from app.services.copy_normalization import key_parameter_strings, normalize_copy_payload, normalize_copy_text
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
@@ -47,7 +47,16 @@ from app.services.upstream import WhataiClient
 from app.services.user_accounts import create_job_completion_notification, refresh_session_search_cache, update_session_last_generated_at
 from app.services.white_bg import strengthen_white_bg_instruction, validate_white_background
 
-COPY_TARGETS = {"headline", "selling_points", "usage_scenes", "specs"}
+COPY_TARGETS = {
+    "headline",
+    "selling_points",
+    "usage_scenes",
+    "specs",
+    "hero_scene",
+    "core_selling_points",
+    "key_parameters",
+    "product_advantages",
+}
 ASSET_RENDER_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
 
@@ -91,6 +100,15 @@ def _parameter_attachments(db: Session, session_id: str) -> list[ParameterAttach
         .order_by(ParameterAttachmentModel.display_order.asc())
         .all()
     )
+
+
+def _copy_regenerate_source_text(current_copy: dict[str, Any], target: str) -> str:
+    normalized = normalize_copy_payload(current_copy)
+    if target == "key_parameters":
+        return "\n".join(key_parameter_strings(normalized.get("key_parameters")))
+    if target in {"core_selling_points", "product_advantages"}:
+        return "\n".join(normalized.get(target) or [])
+    return normalize_copy_text(normalized.get(target, ""))
 
 
 def _strategy_reference_images(db: Session, session_id: str) -> list[StrategyReferenceImageModel]:
@@ -416,11 +434,12 @@ def run_regenerate_copy_job(db: Session, job_id: str) -> None:
     if not targets or any(target not in COPY_TARGETS for target in targets):
         raise AppError("invalid_copy_field", http_status=400)
 
-    base_copy = session.confirmed_copy or {}
+    base_copy = normalize_copy_payload(session.confirmed_copy or {})
+    copy_source = {target: _copy_regenerate_source_text(base_copy, target) for target in targets}
     update_job_status(db, job, status="running", progress=20, stage="rewriting")
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
-    generated_fields = client.regenerate_copy(base_copy, targets, instruction)
+    generated_fields = client.regenerate_copy(copy_source, targets, instruction)
 
     session.latest_copy_job_id = job.id
     session.current_step = max(session.current_step, 4)

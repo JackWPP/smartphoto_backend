@@ -548,6 +548,27 @@ def test_copy_regenerate_not_overwrite_confirmed_copy(client):
     assert after["product_advantages"] == before["product_advantages"]
 
 
+def test_copy_regenerate_accepts_current_step4_fields(client):
+    sid = create_ready_session(client)
+
+    regen = client.post(
+        f"/api/v2/sessions/{sid}/copy/regenerate",
+        json={
+            "targets": ["hero_scene", "core_selling_points", "key_parameters", "product_advantages"],
+            "instruction": "更偏跨境风格",
+            "based_on_current_values": True,
+        },
+    ).json()["data"]
+
+    detail = client.get(f"/api/v2/sessions/{sid}/copy/regenerate/{regen['job_id']}").json()["data"]
+    assert detail["status"] == "succeeded"
+    assert "hero_scene" in detail["generated_fields"]
+    assert "core_selling_points" in detail["generated_fields"]
+    assert "key_parameters" in detail["generated_fields"]
+    assert "product_advantages" in detail["generated_fields"]
+    assert isinstance(detail["generated_fields"]["key_parameters"], str)
+
+
 def test_regenerate_family_and_parent_asset(client):
     sid = create_ready_session(client)
 

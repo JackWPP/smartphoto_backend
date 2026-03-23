@@ -182,7 +182,7 @@
 | --- | --- | --- | --- | --- |
 | `GET /sessions/{session_id}/copy` | 读取 Step 4 copy | 用户 | 无 | 正式 copy 字段 |
 | `PUT /sessions/{session_id}/copy` | 保存 Step 4 copy | 用户 | `product_name/category/hero_scene/core_selling_points/key_parameters/product_advantages/style_preset_id/style_custom` | 更新后的 copy |
-| `POST /sessions/{session_id}/copy/regenerate` | 局部字段重写 | 用户 | `fields` | `job_id` |
+| `POST /sessions/{session_id}/copy/regenerate` | 局部字段重写 | 用户 | `targets`，支持 `hero_scene/core_selling_points/key_parameters/product_advantages`，兼容 `headline/selling_points/usage_scenes/specs` | `job_id` |
 | `GET /sessions/{session_id}/copy/regenerate/{job_id}` | 查询字段重写结果 | 用户 | 无 | `generated_fields` |
 
 #### 2.5.6 参数附件与参数提取

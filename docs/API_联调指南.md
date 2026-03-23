@@ -170,7 +170,9 @@
 - 兼容字段：
   - `style_choice`：deprecated，只兼容旧前端读写
   - `headline/selling_points/usage_scenes/specs`：legacy 输入，后端会转换成正式字段
-- regenerate 支持字段：`headline` `selling_points` `usage_scenes` `specs`
+- regenerate 支持字段：
+  - 正式字段：`hero_scene` `core_selling_points` `key_parameters` `product_advantages`
+  - legacy 字段：`headline` `selling_points` `usage_scenes` `specs`
 - 语义：regenerate 结果写在 `job.result_payload.generated_fields`，**不会自动覆盖** `confirmed_copy`
 - 常见错误：`40004` `40402`
 - 幂等：`POST /copy/regenerate` 支持 `Idempotency-Key`

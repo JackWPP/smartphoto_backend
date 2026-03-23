@@ -260,7 +260,7 @@ class CopySaveData(BaseModel):
 class CopyRegenerateRequest(BaseModel):
     targets: list[str] = Field(
         min_length=1,
-        description="需要重写的字段名列表。允许 headline/selling_points/usage_scenes/specs。",
+        description="需要重写的字段名列表。支持正式 Step4 字段 hero_scene/core_selling_points/key_parameters/product_advantages，也兼容 legacy headline/selling_points/usage_scenes/specs。",
     )
     instruction: str | None = Field(default=None, description="额外重写要求。")
     based_on_current_values: bool = Field(default=True, description="是否基于当前页面值而不是分析初稿。")

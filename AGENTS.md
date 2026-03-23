@@ -193,3 +193,7 @@
   - `run_analysis_job` 同步补充兜底修复，兼容历史脏状态任务
   - `POST /api/v2/sessions/{session_id}/strategy/preview` 对同一份输入新增缓存复用：若 `input_hash` 未变化，直接返回已持久化的 `strategy_preview`，减少前端超时重试时重复触发同步 planner
   - 同步更新 `docs/API_联调指南.md`、`docs/运行与排障手册.md` 与回归测试
+- 2026-03-24 Oncall:
+  - `POST /api/v2/sessions/{session_id}/copy/regenerate` 扩展为新旧字段双兼容：正式字段 `hero_scene/core_selling_points/key_parameters/product_advantages` 与 legacy `headline/selling_points/usage_scenes/specs` 都可下发到 worker，避免 `invalid_copy_field`
+  - `run_regenerate_copy_job` 对列表/结构化参数字段先规范化成可重写文本，再交给上游 copy regenerate，防止 `key_parameters/core_selling_points` 直接传 list/dict 进重写器
+  - 运行排障手册补充生产上传链路建议：前端若位于 ESA / CDN Worker 后，应优先走 `/api/v2/uploads/presign|complete`，避免二进制 multipart 经边缘代理返回 `524`
