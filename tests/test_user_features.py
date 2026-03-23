@@ -181,6 +181,15 @@ def test_cors_preflight_rejects_unknown_origin(monkeypatch):
     get_settings.cache_clear()
 
 
+def test_admin_health_bootstraps_admin(client):
+    response = client.get("/api/admin/v1/auth/health")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["status"] == "ok"
+    assert payload["bootstrap_ready"] is True
+
+
 def test_cross_user_access_is_denied_for_jobs_events_presets_and_assets(client):
     headers_a = register_user(client, "alice@example.com", display_name="Alice")
     headers_b = register_user(client, "bob@example.com", display_name="Bob")

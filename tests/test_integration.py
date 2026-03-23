@@ -594,7 +594,7 @@ def test_regenerate_asset_from_historical_version_uses_parent_asset_version(clie
     assert v3_by_role["detail"]["image_url"] == v1_by_role["detail"]["image_url"]
     assert v3_by_role["scene"]["image_url"] != v1_by_role["scene"]["image_url"]
 
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         carry_forward_hero = (
             db.query(AssetModel)
             .filter(
@@ -645,7 +645,7 @@ def test_regenerate_detail_panel_from_historical_version_uses_parent_asset_versi
     assert v3_results["stitched_asset"]["version_no"] == 3
     assert v3_results["stitched_asset"]["asset_id"] != v2_results["stitched_asset"]["asset_id"]
 
-    with SessionLocal() as db:
+    with db_session.SessionLocal() as db:
         carry_forward_panel = (
             db.query(AssetModel)
             .filter(

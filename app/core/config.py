@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     storage_root: Path = Path("./storage")
     public_base_url: str = "http://localhost:8000"
     cors_allow_origins: str = ""
+    admin_frontend_dist: Path = Path("./adminfront/dist")
     storage_backend: str = "local"
     s3_endpoint: str = ""
     s3_region: str = "auto"
@@ -49,6 +50,10 @@ class Settings(BaseSettings):
     admin_jwt_secret: str = "smartphoto-admin-dev-secret"
     admin_access_token_exp_minutes: int = Field(default=120, ge=5, le=1440)
     admin_refresh_token_exp_days: int = Field(default=14, ge=1, le=180)
+    admin_refresh_cookie_name: str = "admin_refresh_token"
+    admin_bootstrap_username: str = "admin"
+    admin_bootstrap_password: str = ""
+    admin_bootstrap_display_name: str = "Admin"
 
     whatai_api_base: str = "https://api.whatai.cc"
     whatai_api_key: str = ""
@@ -180,6 +185,7 @@ def get_settings() -> Settings:
     ensure_project_venv_site_packages()
     settings = Settings()
     settings.storage_root.mkdir(parents=True, exist_ok=True)
+    settings.admin_frontend_dist.mkdir(parents=True, exist_ok=True)
     settings.database_url = resolve_database_url(settings.database_url)
     settings.storage_backend = (settings.storage_backend or "local").strip().lower()
     return settings
