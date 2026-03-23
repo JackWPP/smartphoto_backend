@@ -155,6 +155,8 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 
 ### 5. 热更新发布与回滚
 ```bash
+export COMPOSE_PROJECT_NAME=smartphoto_backend
+
 # 纯逻辑/文档/静态资源变更，无 migration
 ./scripts/deploy-prod.sh --image-tag recovery-20260323 --skip-migrate
 
@@ -167,6 +169,8 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 
 说明：
 - 生产机应保留自己的 `.env.prod`，发布包不要覆盖它
+- 使用部署包时，默认在新的 release 目录解压，不要在旧代码目录直接 `tar -xzf` 覆盖
+- 新旧目录必须复用同一个 `COMPOSE_PROJECT_NAME`，这样才会继续使用原有 `postgres/redis/storage` 卷
 - `deploy-prod.sh` 会做：本机 `docker build` -> 可选 `migrate` -> 热更新 `api/worker`
 - `rollback-prod.sh` 只替换 `api/worker`，不会动 `postgres/redis/storage` 卷
 - 若这次只是恢复到正确代码线，且预检确认 DB 仍在用户版迁移链，优先使用 `--skip-migrate`

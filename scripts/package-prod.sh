@@ -27,12 +27,15 @@ INCLUDE_PATHS=(
   "docs/运行与排障手册.md"
 )
 
-tar \
-  --exclude='adminfront/node_modules' \
-  --exclude='adminfront/dist' \
-  --exclude='__pycache__' \
-  --exclude='*.pyc' \
-  -czf "$ARCHIVE_PATH" \
-  "${INCLUDE_PATHS[@]}"
+# Only package git-tracked files from the approved whitelist so untracked workspace
+# leftovers cannot leak into release bundles.
+mapfile -d '' -t PACKAGE_FILES < <(git -c core.quotePath=false ls-files -z -- "${INCLUDE_PATHS[@]}")
+
+if [[ ${#PACKAGE_FILES[@]} -eq 0 ]]; then
+  echo "No tracked files matched the package whitelist." >&2
+  exit 1
+fi
+
+tar -czf "$ARCHIVE_PATH" "${PACKAGE_FILES[@]}"
 
 echo "Package created: ${ARCHIVE_PATH}"
