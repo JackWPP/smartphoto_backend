@@ -507,6 +507,34 @@ def _version_assets(
     )
 
 
+def _resolve_regenerate_carry_forward_version(
+    db: Session,
+    *,
+    session_id: str,
+    asset_family: str,
+    parent_asset_id: str | None,
+    last_version: int,
+) -> int:
+    if last_version <= 0:
+        raise AppError("invalid_request", "regenerate job requires an existing result version", 400)
+    if not parent_asset_id:
+        raise AppError("invalid_request", "regenerate job missing parent_asset_id", 400)
+
+    parent_asset = (
+        db.query(AssetModel)
+        .filter(
+            AssetModel.id == parent_asset_id,
+            AssetModel.session_id == session_id,
+            AssetModel.asset_family == asset_family,
+        )
+        .one_or_none()
+    )
+    if not parent_asset:
+        raise AppError("invalid_request", "parent asset not found for regenerate job", 400)
+
+    return parent_asset.version_no
+
+
 def _clone_asset_for_version(
     source_asset: AssetModel,
     *,
@@ -593,12 +621,19 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         carry_forward_sources: list[AssetModel] = []
         if job.job_type == "regenerate_asset" and last_version > 0:
             parent_asset_id = payload.get("parent_asset_id")
+            carry_forward_version = _resolve_regenerate_carry_forward_version(
+                db,
+                session_id=session.id,
+                asset_family="main_gallery",
+                parent_asset_id=parent_asset_id,
+                last_version=last_version,
+            )
             regenerated_slot_ids = {
                 str(item.get("slot_id") or item.get("role") or "").strip()
                 for item in plan
                 if isinstance(item, dict)
             }
-            for asset in _version_assets(db, session.id, last_version, asset_family="main_gallery"):
+            for asset in _version_assets(db, session.id, carry_forward_version, asset_family="main_gallery"):
                 if asset.id == parent_asset_id:
                     continue
                 slot_id = str(asset.slot_id or asset.asset_role or "").strip()
@@ -1185,7 +1220,14 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 if str(item.get("slot_id") or item.get("panel_id") or "").strip() == requested_slot_id
             ]
             parent_asset_id = payload.get("parent_asset_id")
-            for asset in _version_assets(db, session.id, last_version, asset_family="detail_page"):
+            carry_forward_version = _resolve_regenerate_carry_forward_version(
+                db,
+                session_id=session.id,
+                asset_family="detail_page",
+                parent_asset_id=parent_asset_id,
+                last_version=last_version,
+            )
+            for asset in _version_assets(db, session.id, carry_forward_version, asset_family="detail_page"):
                 if asset.asset_kind != "panel":
                     continue
                 if asset.id == parent_asset_id:

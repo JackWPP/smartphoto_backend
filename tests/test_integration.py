@@ -566,6 +566,100 @@ def test_regenerate_asset_preserves_history_and_materializes_full_version(client
     assert len(v1_again["assets"]) == len(v1_results["assets"])
 
 
+def test_regenerate_asset_from_historical_version_uses_parent_asset_version(client):
+    sid = create_ready_session(client)
+
+    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": None})
+    v1_results = client.get(f"/api/v2/sessions/{sid}/results?version=1").json()["data"]
+    v1_by_role = {item["role"]: item for item in v1_results["assets"]}
+
+    client.post(
+        f"/api/v2/assets/{v1_by_role['hero']['asset_id']}/regenerate",
+        json={"instruction": "首图改成更强点击", "keep_style_consistency": True},
+    )
+    v2_results = client.get(f"/api/v2/sessions/{sid}/results?version=2").json()["data"]
+    v2_by_role = {item["role"]: item for item in v2_results["assets"]}
+
+    client.post(
+        f"/api/v2/assets/{v1_by_role['scene']['asset_id']}/regenerate",
+        json={"instruction": "场景图改成露营场景", "keep_style_consistency": True},
+    )
+    v3_results = client.get(f"/api/v2/sessions/{sid}/results?version=3").json()["data"]
+    v3_by_role = {item["role"]: item for item in v3_results["assets"]}
+
+    assert v3_by_role["hero"]["image_url"] == v1_by_role["hero"]["image_url"]
+    assert v3_by_role["hero"]["image_url"] != v2_by_role["hero"]["image_url"]
+    assert v3_by_role["white_bg"]["image_url"] == v1_by_role["white_bg"]["image_url"]
+    assert v3_by_role["selling_point"]["image_url"] == v1_by_role["selling_point"]["image_url"]
+    assert v3_by_role["detail"]["image_url"] == v1_by_role["detail"]["image_url"]
+    assert v3_by_role["scene"]["image_url"] != v1_by_role["scene"]["image_url"]
+
+    with SessionLocal() as db:
+        carry_forward_hero = (
+            db.query(AssetModel)
+            .filter(
+                AssetModel.session_id == sid,
+                AssetModel.version_no == 3,
+                AssetModel.asset_family == "main_gallery",
+                AssetModel.asset_role == "hero",
+            )
+            .one()
+        )
+        assert (carry_forward_hero.generation_snapshot or {}).get("source_version_no") == 1
+
+
+def test_regenerate_detail_panel_from_historical_version_uses_parent_asset_version(client):
+    sid = create_ready_session(client)
+
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "详情页先出一版"})
+
+    v1_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=1").json()["data"]
+    v1_panels = sorted(v1_results["panels"], key=lambda item: item["display_order"])
+    first_panel = v1_panels[0]
+    second_panel = v1_panels[1]
+    v1_by_slot = {item["slot_id"]: item for item in v1_panels}
+
+    client.post(
+        f"/api/v2/assets/{first_panel['asset_id']}/regenerate",
+        json={"instruction": "首屏更强调卖点", "keep_style_consistency": True},
+    )
+    v2_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=2").json()["data"]
+    v2_by_slot = {item["slot_id"]: item for item in v2_results["panels"]}
+
+    client.post(
+        f"/api/v2/assets/{second_panel['asset_id']}/regenerate",
+        json={"instruction": "第二屏更强调参数", "keep_style_consistency": True},
+    )
+    v3_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=3").json()["data"]
+    v3_by_slot = {item["slot_id"]: item for item in v3_results["panels"]}
+
+    assert v3_by_slot[first_panel["slot_id"]]["image_url"] == v1_by_slot[first_panel["slot_id"]]["image_url"]
+    assert v3_by_slot[first_panel["slot_id"]]["image_url"] != v2_by_slot[first_panel["slot_id"]]["image_url"]
+    assert v3_by_slot[second_panel["slot_id"]]["image_url"] != v1_by_slot[second_panel["slot_id"]]["image_url"]
+    for slot_id, panel in v1_by_slot.items():
+        if slot_id in {first_panel["slot_id"], second_panel["slot_id"]}:
+            continue
+        assert v3_by_slot[slot_id]["image_url"] == panel["image_url"]
+    assert v3_results["stitched_asset"] is not None
+    assert v3_results["stitched_asset"]["version_no"] == 3
+    assert v3_results["stitched_asset"]["asset_id"] != v2_results["stitched_asset"]["asset_id"]
+
+    with SessionLocal() as db:
+        carry_forward_panel = (
+            db.query(AssetModel)
+            .filter(
+                AssetModel.session_id == sid,
+                AssetModel.version_no == 3,
+                AssetModel.asset_family == "detail_page",
+                AssetModel.asset_kind == "panel",
+                AssetModel.slot_id == first_panel["slot_id"],
+            )
+            .one()
+        )
+        assert (carry_forward_panel.generation_snapshot or {}).get("source_version_no") == 1
+
+
 def test_strategy_overrides_and_prompt_preset_flow(client):
     sid = create_ready_session(client)
 
