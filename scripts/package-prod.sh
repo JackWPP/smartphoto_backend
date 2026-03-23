@@ -16,6 +16,7 @@ INCLUDE_PATHS=(
   ".dockerignore"
   "docker-compose.prod.yml"
   ".env.prod.example"
+  "AGENTS.md"
   "pyproject.toml"
   "Readme.md"
   "alembic.ini"
@@ -35,4 +36,3 @@ tar \
   "${INCLUDE_PATHS[@]}"
 
 echo "Package created: ${ARCHIVE_PATH}"
-

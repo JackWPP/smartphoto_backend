@@ -661,11 +661,14 @@ data: {"event":"job_succeeded","job_id":"..."}
 
 ### 3.5 后台管理接口
 - 管理前缀：`/api/admin/v1`
+- 后台前端入口：`GET /admin`
 - 后台登录接口：
+  - `GET /auth/health`
   - `POST /auth/login`
   - `POST /auth/refresh`
   - `POST /auth/logout`
   - `GET /auth/me`
+- `GET /auth/health` 会校验后台 SQLite 是否可写、自动初始化 schema，并在配置了 `ADMIN_BOOTSTRAP_USERNAME/PASSWORD` 时自动补齐 bootstrap 管理员
 - 若后台前端和后端跨域，同样受 `CORS_ALLOW_ORIGINS` allowlist 控制
 - 后台管理对象：
   - `GET /dashboard/summary`
