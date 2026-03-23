@@ -177,3 +177,14 @@
   - `app.admin_db` 重新提供稳定导出入口，`app.admin_db.session` 新增 `engine = admin_engine` 兼容别名，避免旧发布目录残留模块导致 API 启动期 `ImportError`
   - `scripts/package-prod.sh` 改为仅打包 git-tracked 白名单文件，杜绝本地未跟踪源码或历史残留文件混入部署包
   - `docs/运行与排障手册.md` 与 `Readme.md` 明确将“新目录发布 + 固定 COMPOSE_PROJECT_NAME”设为默认流程，并补充旧目录覆盖解压的清理命令
+- 2026-03-23 Credits:
+  - 新增 `20260323_0010` 迁移：PostgreSQL 对 `users` 表增加注册赠送额度 trigger，新注册用户自动入账 `100` 点额度并写入 `credit_transactions`
+  - 同一迁移对迁移前已存在用户一次性补发 `1000` 点额度，账本 `source=legacy_bonus_20260323`
+  - SQLite/测试环境增加应用层回退逻辑，保证 `POST /api/v2/auth/register` 后钱包余额与流水语义与 PostgreSQL 保持一致
+  - 同步更新 `docs/API_联调指南.md`、`docs/运行与排障手册.md` 与用户额度回归测试
+- 2026-03-23 Admin Console:
+  - 后台控制台从单页 JSON dump 原型升级为路由化 `adminfront`，固定模块为 `Overview / Users / Sessions / Jobs / Assets / Prompts / Rule Packs / Audit / System`
+  - `/api/admin/v1` 新增 `dashboard/overview|trends|business`、`system/runtime|pricing`、`users/{id}/notifications`、`jobs/{id}/events/history`、`sessions/{id}/results`、`sessions/{id}/detail-pages/results` 与四组 session preview 包装接口
+  - 后台列表接口统一支持 `page/page_size/sort_by/sort_order`，审计日志扩展 `module/risk_level/operator_note`
+  - 额度调整、手工补单、Prompt/Rule Pack 变更、Session 干预、资产归档/恢复/重生成、Job 重试统一写后台审计备注
+  - 新增后台控制台集成测试，覆盖 Dashboard、System、用户通知、Session 预览/结果、Job 事件历史与审计留痕

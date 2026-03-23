@@ -11,6 +11,9 @@ class AdminAuditLogModel(AdminBase, UUIDPrimaryKeyMixin, TimestampMixin):
 
     admin_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     action: Mapped[str] = mapped_column(String(128), index=True)
+    module: Mapped[str] = mapped_column(String(64), default="general", index=True)
+    risk_level: Mapped[str] = mapped_column(String(32), default="medium", index=True)
+    operator_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
     target_type: Mapped[str] = mapped_column(String(64), index=True)
     target_id: Mapped[str] = mapped_column(String(64), index=True)
     request_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)

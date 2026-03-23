@@ -631,6 +631,7 @@ data: {"event":"job_succeeded","job_id":"..."}
 - 鉴权规则：
   - 业务接口默认走 `Authorization: Bearer <access_token>`
   - 刷新令牌使用 `HttpOnly` Cookie：`user_refresh_token`
+  - 用户注册成功后，系统会自动给该用户钱包入账 `100` 点额度；线上 PostgreSQL 通过 DB trigger 保证，SQLite/测试环境走应用层回退逻辑保持相同行为
   - `dev` 环境默认允许 `ALLOW_DEV_AUTH_BYPASS=true`，未带 token 时回落到固定开发用户；联调前建议关闭
   - `/platforms`、`/healthz`、`/openapi.json` 保持公开，其余 `/api/v2` 默认要求登录或 dev bypass
   - 若前后端跨域，后端需将前端 Origin 加入 `CORS_ALLOW_ORIGINS`，且浏览器请求需携带 `credentials: "include"`
@@ -653,6 +654,7 @@ data: {"event":"job_succeeded","job_id":"..."}
   - `image_type` 当前支持：`original` `main` `detail` `white_bg`
 - 用户商业化闭环说明：
   - 当前已实现额度价格规则、生成前余额校验、消费流水和失败自动退款
+  - `20260323_0010` 迁移会对迁移前已存在用户一次性补发 `1000` 点额度，并写入 `credit_transactions`
   - 价格以 `GET /account/pricing` 为准，不建议前端硬编码
   - 退款条件：任务最终 `failed` 且未产出任何 ready asset
 - 安全收口说明：
@@ -670,20 +672,75 @@ data: {"event":"job_succeeded","job_id":"..."}
   - `GET /auth/me`
 - `GET /auth/health` 会校验后台 SQLite 是否可写、自动初始化 schema，并在配置了 `ADMIN_BOOTSTRAP_USERNAME/PASSWORD` 时自动补齐 bootstrap 管理员
 - 若后台前端和后端跨域，同样受 `CORS_ALLOW_ORIGINS` allowlist 控制
+- 后台列表接口统一约定：
+  - 支持 `page/page_size/sort_by/sort_order`
+  - 响应统一返回分页元数据：`items/page/page_size/total/total_pages/has_next/has_prev`
+  - 当前已覆盖：`users/sessions/jobs/assets/audit-logs/prompt-presets/rule-packs`
+- 后台高风险写接口统一约定：
+  - 请求体支持 `operator_note`
+  - 审计日志会记录 `module/risk_level/operator_note/before_after_snapshot`
+  - 当前已覆盖：额度调整、手工补单、Prompt/Rule Pack 变更、Session copy/parameters/overrides 干预、Session 重跑、资产归档/恢复/重生成、Job 重试
 - 后台管理对象：
-  - `GET /dashboard/summary`
-  - `GET /sessions` / `GET /sessions/{id}`
-  - `PUT /sessions/{id}/copy|parameters|strategy/overrides|detail-pages/strategy/overrides`
-  - `POST /sessions/{id}/actions/reanalyze|extract-parameters|regenerate-main|regenerate-detail`
-  - `GET /jobs` / `GET /jobs/{id}` / `GET /jobs/{id}/events` / `POST /jobs/{id}/retry`
-  - `GET /assets` / `GET /assets/{id}` / `POST /assets/{id}/archive|restore|actions/regenerate`
-  - `GET|POST|PUT /prompt-presets` / `POST /prompt-presets/{id}/archive|clone`
-  - `GET|POST|PUT /rule-packs` / `GET /rule-packs/{id}` / `POST /rule-packs/{id}/publish|clone|archive`
-  - `GET /audit-logs`
-  - `GET /users` / `GET /users/{id}` / `POST /users/{id}/orders` / `POST /users/{id}/wallet/adjust`
+  - Dashboard：
+    - `GET /dashboard/summary`
+    - `GET /dashboard/overview`
+    - `GET /dashboard/trends`
+    - `GET /dashboard/business`
+  - System：
+    - `GET /system/runtime`
+    - `GET /system/pricing`
+  - Users：
+    - `GET /users`
+    - `GET /users/{id}`
+    - `GET /users/{id}/orders`
+    - `GET /users/{id}/notifications`
+    - `POST /users/{id}/orders`
+    - `POST /users/{id}/wallet/adjust`
+  - Sessions：
+    - `GET /sessions`
+    - `GET /sessions/{id}`
+    - `PUT /sessions/{id}/copy`
+    - `PUT /sessions/{id}/parameters`
+    - `PUT /sessions/{id}/strategy/overrides`
+    - `PUT /sessions/{id}/detail-pages/strategy/overrides`
+    - `POST /sessions/{id}/actions/reanalyze|extract-parameters|regenerate-main|regenerate-detail`
+    - `GET /sessions/{id}/results`
+    - `GET /sessions/{id}/detail-pages/results`
+    - `POST /sessions/{id}/strategy/preview`
+    - `POST /sessions/{id}/detail-pages/strategy/preview`
+    - `POST /sessions/{id}/prompts/preview`
+    - `POST /sessions/{id}/detail-pages/prompts/preview`
+  - Jobs：
+    - `GET /jobs`
+    - `GET /jobs/{id}`
+    - `GET /jobs/{id}/events`
+    - `GET /jobs/{id}/events/history`
+    - `POST /jobs/{id}/retry`
+  - Assets：
+    - `GET /assets`
+    - `GET /assets/{id}`
+    - `POST /assets/{id}/archive`
+    - `POST /assets/{id}/restore`
+    - `POST /assets/{id}/actions/regenerate`
+  - Prompts：
+    - `GET|POST /prompt-presets`
+    - `GET|PUT /prompt-presets/{id}`
+    - `POST /prompt-presets/{id}/archive`
+    - `POST /prompt-presets/{id}/clone`
+  - Rule Packs：
+    - `GET|POST /rule-packs`
+    - `GET|PUT /rule-packs/{id}`
+    - `POST /rule-packs/{id}/publish`
+    - `POST /rule-packs/{id}/clone`
+    - `POST /rule-packs/{id}/archive`
+  - Audit：
+    - `GET /audit-logs`
 - 资产归档语义：
   - 用户侧 `/api/v2/sessions/{id}/results|download` 默认隐藏 `visibility_status=archived` 资产
   - 后台侧可按 `visibility_status` 查看全部资产
+- 后台前端当前信息架构：
+  - `Overview / Users / Sessions / Jobs / Assets / Prompts / Rule Packs / Audit / System`
+  - 统一采用“列表 + 右侧详情工作台/抽屉”的操作模型，不再停留在 JSON dump 原型页
 
 ## 4. 实现 vs SPEC 差距清单（集中维护）
 1. `build_strategy` 当前为同步执行，不走 Worker 队列。
@@ -693,7 +750,7 @@ data: {"event":"job_succeeded","job_id":"..."}
 5. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
 6. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
 7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
-8. `adminfront/` 已提供最小可用后台，更偏运营/排障工作台，不是完整设计系统化的正式 B 端产品。
+8. `adminfront/` 已升级为可运营、可排障、可配置的后台控制台；当前仍未做 RBAC、多级审批流、运行时敏感配置在线编辑和任务强制取消。
 9. 当前已实现浏览器直传对象存储、`GET /account/pricing`、生成扣费与失败退款；仍未接真实支付、邮箱验证、找回密码和设备会话管理。
 10. 当前 CORS 为显式 allowlist 模式，不支持 `*`；跨域联调前必须先在后端配置实际前端 Origin。
 

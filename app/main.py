@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
             {"name": "admin-rule-packs", "description": "后台规则包管理与发布。"},
             {"name": "admin-audit", "description": "后台审计日志。"},
             {"name": "admin-users", "description": "后台用户、订单与额度管理。"},
+            {"name": "admin-system", "description": "后台运行时与定价配置观测。"},
         ],
     )
     allowed_origins = current_settings.parsed_cors_allow_origins()

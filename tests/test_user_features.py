@@ -112,6 +112,14 @@ def test_auth_register_login_refresh_logout_and_change_password(client):
     me = client.get("/api/v2/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
     assert me.json()["data"]["email"] == "user1@example.com"
+    wallet = client.get("/api/v2/account/wallet", headers={"Authorization": f"Bearer {token}"})
+    assert wallet.status_code == 200
+    assert wallet.json()["data"]["balance"] == 100
+    wallet_transactions = client.get("/api/v2/account/wallet/transactions", headers={"Authorization": f"Bearer {token}"})
+    assert wallet_transactions.status_code == 200
+    assert wallet_transactions.json()["data"]["total"] == 1
+    assert wallet_transactions.json()["data"]["items"][0]["source"] == "signup_bonus"
+    assert wallet_transactions.json()["data"]["items"][0]["balance_after"] == 100
 
     duplicate = client.post(
         "/api/v2/auth/register",
@@ -299,15 +307,15 @@ def test_account_orders_wallet_notifications_and_admin_user_endpoints(client):
     assert adjust.status_code == 200
 
     wallet = client.get("/api/v2/account/wallet", headers=headers).json()["data"]
-    assert wallet["balance"] == 60
+    assert wallet["balance"] == 160
 
     purchases = client.get("/api/v2/account/purchases", headers=headers).json()["data"]
     assert purchases["total"] == 1
     assert purchases["items"][0]["plan_name"] == "Starter Pack"
 
     txs = client.get("/api/v2/account/wallet/transactions", headers=headers).json()["data"]
-    assert txs["total"] == 2
-    assert {item["balance_after"] for item in txs["items"]} == {50, 60}
+    assert txs["total"] == 3
+    assert {item["balance_after"] for item in txs["items"]} == {100, 150, 160}
 
     notifications = client.get("/api/v2/account/notifications", headers=headers).json()["data"]
     assert notifications["unread_count"] >= 2
@@ -318,12 +326,12 @@ def test_account_orders_wallet_notifications_and_admin_user_endpoints(client):
     assert read_all.status_code == 200
 
     overview = client.get("/api/v2/account/overview", headers=headers).json()["data"]
-    assert overview["wallet_balance"] == 60
+    assert overview["wallet_balance"] == 160
     assert overview["unread_notification_count"] == 0
 
     detail = client.get(f"/api/admin/v1/users/{user_id}", headers=admin_headers)
     assert detail.status_code == 200
-    assert detail.json()["data"]["wallet"]["balance"] == 60
+    assert detail.json()["data"]["wallet"]["balance"] == 160
 
 
 def test_local_presign_upload_complete_flow(client):
@@ -363,6 +371,7 @@ def test_local_presign_upload_complete_flow(client):
 def test_insufficient_credits_and_failed_job_refund(client, monkeypatch):
     headers = register_user(client, "pricing@example.com", display_name="Pricing")
     session_id = create_ready_session(client, headers)
+    grant_credits_to_user(client, headers, credits=-100)
 
     insufficient = client.post(f"/api/v2/sessions/{session_id}/generations", json={"instruction": "生成一轮"}, headers=headers)
     assert insufficient.status_code == 402
@@ -397,7 +406,7 @@ def test_insufficient_credits_and_failed_job_refund(client, monkeypatch):
     assert job.json()["data"]["status"] == "failed"
 
     wallet = client.get("/api/v2/account/wallet", headers=refund_headers).json()["data"]
-    assert wallet["balance"] == 20
+    assert wallet["balance"] == 120
 
     pricing = client.get("/api/v2/account/pricing", headers=refund_headers)
     assert pricing.status_code == 200

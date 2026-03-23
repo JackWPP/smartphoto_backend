@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.admin_db.base import AdminBase
@@ -14,6 +15,26 @@ from app.core.config import get_settings
 def init_admin_schema() -> None:
     _ = (AdminAuditLogModel, AdminRefreshTokenModel, AdminUserModel)
     AdminBase.metadata.create_all(bind=admin_engine)
+    _reconcile_admin_audit_schema()
+
+
+def _reconcile_admin_audit_schema() -> None:
+    inspector = inspect(admin_engine)
+    if "admin_audit_logs" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("admin_audit_logs")}
+    statements: list[str] = []
+    if "module" not in existing:
+        statements.append("ALTER TABLE admin_audit_logs ADD COLUMN module VARCHAR(64) DEFAULT 'general'")
+    if "risk_level" not in existing:
+        statements.append("ALTER TABLE admin_audit_logs ADD COLUMN risk_level VARCHAR(32) DEFAULT 'medium'")
+    if "operator_note" not in existing:
+        statements.append("ALTER TABLE admin_audit_logs ADD COLUMN operator_note VARCHAR(500)")
+    if not statements:
+        return
+    with admin_engine.begin() as conn:
+        for statement in statements:
+            conn.execute(text(statement))
 
 
 def ensure_bootstrap_admin(admin_db: Session) -> AdminUserModel | None:
