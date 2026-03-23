@@ -173,3 +173,7 @@
   - 新增 `GET /api/admin/v1/auth/health`、`/admin` 后台前端入口、自举管理员初始化逻辑与对应回归测试
   - 新增 `scripts/preflight-prod.sh`，发布前固定检查 `.env.prod`、`alembic_version`、用户表与 `rule_pack*` schema，防止再把错误迁移链打进生产
   - 更新 `Readme.md`、`docs/API_联调指南.md`、`docs/运行与排障手册.md`，统一恢复发布与热更新说明
+- 2026-03-23 Ops Hotfix:
+  - `app.admin_db` 重新提供稳定导出入口，`app.admin_db.session` 新增 `engine = admin_engine` 兼容别名，避免旧发布目录残留模块导致 API 启动期 `ImportError`
+  - `scripts/package-prod.sh` 改为仅打包 git-tracked 白名单文件，杜绝本地未跟踪源码或历史残留文件混入部署包
+  - `docs/运行与排障手册.md` 与 `Readme.md` 明确将“新目录发布 + 固定 COMPOSE_PROJECT_NAME”设为默认流程，并补充旧目录覆盖解压的清理命令

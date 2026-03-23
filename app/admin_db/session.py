@@ -9,6 +9,8 @@ from app.core.config import get_settings
 settings = get_settings()
 connect_args = {"check_same_thread": False} if settings.admin_database_url.startswith("sqlite") else {}
 admin_engine = create_engine(settings.admin_database_url, future=True, pool_pre_ping=True, connect_args=connect_args)
+# Backward-compat alias for stale imports during rollout on previously dirty release directories.
+engine = admin_engine
 AdminSessionLocal = sessionmaker(bind=admin_engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 

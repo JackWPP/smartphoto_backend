@@ -1,4 +1,5 @@
 import io
+import importlib
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -87,6 +88,17 @@ def grant_credits_to_user(client, headers: dict, credits: int = 100) -> None:
     with db_session.SessionLocal() as db:
         adjust_wallet_balance(db, user_id=me["user_id"], credits_delta=credits, note="test topup", source="test_seed")
         db.commit()
+
+
+def test_admin_db_package_exports_and_main_import():
+    main_module = importlib.import_module("app.main")
+    admin_db_exports = importlib.import_module("app.admin_db")
+
+    assert main_module.app is not None
+    assert admin_db_exports.AdminSessionLocal is admin_db_session.AdminSessionLocal
+    assert admin_db_exports.admin_engine is admin_db_session.admin_engine
+    assert admin_db_exports.engine is admin_db_session.engine
+    assert admin_db_exports.get_admin_db is admin_db_session.get_admin_db
 
 
 def test_auth_register_login_refresh_logout_and_change_password(client):
