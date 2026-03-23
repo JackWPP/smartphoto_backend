@@ -513,6 +513,7 @@
   - `job_type`：`generate_detail_page`
   - 单 panel 重生：`POST /assets/{asset_id}/regenerate`
     - 当 `asset_family=detail_page` 且 `asset_kind=panel` 时，会转成 `job_type=regenerate_detail_panel`
+    - carry-forward 基线取 `parent_asset.version_no`；未改动 panel 与最终 stitched 长图都按该版本物化
   - 固定产出：
     - 8 张 `panel`
     - 1 张竖向拼接长图 `stitched`
@@ -560,7 +561,7 @@
   - `regenerate_asset`：`version_no + 1`，`round_no` 保持当前轮次，且写 `parent_asset_id`
 - 当前实现补充：
   - 任何 `version_no` 都按不可变快照保留，历史版本允许回看与下载
-  - `regenerate_asset` 会物化成完整新版本：新图 + carry-forward 旧版本其余图
+  - `regenerate_asset` 会物化成完整新版本：新图 + `parent_asset.version_no` 对应版本的其余图
   - 主图组会先批量提交全部上游异步任务，再集中轮询，再并发下载结果
   - 默认平台按 `hero -> white_bg -> selling_point -> scene -> detail` 生成
   - 阿里系平台按 `primary_kv -> reason_why -> proof_authority -> benefit_scene_or_compare -> closing_selling_point` 生成

@@ -186,6 +186,10 @@
 | `regenerate_gallery` | `POST /sessions/{id}/results/regenerate` | 整组重做 | +1 | +1 | 否 |
 | `regenerate_asset` | `POST /assets/{id}/regenerate` | 单图重做 | 不变 | +1 | 是 |
 
+补充：
+- 当 `/assets/{id}/regenerate` 命中 `detail_page/panel` 时，内部 job_type 为 `regenerate_detail_panel`，语义同样是“局部重做 + 新版本完整物化”。
+- `regenerate_asset` 与 `regenerate_detail_panel` 的 carry-forward 基线都必须取 `parent_asset.version_no`，不能直接取当前 `latest_result_version`。
+
 ## 5. 时序图
 
 ### 5.1 首次生图链路
@@ -256,11 +260,13 @@ sequenceDiagram
     W->>DB: job_succeeded
 ```
 
+- Worker 在物化新版本时，必须从 `parent_asset.version_no` 读取 carry-forward 资产；如果用户是在历史版本上发起单图或单 panel 重生成，未改动槽位必须继续继承该历史版本。
+
 ## 6. 一致性与可追溯约束
 1. Job 是唯一执行真相：任何生图动作都必须先建 job。
 2. Event 可重放：前端状态应由 job + job_events 驱动。
 3. 版本不可回退：`latest_result_version` 仅向前增长。
-4. 父子可追溯：单图重生成必须保存 `parent_asset_id`，carry-forward 资产必须在 `generation_snapshot` 中记录 `source_asset_id/source_version_no`。
+4. 父子可追溯：单图重生成必须保存 `parent_asset_id`，carry-forward 基线必须取 `parent_asset.version_no`，carry-forward 资产必须在 `generation_snapshot` 中记录 `source_asset_id/source_version_no`。
 5. 失败可定位：失败必须写 `job_failed` 且带错误信息。
 6. Prompt 可追溯：最终写入 `assets.prompt_snapshot` 的是实际提交给上游的 `final_prompt`。
 7. 引用可追溯：`assets.generation_snapshot` 必须记录 `reference_image_ids/reference_slots/upstream_endpoint/planner_instruction/size`。

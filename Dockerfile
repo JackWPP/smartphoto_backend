@@ -1,24 +1,36 @@
-FROM python:3.11-slim
+FROM node:20-alpine AS adminfront-builder
+
+WORKDIR /build/adminfront
+
+COPY adminfront/package.json ./
+RUN npm install
+
+COPY adminfront/ ./
+RUN npm run build
+
+
+FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-ARG PIP_INDEX_URL=http://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-ARG PIP_TRUSTED_HOST=mirrors.tuna.tsinghua.edu.cn
-
 WORKDIR /app
 
-COPY pyproject.toml Readme.md alembic.ini ./
-COPY alembic ./alembic
-COPY app ./app
-COPY scripts ./scripts
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN python -m pip install --upgrade pip \
-    && pip config set global.index-url "${PIP_INDEX_URL}" \
-    && pip config set global.trusted-host "${PIP_TRUSTED_HOST}" \
-    && pip install .
+COPY pyproject.toml Readme.md alembic.ini ./
+COPY app ./app
+COPY alembic ./alembic
+COPY scripts ./scripts
+COPY --from=adminfront-builder /build/adminfront/dist ./adminfront/dist
+
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install . \
+    && chmod +x ./scripts/*.sh
 
 EXPOSE 8000
 
-CMD ["bash", "scripts/docker-api.sh"]
+CMD ["./scripts/docker-api.sh"]
