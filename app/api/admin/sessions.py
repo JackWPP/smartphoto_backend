@@ -13,6 +13,7 @@ from app.api.v2.sessions import (
     preview_detail_prompts as public_preview_detail_prompts,
     preview_prompts as public_preview_prompts,
 )
+from app.core.actors import RequestActor
 from app.core.admin_deps import get_current_admin_user
 from app.core.response import success_response
 from app.db.session import get_db
@@ -50,6 +51,10 @@ from app.services.repo import get_session_or_404
 router = APIRouter(prefix="/sessions", tags=["admin-sessions"])
 
 
+def _session_actor(session: SessionModel) -> RequestActor:
+    return RequestActor(kind="user" if session.user_id else "guest", user_id=session.user_id, guest_id=session.guest_id)
+
+
 def _latest_jobs(db: Session, session_id: str) -> list[dict]:
     jobs = db.query(JobModel).filter(JobModel.session_id == session_id).order_by(JobModel.created_at.desc()).limit(10).all()
     return [serialize_job(job) for job in jobs]
@@ -63,8 +68,15 @@ def _latest_assets(db: Session, session_id: str) -> list[dict]:
 def _admin_job_for_session(db: Session, session: SessionModel, job_type: str, input_payload: dict | None = None) -> dict:
     payload = dict(input_payload or {})
     if job_type in {"generate_gallery", "regenerate_gallery", "global_edit", "regenerate_asset"}:
-        payload.setdefault("lock_keys", acquire_generation_locks(session.id, session.user_id))
-    job = create_job(db, session_id=session.id, user_id=session.user_id, job_type=job_type, input_payload=payload)
+        payload.setdefault("lock_keys", acquire_generation_locks(session.id, user_id=session.user_id, guest_id=session.guest_id))
+    job = create_job(
+        db,
+        session_id=session.id,
+        user_id=session.user_id,
+        guest_id=session.guest_id,
+        job_type=job_type,
+        input_payload=payload,
+    )
     db.commit()
     queue = "q.generation.main"
     if job_type in {"generate_detail_page", "regenerate_detail_panel"}:
@@ -77,6 +89,7 @@ def _admin_job_for_session(db: Session, session: SessionModel, job_type: str, in
 def list_sessions(
     session_id: str | None = None,
     user_id: str | None = None,
+    guest_id: str | None = None,
     platform_id: str | None = None,
     status: str | None = None,
     page: int = Query(default=1, ge=1),
@@ -91,6 +104,8 @@ def list_sessions(
         query = query.filter(SessionModel.id == session_id)
     if user_id:
         query = query.filter(SessionModel.user_id == user_id)
+    if guest_id:
+        query = query.filter(SessionModel.guest_id == guest_id)
     if platform_id:
         query = query.filter(SessionModel.active_platform_id == platform_id)
     if status:
@@ -111,6 +126,9 @@ def list_sessions(
                 {
                     "session_id": item.id,
                     "user_id": item.user_id,
+                    "guest_id": item.guest_id,
+                    "owner_kind": "user" if item.user_id else "guest",
+                    "owner_label": item.user_id or f"Guest {item.guest_id}",
                     "status": item.status,
                     "active_platform_id": item.active_platform_id,
                     "current_step": item.current_step,
@@ -301,7 +319,7 @@ def build_strategy_preview(
     _admin_user=Depends(get_current_admin_user),
 ) -> dict:
     session = get_session_or_404(db, session_id)
-    return public_build_strategy(session_id=session.id, req=req, db=db, user_id=session.user_id)
+    return public_build_strategy(session_id=session.id, req=req, db=db, actor=_session_actor(session))
 
 
 @router.post("/{session_id}/detail-pages/strategy/preview", response_model=APIResponse[DetailStrategyPreviewData], operation_id="adminBuildDetailStrategyPreview", responses={**OPENAPI_ERROR_RESPONSES})
@@ -323,7 +341,7 @@ def preview_prompts(
     _admin_user=Depends(get_current_admin_user),
 ) -> dict:
     session = get_session_or_404(db, session_id)
-    return public_preview_prompts(session_id=session.id, req=req, db=db, user_id=session.user_id)
+    return public_preview_prompts(session_id=session.id, req=req, db=db, actor=_session_actor(session))
 
 
 @router.post("/{session_id}/detail-pages/prompts/preview", response_model=APIResponse[DetailPromptPreviewData], operation_id="adminPreviewDetailPrompts", responses={**OPENAPI_ERROR_RESPONSES})
@@ -345,7 +363,7 @@ def get_results(
     _admin_user=Depends(get_current_admin_user),
 ) -> dict:
     session = get_session_or_404(db, session_id)
-    return public_get_results(session_id=session.id, version=version, db=db, user_id=session.user_id)
+    return public_get_results(session_id=session.id, version=version, db=db, actor=_session_actor(session))
 
 
 @router.get("/{session_id}/detail-pages/results", response_model=APIResponse[DetailResultsData], operation_id="adminGetDetailPageResults", responses={**OPENAPI_ERROR_RESPONSES})
@@ -425,7 +443,7 @@ def regenerate_main(
     admin_user=Depends(get_current_admin_user),
 ) -> dict:
     session = get_session_or_404(db, session_id)
-    ensure_no_running_generation_jobs(db, session.id, session.user_id)
+    ensure_no_running_generation_jobs(db, session.id, user_id=session.user_id, guest_id=session.guest_id)
     result = _admin_job_for_session(db, session, "generate_gallery", {"instruction": req.instruction, "slot_ids": req.slot_ids})
     append_admin_audit_log(
         admin_db,
@@ -454,7 +472,7 @@ def regenerate_detail(
     admin_user=Depends(get_current_admin_user),
 ) -> dict:
     session = get_session_or_404(db, session_id)
-    ensure_no_running_generation_jobs(db, session.id, session.user_id)
+    ensure_no_running_generation_jobs(db, session.id, user_id=session.user_id, guest_id=session.guest_id)
     result = _admin_job_for_session(db, session, "generate_detail_page", {"instruction": req.instruction})
     append_admin_audit_log(
         admin_db,

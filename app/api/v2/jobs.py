@@ -6,13 +6,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sse_starlette import EventSourceResponse
 
-from app.core.deps import get_current_user_id
+from app.core.actors import RequestActor
+from app.core.deps import get_request_actor
 from app.core.response import success_response
 from app.db import session as db_session
 from app.db.session import get_db
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.schemas.jobs import JobStatusData
-from app.services.repo import get_job_for_user_or_404, list_job_events_after
+from app.services.repo import get_job_for_actor_or_404, list_job_events_after
 
 router = APIRouter(tags=["jobs"])
 
@@ -25,8 +26,8 @@ router = APIRouter(tags=["jobs"])
     operation_id="getJobStatus",
     responses={**OPENAPI_ERROR_RESPONSES},
 )
-def get_job_status(job_id: str, db: Session = Depends(get_db), user_id=Depends(get_current_user_id)) -> dict:
-    job = get_job_for_user_or_404(db, job_id, str(user_id))
+def get_job_status(job_id: str, db: Session = Depends(get_db), actor: RequestActor = Depends(get_request_actor)) -> dict:
+    job = get_job_for_actor_or_404(db, job_id, user_id=actor.user_id, guest_id=actor.guest_id)
     timing_snapshot = dict(job.timing_snapshot or {})
     current_stage = timing_snapshot.get("current_stage") or {}
     current_stage_elapsed_ms = None
@@ -76,9 +77,9 @@ def get_job_status(job_id: str, db: Session = Depends(get_db), user_id=Depends(g
         **OPENAPI_ERROR_RESPONSES,
     },
 )
-async def stream_job_events(job_id: str, user_id=Depends(get_current_user_id)) -> EventSourceResponse:
+async def stream_job_events(job_id: str, actor: RequestActor = Depends(get_request_actor)) -> EventSourceResponse:
     with db_session.SessionLocal() as db:
-        get_job_for_user_or_404(db, job_id, str(user_id))
+        get_job_for_actor_or_404(db, job_id, user_id=actor.user_id, guest_id=actor.guest_id)
 
     async def event_generator():
         last_seq = 0
@@ -90,7 +91,7 @@ async def stream_job_events(job_id: str, user_id=Depends(get_current_user_id)) -
                         last_seq = evt.seq_no
                         yield {"data": json.dumps(evt.payload, ensure_ascii=False)}
 
-                job = get_job_for_user_or_404(db, job_id, str(user_id))
+                job = get_job_for_actor_or_404(db, job_id, user_id=actor.user_id, guest_id=actor.guest_id)
                 if job.status in {"succeeded", "failed", "canceled", "partial_succeeded"}:
                     break
             await asyncio.sleep(1)

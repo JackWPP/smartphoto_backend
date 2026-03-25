@@ -623,3 +623,58 @@ def test_render_single_asset_white_bg_validation_uses_capability_flag(monkeypatc
     assert generate_calls["count"] == 2
     assert validate_calls["count"] == 2
     assert rendered["generation_snapshot"]["white_bg_validation"]["retry_applied"] is True
+
+
+def test_render_single_asset_white_bg_validation_soft_fails_after_retry(monkeypatch):
+    generate_calls = {"count": 0}
+    validate_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_prompt",
+        lambda **kwargs: {
+            "final_prompt": f"prompt-{kwargs['instruction'] or 'base'}",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+            "copy_blocks": {},
+            "expression_mode": "clean_packshot",
+            "rule_modules_used": ["rule.module"],
+            "resolved_constraints": ["pure white"],
+        },
+    )
+    monkeypatch.setattr("app.services.pipeline.strengthen_white_bg_instruction", lambda: "加强白底")
+
+    def fake_validate(_bytes):
+        validate_calls["count"] += 1
+        return False, {"edge_white_ratio": 0.9526, "outer_band_white_ratio": 0.9455, "major_components": 1}
+
+    monkeypatch.setattr("app.services.pipeline.validate_white_background", fake_validate)
+
+    class DummyClient:
+        def __init__(self):
+            self.settings = SimpleNamespace(whatai_api_key="test-key")
+
+        def generate_image(self, *_args, **_kwargs):
+            generate_calls["count"] += 1
+            return f"image-{generate_calls['count']}".encode("utf-8")
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    rendered = _render_single_asset(
+        confirmed_copy={"product_name": "空气净化器"},
+        strategy_preview={"planner_instruction": None},
+        plan_item={
+            "role": "white_bg",
+            "slot_id": "white_bg",
+            "display_order": 1,
+            "aspect_ratio": "1:1",
+            "platform_rule_pack": "default_main_gallery",
+            "requires_white_bg_validation": True,
+        },
+        instruction="保持高级感",
+        loaded_reference_images=[],
+    )
+
+    assert generate_calls["count"] == 2
+    assert validate_calls["count"] == 2
+    assert rendered["generation_snapshot"]["white_bg_validation"]["retry_applied"] is True
+    assert rendered["generation_snapshot"]["white_bg_validation"]["soft_failed"] is True

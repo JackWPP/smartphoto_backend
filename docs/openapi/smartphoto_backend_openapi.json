@@ -11598,6 +11598,22 @@
             }
           },
           {
+            "name": "guest_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Guest Id"
+            }
+          },
+          {
             "name": "platform_id",
             "in": "query",
             "required": false,
@@ -14211,6 +14227,22 @@
                 }
               ],
               "title": "User Id"
+            }
+          },
+          {
+            "name": "guest_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Guest Id"
             }
           },
           {
@@ -23238,8 +23270,35 @@
             "title": "Session Id"
           },
           "user_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "User Id"
+          },
+          "guest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guest Id"
+          },
+          "owner_kind": {
+            "type": "string",
+            "title": "Owner Kind",
+            "default": "user"
+          },
+          "owner_label": {
+            "type": "string",
+            "title": "Owner Label"
           },
           "job_type": {
             "type": "string",
@@ -23375,7 +23434,7 @@
         "required": [
           "job_id",
           "session_id",
-          "user_id",
+          "owner_label",
           "job_type",
           "status",
           "progress"
@@ -24675,8 +24734,35 @@
             "title": "Session Id"
           },
           "user_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "User Id"
+          },
+          "guest_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guest Id"
+          },
+          "owner_kind": {
+            "type": "string",
+            "title": "Owner Kind",
+            "default": "user"
+          },
+          "owner_label": {
+            "type": "string",
+            "title": "Owner Label"
           },
           "status": {
             "type": "string",
@@ -24731,7 +24817,7 @@
         "type": "object",
         "required": [
           "session_id",
-          "user_id",
+          "owner_label",
           "status",
           "current_step",
           "latest_result_version",
@@ -25279,6 +25365,12 @@
             "examples": [
               "queued"
             ]
+          },
+          "auth_mode": {
+            "type": "string",
+            "title": "Auth Mode",
+            "description": "当前请求身份模式：user 或 guest。",
+            "default": "user"
           }
         },
         "type": "object",
@@ -26078,6 +26170,30 @@
             ],
             "title": "Pricing Rule Id",
             "description": "本次匹配的定价规则 ID。"
+          },
+          "guest_trial": {
+            "type": "boolean",
+            "title": "Guest Trial",
+            "description": "详情页生成不支持匿名试用，固定为 false。",
+            "default": false
+          },
+          "guest_quota_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guest Quota Remaining",
+            "description": "匿名访客剩余可用的首轮生成次数。"
+          },
+          "login_required_after_result": {
+            "type": "boolean",
+            "title": "Login Required After Result",
+            "description": "详情页生成不支持匿名继续。",
+            "default": false
           }
         },
         "type": "object",
@@ -27083,6 +27199,30 @@
             ],
             "title": "Pricing Rule Id",
             "description": "本次匹配的定价规则 ID。"
+          },
+          "guest_trial": {
+            "type": "boolean",
+            "title": "Guest Trial",
+            "description": "本次是否消耗匿名试用次数。",
+            "default": false
+          },
+          "guest_quota_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guest Quota Remaining",
+            "description": "匿名访客剩余可用的首轮生成次数。"
+          },
+          "login_required_after_result": {
+            "type": "boolean",
+            "title": "Login Required After Result",
+            "description": "本轮结果出来后是否需要登录才能继续后续动作。",
+            "default": false
           }
         },
         "type": "object",
@@ -27135,6 +27275,30 @@
             ],
             "title": "Pricing Rule Id",
             "description": "本次匹配的定价规则 ID。"
+          },
+          "guest_trial": {
+            "type": "boolean",
+            "title": "Guest Trial",
+            "description": "非首轮主图生成固定为 false。",
+            "default": false
+          },
+          "guest_quota_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guest Quota Remaining",
+            "description": "匿名访客剩余可用的首轮生成次数。"
+          },
+          "login_required_after_result": {
+            "type": "boolean",
+            "title": "Login Required After Result",
+            "description": "该动作是否要求结果后先登录。",
+            "default": false
           }
         },
         "type": "object",
@@ -29376,6 +29540,44 @@
             "type": "integer",
             "title": "Detail Latest Result Version",
             "description": "最近一版详情页结果版本号。"
+          },
+          "auth_mode": {
+            "type": "string",
+            "title": "Auth Mode",
+            "description": "当前请求身份模式：user 或 guest。",
+            "default": "user"
+          },
+          "guest_quota_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guest Quota Remaining",
+            "description": "匿名访客剩余可用的首轮生成次数。"
+          },
+          "login_required_actions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Login Required Actions",
+            "description": "当前结果后需要先登录的动作列表。"
+          },
+          "can_download": {
+            "type": "boolean",
+            "title": "Can Download",
+            "description": "当前身份是否可直接下载结果。",
+            "default": true
+          },
+          "can_continue_editing": {
+            "type": "boolean",
+            "title": "Can Continue Editing",
+            "description": "当前身份是否可继续编辑或再次生成。",
+            "default": true
           }
         },
         "type": "object",

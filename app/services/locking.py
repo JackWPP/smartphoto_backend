@@ -17,10 +17,12 @@ class RedisLockManager:
         self.redis.delete(key)
 
 
-def acquire_generation_locks(session_id: str, user_id: str) -> list[str]:
+def acquire_generation_locks(session_id: str, user_id: str | None = None, guest_id: str | None = None) -> list[str]:
     manager = RedisLockManager()
     session_lock = f"lock:session:{session_id}:generation"
-    user_lock = f"lock:user:{user_id}:generation"
+    if (user_id is None and guest_id is None) or (user_id is not None and guest_id is not None):
+        raise AppError("invalid_request", "generation lock owner required", 400)
+    owner_lock = f"lock:user:{user_id}:generation" if user_id is not None else f"lock:guest:{guest_id}:generation"
     acquired: list[str] = []
 
     try:
@@ -29,8 +31,8 @@ def acquire_generation_locks(session_id: str, user_id: str) -> list[str]:
         else:
             raise AppError("job_already_running", http_status=409)
 
-        if manager.acquire(user_lock):
-            acquired.append(user_lock)
+        if manager.acquire(owner_lock):
+            acquired.append(owner_lock)
         else:
             raise AppError("job_already_running", http_status=409)
     except AppError:

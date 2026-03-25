@@ -14,7 +14,12 @@ GENERATION_JOB_TYPES = {
 }
 
 
-def ensure_no_running_generation_jobs(db: Session, session_id: str, user_id: str) -> None:
+def ensure_no_running_generation_jobs(
+    db: Session,
+    session_id: str,
+    user_id: str | None = None,
+    guest_id: str | None = None,
+) -> None:
     session_running = (
         db.query(JobModel)
         .filter(
@@ -24,14 +29,26 @@ def ensure_no_running_generation_jobs(db: Session, session_id: str, user_id: str
         )
         .count()
     )
-    user_running = (
-        db.query(JobModel)
-        .filter(
-            JobModel.user_id == user_id,
-            JobModel.job_type.in_(GENERATION_JOB_TYPES),
-            JobModel.status.in_(RUNNING_JOB_STATES),
+    user_running = 0
+    if user_id is not None:
+        user_running = (
+            db.query(JobModel)
+            .filter(
+                JobModel.user_id == user_id,
+                JobModel.job_type.in_(GENERATION_JOB_TYPES),
+                JobModel.status.in_(RUNNING_JOB_STATES),
+            )
+            .count()
         )
-        .count()
-    )
+    elif guest_id is not None:
+        user_running = (
+            db.query(JobModel)
+            .filter(
+                JobModel.guest_id == guest_id,
+                JobModel.job_type.in_(GENERATION_JOB_TYPES),
+                JobModel.status.in_(RUNNING_JOB_STATES),
+            )
+            .count()
+        )
     if session_running > 0 or user_running > 0:
         raise AppError("job_already_running", http_status=409)

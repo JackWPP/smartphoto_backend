@@ -136,8 +136,8 @@
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `POST /uploads/presign` | 申请直传签名 | 用户 | `upload_kind/content_type/file_name` | 上传 URL、表单字段、`object_key` |
-| `POST /uploads/complete` | 确认上传完成 | 用户 | `upload_kind/object_key` + 业务归属字段 | 可被业务表引用的上传结果 |
+| `POST /uploads/presign` | 申请直传签名 | 用户 / Guest | `upload_kind/content_type/file_name` | 上传 URL、表单字段、`object_key` |
+| `POST /uploads/complete` | 确认上传完成 | 用户 / Guest | `upload_kind/object_key` + 业务归属字段 | 可被业务表引用的上传结果 |
 
 `upload_kind` 当前支持：
 
@@ -152,68 +152,68 @@
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `POST /sessions` | 创建 Session | 用户 | 可选初始字段 | `session_id/status/current_step` |
-| `GET /sessions/{session_id}` | 读取 Session | 用户 | 无 | Session 完整状态与快照 |
+| `POST /sessions` | 创建 Session | 用户 / Guest | 可选初始字段 | `session_id/status/current_step` |
+| `GET /sessions/{session_id}` | 读取 Session | 用户 / Guest | 无 | Session 完整状态与快照、`auth_mode/guest_quota_remaining/login_required_actions` |
 
 #### 2.5.2 商品图上传
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `GET /sessions/{session_id}/images` | 读取商品图列表 | 用户 | 无 | 图片列表 |
-| `POST /sessions/{session_id}/images` | 关联/上传商品图 | 用户 | `slot_type/display_order` + 文件或 `object_key` | 新图片记录 |
-| `DELETE /sessions/{session_id}/images/{image_id}` | 删除商品图 | 用户 | 无 | 删除结果 |
+| `GET /sessions/{session_id}/images` | 读取商品图列表 | 用户 / Guest | 无 | 图片列表 |
+| `POST /sessions/{session_id}/images` | 关联/上传商品图 | 用户 / Guest | `slot_type/display_order` + 文件或 `object_key` | 新图片记录 |
+| `DELETE /sessions/{session_id}/images/{image_id}` | 删除商品图 | 用户 / Guest | 无 | 删除结果 |
 
 #### 2.5.3 分析
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `POST /sessions/{session_id}/analysis` | 触发分析 job | 用户 | 可带 `Idempotency-Key` | `job_id/status` |
-| `GET /sessions/{session_id}/analysis` | 读取分析快照 | 用户 | 无 | `analysis_snapshot/reference_summary` |
+| `POST /sessions/{session_id}/analysis` | 触发分析 job | 用户 / Guest | 可带 `Idempotency-Key` | `job_id/status/auth_mode` |
+| `GET /sessions/{session_id}/analysis` | 读取分析快照 | 用户 / Guest | 无 | `analysis_snapshot/reference_summary` |
 
 #### 2.5.4 平台选择
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `PUT /sessions/{session_id}/platform-selection` | 保存选中平台 | 用户 | `selected_platform_ids/active_platform_id` | 更新后的 session |
+| `PUT /sessions/{session_id}/platform-selection` | 保存选中平台 | 用户 / Guest | `selected_platform_ids/active_platform_id` | 更新后的 session |
 
 #### 2.5.5 Copy
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `GET /sessions/{session_id}/copy` | 读取 Step 4 copy | 用户 | 无 | 正式 copy 字段 |
-| `PUT /sessions/{session_id}/copy` | 保存 Step 4 copy | 用户 | `product_name/category/hero_scene/core_selling_points/key_parameters/product_advantages/style_preset_id/style_custom` | 更新后的 copy |
-| `POST /sessions/{session_id}/copy/regenerate` | 局部字段重写 | 用户 | `targets`，支持 `hero_scene/core_selling_points/key_parameters/product_advantages`，兼容 `headline/selling_points/usage_scenes/specs` | `job_id` |
-| `GET /sessions/{session_id}/copy/regenerate/{job_id}` | 查询字段重写结果 | 用户 | 无 | `generated_fields` |
+| `GET /sessions/{session_id}/copy` | 读取 Step 4 copy | 用户 / Guest | 无 | 正式 copy 字段 |
+| `PUT /sessions/{session_id}/copy` | 保存 Step 4 copy | 用户 / Guest | `product_name/category/hero_scene/core_selling_points/key_parameters/product_advantages/style_preset_id/style_custom` | 更新后的 copy |
+| `POST /sessions/{session_id}/copy/regenerate` | 局部字段重写 | 用户 / Guest | `targets`，支持 `hero_scene/core_selling_points/key_parameters/product_advantages`，兼容 `headline/selling_points/usage_scenes/specs` | `job_id` |
+| `GET /sessions/{session_id}/copy/regenerate/{job_id}` | 查询字段重写结果 | 用户 / Guest | 无 | `generated_fields` |
 
 #### 2.5.6 参数附件与参数提取
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `GET /sessions/{session_id}/parameter-attachments` | 读取参数附件 | 用户 | 无 | 附件列表 |
-| `POST /sessions/{session_id}/parameter-attachments` | 添加参数附件 | 用户 | 文件或 `object_key` | 附件记录 |
-| `DELETE /sessions/{session_id}/parameter-attachments/{attachment_id}` | 删除参数附件 | 用户 | 无 | 删除结果 |
-| `POST /sessions/{session_id}/parameters/extract` | 触发参数提取 | 用户 | 可选策略参数 | `job_id` |
-| `GET /sessions/{session_id}/parameters` | 读取参数快照 | 用户 | 无 | `parameter_snapshot/applied_copy_fields` |
-| `PUT /sessions/{session_id}/parameters` | 覆盖参数快照 | 用户 | `hero_scene/core_selling_points/key_parameters/product_advantages/...` | 更新后的参数 |
+| `GET /sessions/{session_id}/parameter-attachments` | 读取参数附件 | 用户 / Guest | 无 | 附件列表 |
+| `POST /sessions/{session_id}/parameter-attachments` | 添加参数附件 | 用户 / Guest | 文件或 `object_key` | 附件记录 |
+| `DELETE /sessions/{session_id}/parameter-attachments/{attachment_id}` | 删除参数附件 | 用户 / Guest | 无 | 删除结果 |
+| `POST /sessions/{session_id}/parameters/extract` | 触发参数提取 | 用户 / Guest | 可选策略参数 | `job_id` |
+| `GET /sessions/{session_id}/parameters` | 读取参数快照 | 用户 / Guest | 无 | `parameter_snapshot/applied_copy_fields` |
+| `PUT /sessions/{session_id}/parameters` | 覆盖参数快照 | 用户 / Guest | `hero_scene/core_selling_points/key_parameters/product_advantages/...` | 更新后的参数 |
 
 #### 2.5.7 策略参考图与主图策略
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `GET /sessions/{session_id}/strategy-reference-images` | 读取策略参考图 | 用户 | 无 | 参考图列表 |
-| `POST /sessions/{session_id}/strategy-reference-images` | 添加策略参考图 | 用户 | 文件或 `object_key` | 参考图记录 |
-| `DELETE /sessions/{session_id}/strategy-reference-images/{image_id}` | 删除策略参考图 | 用户 | 无 | 删除结果 |
-| `POST /sessions/{session_id}/strategy/preview` | 构建主图策略预览 | 用户 | `planner_instruction/slot_preferences` | `strategy_preview/asset_plan/prompt_plan` |
-| `GET /sessions/{session_id}/strategy/overrides` | 读取主图 override | 用户 | 无 | override 列表 |
-| `PUT /sessions/{session_id}/strategy/overrides` | 保存主图 override | 用户 | `overrides` | 更新后的 override |
-| `POST /sessions/{session_id}/prompts/preview` | 预览主图 prompt | 用户 | `instruction/include_latest_assets` | prompt 列表、reference 使用情况 |
+| `GET /sessions/{session_id}/strategy-reference-images` | 读取策略参考图 | 用户 / Guest | 无 | 参考图列表 |
+| `POST /sessions/{session_id}/strategy-reference-images` | 添加策略参考图 | 用户 / Guest | 文件或 `object_key` | 参考图记录 |
+| `DELETE /sessions/{session_id}/strategy-reference-images/{image_id}` | 删除策略参考图 | 用户 / Guest | 无 | 删除结果 |
+| `POST /sessions/{session_id}/strategy/preview` | 构建主图策略预览 | 用户 / Guest | `planner_instruction/slot_preferences` | `strategy_preview/asset_plan/prompt_plan` |
+| `GET /sessions/{session_id}/strategy/overrides` | 读取主图 override | 用户 / Guest | 无 | override 列表 |
+| `PUT /sessions/{session_id}/strategy/overrides` | 保存主图 override | 用户 / Guest | `overrides` | 更新后的 override |
+| `POST /sessions/{session_id}/prompts/preview` | 预览主图 prompt | 用户 / Guest | `instruction/include_latest_assets` | prompt 列表、reference 使用情况 |
 
 #### 2.5.8 主图生成与结果
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `POST /sessions/{session_id}/generations` | 触发主图生成 | 用户 | `instruction/slot_ids` | `job_id/charged_credits/balance_after/pricing_rule_id` |
-| `GET /sessions/{session_id}/results` | 读取主图结果 | 用户 | `version` | 当前版本、可用版本、资产列表 |
+| `POST /sessions/{session_id}/generations` | 触发主图生成 | 用户 / Guest(仅首轮整组) | `instruction/slot_ids` | 用户返回 `charged_credits/...`；Guest 额外返回 `guest_trial/guest_quota_remaining/login_required_after_result` |
+| `GET /sessions/{session_id}/results` | 读取主图结果 | 用户 / Guest | `version` | 当前版本、可用版本、资产列表 |
 | `POST /sessions/{session_id}/results/regenerate` | 整组重新生成 | 用户 | 生成指令 | `job_id` |
 | `POST /sessions/{session_id}/results/global-edit` | 批量属性修改 | 用户 | 编辑指令 | `job_id` |
 | `GET /sessions/{session_id}/download` | 下载主图 ZIP | 用户 | `version` | ZIP 文件流 |
@@ -237,8 +237,8 @@
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `GET /jobs/{job_id}` | 读取 job 状态 | 用户 | 无 | `status/progress/error/timing` |
-| `GET /jobs/{job_id}/events` | 读取 job 事件流 | 用户 | SSE | `job_queued/job_started/job_progress/asset_ready/job_succeeded/job_failed` |
+| `GET /jobs/{job_id}` | 读取 job 状态 | 用户 / Guest(仅本人 job) | 无 | `status/progress/error/timing` |
+| `GET /jobs/{job_id}/events` | 读取 job 事件流 | 用户 / Guest(仅本人 job) | SSE | `job_queued/job_started/job_progress/asset_ready/job_succeeded/job_failed` |
 | `POST /assets/{asset_id}/regenerate` | 单资产重生成 | 用户 | `instruction/keep_style_consistency` | `job_id`，主图与详情页 panel 共用 |
 
 ### 2.7 用户侧 Prompt Preset

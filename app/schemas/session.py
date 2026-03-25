@@ -526,6 +526,9 @@ class GenerationJobData(BaseModel):
     charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
     balance_after: int = Field(default=0, description="扣费后的余额。")
     pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
+    guest_trial: bool = Field(default=False, description="本次是否消耗匿名试用次数。")
+    guest_quota_remaining: int | None = Field(default=None, description="匿名访客剩余可用的首轮生成次数。")
+    login_required_after_result: bool = Field(default=False, description="本轮结果出来后是否需要登录才能继续后续动作。")
 
 
 class DetailGenerationJobData(BaseModel):
@@ -537,6 +540,9 @@ class DetailGenerationJobData(BaseModel):
     charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
     balance_after: int = Field(default=0, description="扣费后的余额。")
     pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
+    guest_trial: bool = Field(default=False, description="详情页生成不支持匿名试用，固定为 false。")
+    guest_quota_remaining: int | None = Field(default=None, description="匿名访客剩余可用的首轮生成次数。")
+    login_required_after_result: bool = Field(default=False, description="详情页生成不支持匿名继续。")
 
 
 class GenericGenerationJobData(BaseModel):
@@ -546,6 +552,9 @@ class GenericGenerationJobData(BaseModel):
     charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
     balance_after: int = Field(default=0, description="扣费后的余额。")
     pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
+    guest_trial: bool = Field(default=False, description="非首轮主图生成固定为 false。")
+    guest_quota_remaining: int | None = Field(default=None, description="匿名访客剩余可用的首轮生成次数。")
+    login_required_after_result: bool = Field(default=False, description="该动作是否要求结果后先登录。")
 
 
 class GalleryRegenerateRequest(BaseModel):
@@ -569,6 +578,7 @@ class AnalysisTriggerData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     job_type: str = Field(description="任务类型。", examples=["analysis"])
     status: str = Field(description="任务状态。", examples=["queued"])
+    auth_mode: str = Field(default="user", description="当前请求身份模式：user 或 guest。")
 
 
 class AnalysisData(BaseModel):
@@ -594,3 +604,8 @@ class SessionSnapshotData(BaseModel):
     latest_result_version: int = Field(description="最近一版结果版本号。")
     detail_generation_round: int = Field(description="当前详情页生成轮次。")
     detail_latest_result_version: int = Field(description="最近一版详情页结果版本号。")
+    auth_mode: str = Field(default="user", description="当前请求身份模式：user 或 guest。")
+    guest_quota_remaining: int | None = Field(default=None, description="匿名访客剩余可用的首轮生成次数。")
+    login_required_actions: list[str] = Field(default_factory=list, description="当前结果后需要先登录的动作列表。")
+    can_download: bool = Field(default=True, description="当前身份是否可直接下载结果。")
+    can_continue_editing: bool = Field(default=True, description="当前身份是否可继续编辑或再次生成。")

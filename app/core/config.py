@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     tasks_eager: bool = False
     allow_dev_auth_bypass: bool = True
     user_jwt_secret: str = "smartphoto-user-dev-secret"
+    guest_cookie_name: str = "smartphoto_guest"
+    guest_cookie_ttl_days: int = Field(default=30, ge=1, le=365)
+    guest_trial_quota_total: int = Field(default=3, ge=1, le=20)
     user_access_token_exp_minutes: int = Field(default=120, ge=5, le=1440)
     user_refresh_token_exp_days: int = Field(default=14, ge=1, le=180)
     auth_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)

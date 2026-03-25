@@ -197,3 +197,10 @@
   - `POST /api/v2/sessions/{session_id}/copy/regenerate` 扩展为新旧字段双兼容：正式字段 `hero_scene/core_selling_points/key_parameters/product_advantages` 与 legacy `headline/selling_points/usage_scenes/specs` 都可下发到 worker，避免 `invalid_copy_field`
   - `run_regenerate_copy_job` 对列表/结构化参数字段先规范化成可重写文本，再交给上游 copy regenerate，防止 `key_parameters/core_selling_points` 直接传 list/dict 进重写器
   - 运行排障手册补充生产上传链路建议：前端若位于 ESA / CDN Worker 后，应优先走 `/api/v2/uploads/presign|complete`，避免二进制 multipart 经边缘代理返回 `524`
+- 2026-03-24 Guest Trial:
+  - 新增 `guest_identities` 模型与 `20260324_0011` 迁移；`sessions/jobs/idempotency_records` 改为 `user_id/guest_id` 二选一归属，并增加所有权约束
+  - 新增 `RequestActor` 与 guest cookie 识别逻辑：未登录浏览器可匿名完成 `POST /api/v2/sessions`、Step1~Step5 和首轮 `POST /api/v2/sessions/{session_id}/generations`
+  - `GET /api/v2/sessions/{session_id}` 与首轮生成响应新增 `auth_mode/guest_quota_remaining/login_required_actions/guest_trial/login_required_after_result`
+  - guest 首轮主图生成默认每浏览器 3 次；第 4 次返回 `40302 guest_trial_exhausted`；下载、全局修改、重生成、详情页生成等结果后动作返回 `40102 login_required`
+  - `POST /api/v2/auth/register|login` 现在会自动认领当前浏览器 guest 的 `sessions/jobs/idempotency_records`，登录后结果页与账户历史无缝续接
+  - 后台 `sessions/jobs` 列表与序列化兼容 guest owner，新增 `guest_id/owner_kind/owner_label` 字段

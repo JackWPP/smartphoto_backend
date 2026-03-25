@@ -58,7 +58,7 @@ def _mark_job_failed(db, job, error_code: str, error_message: str) -> None:
         )
         .count()
     )
-    if ready_asset_count == 0:
+    if ready_asset_count == 0 and job.user_id:
         refund_generation_charge(db, user_id=job.user_id, job_id=job.id, session_id=job.session_id)
     if job.job_type in {
         "generate_gallery",
@@ -68,14 +68,15 @@ def _mark_job_failed(db, job, error_code: str, error_message: str) -> None:
         "generate_detail_page",
         "regenerate_detail_panel",
     }:
-        create_job_completion_notification(
-            db,
-            user_id=job.user_id,
-            session_id=job.session_id,
-            job_type=job.job_type,
-            succeeded=False,
-            error_message=error_message,
-        )
+        if job.user_id:
+            create_job_completion_notification(
+                db,
+                user_id=job.user_id,
+                session_id=job.session_id,
+                job_type=job.job_type,
+                succeeded=False,
+                error_message=error_message,
+            )
 
 
 @shared_task(bind=True, name="app.workers.tasks.execute_job", max_retries=3)
