@@ -134,7 +134,7 @@ def _session_prompt_overrides(db: Session, session_id: str) -> list[dict[str, An
     session = _require_session(db, session_id)
     presets_by_id: dict[str, Any] = {}
     if preset_ids:
-        presets = list_visible_prompt_presets_by_ids(db, preset_ids, user_id=session.user_id)
+        presets = list_visible_prompt_presets_by_ids(db, preset_ids, user_id=session.user_id or "")
         presets_by_id = {preset.id: preset for preset in presets}
     return [
         serialize_session_override(
@@ -151,7 +151,7 @@ def _resolved_copy_for_session(db: Session, session: SessionModel) -> dict[str, 
         copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
     preset_id = copy_data.get("style_preset_id")
     if preset_id:
-        presets = list_visible_prompt_presets_by_ids(db, [str(preset_id)], user_id=session.user_id)
+        presets = list_visible_prompt_presets_by_ids(db, [str(preset_id)], user_id=session.user_id or "")
         preset = presets[0] if presets else None
         if preset is not None:
             copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
@@ -775,13 +775,14 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         }
         update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
         append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
-        create_job_completion_notification(
-            db,
-            user_id=session.user_id,
-            session_id=session.id,
-            job_type=job.job_type,
-            succeeded=True,
-        )
+        if session.user_id:
+            create_job_completion_notification(
+                db,
+                user_id=session.user_id,
+                session_id=session.id,
+                job_type=job.job_type,
+                succeeded=True,
+            )
     except AppError as exc:
         update_job_status(
             db,
@@ -1055,10 +1056,12 @@ def _finalize_main_rendered_asset(
             validation_result = diagnostics
             prompt_payload = retry_prompt_payload
             if not passed:
-                raise AppError(
-                    "upstream_image_error",
-                    f"white background validation failed after retry: {diagnostics}",
-                    502,
+                diagnostics["soft_failed"] = True
+                logger.warning(
+                    "white background validation soft-failed after retry: role=%s slot_id=%s diagnostics=%s",
+                    render_spec["role"],
+                    render_spec["slot_id"],
+                    diagnostics,
                 )
 
     generation_snapshot = {
@@ -1160,10 +1163,12 @@ def _render_single_asset(
             validation_result = diagnostics
             prompt_payload = retry_prompt_payload
             if not passed:
-                raise AppError(
-                    "upstream_image_error",
-                    f"white background validation failed after retry: {diagnostics}",
-                    502,
+                diagnostics["soft_failed"] = True
+                logger.warning(
+                    "white background validation soft-failed after retry: role=%s slot_id=%s diagnostics=%s",
+                    role,
+                    slot_id,
+                    diagnostics,
                 )
 
     generation_snapshot = {
@@ -1439,13 +1444,14 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             },
         )
         append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
-        create_job_completion_notification(
-            db,
-            user_id=session.user_id,
-            session_id=session.id,
-            job_type=job.job_type,
-            succeeded=True,
-        )
+        if session.user_id:
+            create_job_completion_notification(
+                db,
+                user_id=session.user_id,
+                session_id=session.id,
+                job_type=job.job_type,
+                succeeded=True,
+            )
     finally:
         release_locks(lock_keys)
 

@@ -7,6 +7,10 @@
   - `POST /uploads/presign`
   - 直传对象存储
   - `POST /uploads/complete`
+- Session 主链路现在支持匿名 guest：
+  - 未登录也可以 `POST /sessions` 并完成 Step1~Step6 首轮主图生成
+  - 登录/注册成功后，后端会自动认领当前浏览器 guest cookie 关联的 session/job
+  - 详情页生成、下载、全局修改、整组重生成、单图重生成仍要求登录
 - 业务表中持久化的是稳定 `object_key`，接口返回的 `url/image_url/thumbnail_url` 已改为临时可访问 URL
 - 账户中心新增 `GET /account/pricing`
 - 生成类接口响应新增：
@@ -84,6 +88,8 @@
 - `40403` `asset_not_found`
 - `40901` `job_already_running`
 - `40902` `duplicate_idempotency_key`
+- `40102` `login_required`
+- `40302` `guest_trial_exhausted`
 - `50201` `upstream_llm_error`
 - `50202` `upstream_image_error`
 
@@ -101,6 +107,10 @@
   - 前端先调用 `POST /uploads/presign`
   - 再直传 OSS / S3 兼容对象存储
   - 最后调用 `POST /uploads/complete`
+- 匿名语义：
+  - `POST /sessions`、商品图上传/删除/列表、参数附件、策略参考图和 Step2~Step5 都允许 guest actor
+  - 未带 Bearer 且未命中 dev bypass 时，后端会自动签发 HttpOnly guest cookie
+  - 同一浏览器后续请求会复用该 guest 身份，直到登录/注册自动认领
 - `upload_kind`：
   - `session_image`
   - `detail_style_image`
@@ -551,6 +561,20 @@
   - `slot_ids: string[]`
     - 为空时生成整组
     - 传入时只生成指定槽位，适合单张调试
+- 匿名首轮生成语义：
+  - guest 仅允许“主图整组首次生成”；不允许 `slot_ids` 局部调试
+  - 匿名额度默认每浏览器 3 次，按 guest cookie 计数，不扣用户钱包
+  - 第 4 次匿名首轮生成返回 `40302 guest_trial_exhausted`
+  - guest 的首次生成响应会额外返回：
+    - `guest_trial`
+    - `guest_quota_remaining`
+    - `login_required_after_result`
+  - 结果页可直接查看完整主图，但以下动作必须先登录：
+    - `GET /sessions/{session_id}/download`
+    - `POST /sessions/{session_id}/results/global-edit`
+    - `POST /sessions/{session_id}/results/regenerate`
+    - `POST /assets/{asset_id}/regenerate`
+    - `POST /sessions/{session_id}/detail-pages/generations`
 - 结果集字段补充：
   - `requested_version`
   - `available_versions`
@@ -563,6 +587,12 @@
   - `assets[].display_order`
   - `assets[].version_no`
   - `assets[].render_total_ms`
+- `GET /sessions/{session_id}` 现在会额外返回：
+  - `auth_mode: guest | user`
+  - `guest_quota_remaining`
+  - `login_required_actions`
+  - `can_download`
+  - `can_continue_editing`
 - 版本规则：
   - `generate_gallery` / `global_edit` / `regenerate_gallery`：`round_no + 1` 且 `version_no + 1`
   - `regenerate_asset`：`version_no + 1`，`round_no` 保持当前轮次，且写 `parent_asset_id`
@@ -640,7 +670,9 @@ data: {"event":"job_succeeded","job_id":"..."}
   - 刷新令牌使用 `HttpOnly` Cookie：`user_refresh_token`
   - 用户注册成功后，系统会自动给该用户钱包入账 `100` 点额度；线上 PostgreSQL 通过 DB trigger 保证，SQLite/测试环境走应用层回退逻辑保持相同行为
   - `dev` 环境默认允许 `ALLOW_DEV_AUTH_BYPASS=true`，未带 token 时回落到固定开发用户；联调前建议关闭
-  - `/platforms`、`/healthz`、`/openapi.json` 保持公开，其余 `/api/v2` 默认要求登录或 dev bypass
+  - `/platforms`、`/healthz`、`/openapi.json` 保持公开
+  - `POST /sessions`、`GET /sessions/{id}`、商品图/参数附件/策略参考图、Step2~Step5 与首轮 `POST /sessions/{id}/generations` 允许 guest actor
+  - 登录或注册成功后，后端会自动把当前浏览器 guest cookie 关联的 `sessions/jobs/idempotency_records` 认领到当前用户
   - 若前后端跨域，后端需将前端 Origin 加入 `CORS_ALLOW_ORIGINS`，且浏览器请求需携带 `credentials: "include"`
 - 账户中心接口：
   - `GET /account/overview`

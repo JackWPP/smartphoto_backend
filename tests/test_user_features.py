@@ -12,6 +12,8 @@ from app.core.config import get_settings
 from app.core.errors import AppError
 from app.db import session as db_session
 from app.main import create_app
+from app.models.guest_identity import GuestIdentityModel
+from app.services.guest_identities import decode_guest_cookie_token
 from app.services.user_accounts import adjust_wallet_balance
 
 
@@ -159,6 +161,79 @@ def test_unauthorized_when_dev_bypass_disabled(client, monkeypatch):
     get_settings.cache_clear()
     response = client.get("/api/v2/account/overview")
     assert response.status_code == 401
+    get_settings.cache_clear()
+
+
+def test_guest_can_finish_first_main_generation_then_must_login_for_restricted_actions(client, monkeypatch):
+    monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "false")
+    get_settings.cache_clear()
+
+    sid = create_ready_session(client, headers={})
+    snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert snapshot["auth_mode"] == "guest"
+    assert snapshot["can_download"] is False
+    assert snapshot["can_continue_editing"] is False
+    assert "download" in snapshot["login_required_actions"]
+    assert snapshot["guest_quota_remaining"] == 3
+
+    generation = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "先生成一轮"})
+    assert generation.status_code == 200, generation.text
+    generation_data = generation.json()["data"]
+    assert generation_data["guest_trial"] is True
+    assert generation_data["guest_quota_remaining"] == 2
+    assert generation_data["login_required_after_result"] is True
+
+    results = client.get(f"/api/v2/sessions/{sid}/results")
+    assert results.status_code == 200, results.text
+    assert results.json()["data"]["summary"]["ready_count"] >= 1
+
+    assert client.get(f"/api/v2/sessions/{sid}/download").status_code == 401
+    assert client.post(f"/api/v2/sessions/{sid}/results/regenerate", json={"instruction": "再来一版"}).status_code == 401
+    assert client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "详情页也来一版"}).status_code == 401
+
+    headers = register_user(client, "guest-claim@example.com", display_name="Guest Claimed")
+    claimed_snapshot = client.get(f"/api/v2/sessions/{sid}", headers=headers)
+    assert claimed_snapshot.status_code == 200
+    assert claimed_snapshot.json()["data"]["auth_mode"] == "user"
+    assert claimed_snapshot.json()["data"]["can_download"] is True
+
+    assets = client.get("/api/v2/account/assets", headers=headers).json()["data"]["items"]
+    assert sid in {item["session_id"] for item in assets}
+    assert client.get(f"/api/v2/sessions/{sid}/download", headers=headers).status_code == 200
+    get_settings.cache_clear()
+
+
+def test_guest_trial_quota_exhausts_on_fourth_gallery_generation(client, monkeypatch):
+    monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "false")
+    get_settings.cache_clear()
+
+    def _guest_ready_session() -> str:
+        sid = create_ready_session(client, headers={})
+        response = client.get(f"/api/v2/sessions/{sid}")
+        assert response.status_code == 200
+        return sid
+
+    for expected_remaining in (2, 1, 0):
+        sid = _guest_ready_session()
+        response = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "匿名主图首轮"})
+        assert response.status_code == 200, response.text
+        payload = response.json()["data"]
+        assert payload["guest_trial"] is True
+        assert payload["guest_quota_remaining"] == expected_remaining
+
+    sid = _guest_ready_session()
+    exhausted = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "第四次匿名主图"})
+    assert exhausted.status_code == 403
+    exhausted_payload = exhausted.json()
+    assert exhausted_payload["message"] == "guest trial exhausted"
+    assert exhausted_payload["code"] == 40302
+
+    guest_cookie = client.cookies.get(get_settings().guest_cookie_name)
+    guest_id = decode_guest_cookie_token(guest_cookie)
+    assert guest_id
+    with db_session.SessionLocal() as db:
+        guest = db.get(GuestIdentityModel, guest_id)
+        assert int(guest.quota_used) == 3
     get_settings.cache_clear()
 
 

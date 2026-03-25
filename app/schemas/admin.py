@@ -91,7 +91,10 @@ class AdminDashboardBusinessData(BaseModel):
 
 class AdminSessionListItem(BaseModel):
     session_id: str
-    user_id: str
+    user_id: str | None = None
+    guest_id: str | None = None
+    owner_kind: str = "user"
+    owner_label: str
     status: str
     active_platform_id: str | None = None
     current_step: int
@@ -114,7 +117,10 @@ class AdminSessionListData(AdminPaginationData):
 class AdminJobItem(BaseModel):
     job_id: str
     session_id: str
-    user_id: str
+    user_id: str | None = None
+    guest_id: str | None = None
+    owner_kind: str = "user"
+    owner_label: str
     job_type: str
     status: str
     progress: int

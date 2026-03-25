@@ -9,6 +9,7 @@
 | 逻辑 Agent | 职责 | 主要代码映射 |
 |---|---|---|
 | Session Orchestrator | 接收请求、做前置状态校验、创建 job、分发任务 | `app/api/v2/sessions.py`, `app/api/v2/assets.py` |
+| Guest Identity Agent | 维护 guest cookie、试用额度与登录后自动认领 | `app/core/deps.py`, `app/services/guest_identities.py` |
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
 | Parameter Extract Agent | 读取参数附件，产出 `parameter_snapshot` | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
@@ -27,6 +28,7 @@
 - 输入：HTTP 请求（含 session_id、asset_id、instruction、Idempotency-Key）
 - 输出：`job_id` 或同步业务数据
 - 状态责任：
+  - 识别 `RequestActor(user|guest)`，资源 owner 改为 `user_id` 或 `guest_id` 二选一
   - 校验 session 状态与前置条件
   - 创建 `jobs` 记录（`queued`）
   - 分发到 `q.analysis` / `q.copy` / `q.generation.main` / `q.generation.detail`
@@ -35,6 +37,22 @@
 - 详情页补充：
   - `POST /sessions/{id}/detail-pages/generations` 创建 `generate_detail_page`
   - 与主图 generation 共用同一套并发锁与冲突码 `40901/40902`
+- Guest 补充：
+  - guest 允许跑完整 Step1~Step6 首轮主图生成与结果查询
+  - guest 不允许下载、详情页生成、全局修改、整组重生成、单图重生成
+  - 登录/注册成功时，由 Guest Identity Agent 自动认领当前浏览器 guest 下的 `sessions/jobs/idempotency_records`
+
+### 3.1.1 Guest Identity Agent
+- 输入：浏览器 Cookie、登录/注册事件、guest 配额消耗动作
+- 输出：`RequestActor(kind=guest|user)`、guest cookie、claim 结果
+- 状态责任：
+  - 创建 `guest_identities`
+  - 维护 `quota_total/quota_used`
+  - 追踪 `claimed_user_id/claimed_at`
+  - 登录或注册成功时把 guest 资源迁移给当前用户
+- 失败处理：
+  - 试用额度耗尽返回 `40302 guest_trial_exhausted`
+  - 结果后动作需要登录时返回 `40102 login_required`
 
 ### 3.2 Analysis Agent
 - 输入：session 可用图片 + active_platform（可空）
@@ -101,6 +119,10 @@
   - 详情页默认并发 `detail_generation_concurrency=6`
   - 上游任务提交默认并发 `generation_submit_concurrency=6`
   - 即使内部并发执行，Asset 最终持久化顺序仍按 `display_order`
+- Guest 首轮生成补充：
+  - 仅 `generate_gallery` 整组首轮允许 guest 触发
+  - guest 首轮生成不调用钱包扣费，而是原子消耗 `guest_identities.quota_used`
+  - guest 首轮生成响应会追加 `guest_trial/guest_quota_remaining/login_required_after_result`
 - Prompt 结构：
   - `blocks.goal`
   - `blocks.subject`
@@ -175,7 +197,7 @@
 - 事件：`job_queued/job_started/job_progress/asset_ready/job_succeeded/job_failed`
 - 并发规则：
   - 同 session 同时最多 1 个生图任务
-  - 同 user 同时最多 1 个生图任务
+  - 同 user 或同 guest 同时最多 1 个生图任务
   - Redis 不可用时降级到 DB 检查
   - 详情页 generation 也参与同一套互斥，不允许和主图 generation 并行
 

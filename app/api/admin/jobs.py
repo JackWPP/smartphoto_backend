@@ -31,6 +31,7 @@ def list_jobs(
     status: str | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    guest_id: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     sort_by: str | None = Query(default="created_at"),
@@ -47,6 +48,8 @@ def list_jobs(
         query = query.filter(JobModel.session_id == session_id)
     if user_id:
         query = query.filter(JobModel.user_id == user_id)
+    if guest_id:
+        query = query.filter(JobModel.guest_id == guest_id)
     sort_column = JobModel.created_at
     if sort_by == "queued_at":
         sort_column = JobModel.queued_at
@@ -86,6 +89,7 @@ def retry_job(
         db,
         session_id=job.session_id,
         user_id=job.user_id,
+        guest_id=job.guest_id,
         job_type=job.job_type,
         input_payload=job.input_payload,
         idempotency_key=None,

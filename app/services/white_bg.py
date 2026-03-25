@@ -43,7 +43,7 @@ def validate_white_background(image_bytes: bytes) -> tuple[bool, dict[str, Any]]
 def strengthen_white_bg_instruction() -> str:
     return (
         "严格输出单产品标准电商白底图：纯白无缝背景，主体完整居中，边缘干净，"
-        "不要任何人物、手模、道具、场景、文字、水印、边框或阴影脏污。"
+        "不要任何人物、手模、道具、场景、文字、水印、边框、台面、底部投影、灰边、渐变边或阴影脏污。"
     )
 
 
