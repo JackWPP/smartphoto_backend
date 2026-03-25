@@ -35,12 +35,30 @@
 - 联调真相文档：`docs/API_联调指南.md`
 - 生图执行语义文档：`docs/生图Agent协作逻辑.md`
 - 运维与排障文档：`docs/运行与排障手册.md`
+- 生产上线真相文档：`docs/生产上线SOP.md`
 - 触发条件与责任：
   - 新增/修改路由、请求参数、响应结构：必须更新 `docs/API_联调指南.md`
   - 新增/修改 job_type、事件流、版本语义、锁策略：必须更新 `docs/生图Agent协作逻辑.md`
   - 新增/修改错误码、诊断路径、运行命令：必须更新 `docs/运行与排障手册.md`
+  - 新增/修改发布流程、发包命令、备份步骤、回滚步骤、固定运维约束：必须更新 `docs/生产上线SOP.md`
   - 若实现行为与 SPEC 不一致：必须更新 `docs/API_联调指南.md` 的“实现 vs SPEC 差距清单”
   - 完成上述更新后，再更新 `AGENTS.md` 里程碑日志
+
+## 生产上线固定约束
+- 生产默认路径：`/opt/smartphoto_backend`
+- 生产 compose project 必须固定：`COMPOSE_PROJECT_NAME=smartphoto_backend`
+- 生产默认流程必须使用“新 release 目录解压 + 复制服务器 `.env.prod` + preflight + deploy/rollback”
+- 非必要不执行 `docker compose down`
+- 非必要不重建 `postgres` / `redis`
+- 改 `.env.prod` 后禁止只用 `docker compose restart`；必须 `up -d --force-recreate`
+- 有 Alembic migration 的发布必须先做 PostgreSQL 备份，再执行不带 `--skip-migrate` 的发布
+- 无 migration 的纯应用层发布必须优先使用 `./scripts/deploy-prod.sh --skip-migrate`
+- 发布后最少执行：
+  - `curl http://127.0.0.1:8000/healthz`
+  - `curl http://127.0.0.1:8000/api/admin/v1/auth/health`
+  - CORS 预检
+  - `docker compose logs --tail=... api worker`
+- 具体命令真相源见：`docs/生产上线SOP.md`
 
 ## 测试门禁
 - 至少通过以下检查：
@@ -204,3 +222,21 @@
   - guest 首轮主图生成默认每浏览器 3 次；第 4 次返回 `40302 guest_trial_exhausted`；下载、全局修改、重生成、详情页生成等结果后动作返回 `40102 login_required`
   - `POST /api/v2/auth/register|login` 现在会自动认领当前浏览器 guest 的 `sessions/jobs/idempotency_records`，登录后结果页与账户历史无缝续接
   - 后台 `sessions/jobs` 列表与序列化兼容 guest owner，新增 `guest_id/owner_kind/owner_label` 字段
+- 2026-03-25 Guest Alignment:
+  - guest 能力扩展到详情页真实链路：`detail-pages/style-images|strategy/overrides|prompts/preview|generations|results` 全部支持 `RequestActor(kind=guest)`
+  - 新增显式认领接口 `POST /api/v2/guest/sessions/{session_id}/claim`；与登录/注册自动认领共用同一套 guest 迁移逻辑，并保持原 `session_id` 不变
+  - guest 门禁收口为“下载与结果后二次编辑再登录”：`download/detail-pages/download/results/global-edit/results/regenerate/assets/{id}/regenerate` 仍返回 `40102 login_required`
+  - guest 配额升级为主图与详情页共用同一浏览器 `3` 次匿名整组生成；`generate_detail_page` 响应同步补齐 `guest_trial/guest_quota_remaining/login_required_after_result`
+  - `GUEST_COOKIE_TTL_DAYS` 默认收口为 `1`（24 小时软失效），guest 过期后不可继续创作或认领
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/API_全量接口手册.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、OpenAPI 导出与 guest 回归测试
+- 2026-03-25 Guest First:
+  - guest 门禁进一步收口为“仅下载与历史要求登录”：当前 session 内的主图/详情页生成、全局修改、整组重生成、单图重生成全部对 guest 放开
+  - `POST /api/v2/auth/register|login` 不再自动认领当前浏览器 guest 资源；前端需在登录后显式调用 `POST /api/v2/guest/sessions/{session_id}/claim`
+  - `POST /api/v2/guest/sessions/{session_id}/claim` 改为只迁移当前 session 及其关联 jobs / idempotency_records，不再认领整浏览器 guest 身份
+  - `GET /api/v2/sessions/{session_id}` 的 guest 响应改为 `can_continue_editing=true`、`login_required_actions=["download","save_history"]`、`guest_quota_remaining=null`
+  - guest 产品级配额关闭；生成响应中的 `guest_trial/guest_quota_remaining/login_required_after_result` 仅保留兼容字段，固定返回 `false/null/false`
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/API_全量接口手册.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、SPEC、OpenAPI 导出与 guest 回归测试
+- 2026-03-25 Ops SOP:
+  - 新增 `docs/生产上线SOP.md`，固化单机 Docker Compose 生产发包、备份、预检、发布、冒烟、回滚和常见坑位
+  - `AGENTS.md` 新增生产上线固定约束，后续 session 默认按 `COMPOSE_PROJECT_NAME=smartphoto_backend + 新 release 目录` 路径执行
+  - `Readme.md` 与 `scripts/package-prod.sh` 同步挂入上线 SOP 文档入口，确保部署包内也包含该文档

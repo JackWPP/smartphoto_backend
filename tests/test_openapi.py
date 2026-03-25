@@ -13,6 +13,7 @@ def test_openapi_contains_key_paths_and_operation_ids():
     assert "/api/v2/account/pricing" in spec["paths"]
     assert "/api/v2/uploads/presign" in spec["paths"]
     assert "/api/v2/uploads/complete" in spec["paths"]
+    assert "/api/v2/guest/sessions/{session_id}/claim" in spec["paths"]
     assert "/api/v2/sessions/{session_id}/prompts/preview" in spec["paths"]
     assert "/api/v2/sessions/{session_id}/detail-pages/generations" in spec["paths"]
     assert "/api/admin/v1/auth/login" in spec["paths"]
@@ -29,6 +30,7 @@ def test_openapi_contains_key_paths_and_operation_ids():
     assert spec["paths"]["/api/v2/account/pricing"]["get"]["operationId"] == "getAccountPricing"
     assert spec["paths"]["/api/v2/uploads/presign"]["post"]["operationId"] == "presignUpload"
     assert spec["paths"]["/api/v2/uploads/complete"]["post"]["operationId"] == "completeUpload"
+    assert spec["paths"]["/api/v2/guest/sessions/{session_id}/claim"]["post"]["operationId"] == "claimGuestSession"
     assert spec["paths"]["/api/v2/sessions/{session_id}/prompts/preview"]["post"]["operationId"] == "previewPrompts"
     assert spec["paths"]["/api/v2/sessions/{session_id}/detail-pages/generations"]["post"]["operationId"] == "generateDetailPage"
     assert spec["paths"]["/api/v2/assets/{asset_id}/regenerate"]["post"]["operationId"] == "regenerateAsset"

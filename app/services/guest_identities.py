@@ -7,11 +7,13 @@ import json
 from datetime import timedelta, timezone
 
 from fastapi import Request, Response
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.actors import RequestActor
 from app.core.config import get_settings
 from app.core.user_auth import now_utc
+from app.models.asset import AssetModel
 from app.models.guest_identity import GuestIdentityModel
 from app.models.idempotency import IdempotencyRecordModel
 from app.models.job import JobModel
@@ -20,6 +22,17 @@ from app.models.session import SessionModel
 
 def _guest_secret() -> bytes:
     return f"{get_settings().user_jwt_secret}:guest".encode("utf-8")
+
+
+def _guest_expiry_delta() -> timedelta:
+    return timedelta(days=get_settings().guest_cookie_ttl_days)
+
+
+def is_guest_identity_expired(guest: GuestIdentityModel) -> bool:
+    first_seen_at = guest.first_seen_at
+    if first_seen_at.tzinfo is None:
+        first_seen_at = first_seen_at.replace(tzinfo=timezone.utc)
+    return first_seen_at + _guest_expiry_delta() <= now_utc()
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -108,7 +121,7 @@ def get_guest_identity_from_request(db: Session, request: Request) -> GuestIdent
     if not guest_id:
         return None
     guest = db.query(GuestIdentityModel).filter(GuestIdentityModel.id == guest_id).one_or_none()
-    if guest is None or guest.claimed_user_id is not None:
+    if guest is None or guest.claimed_user_id is not None or is_guest_identity_expired(guest):
         return None
     guest.last_seen_at = now_utc()
     db.flush()
@@ -133,7 +146,7 @@ def get_guest_quota_remaining(guest: GuestIdentityModel | None) -> int | None:
 
 def consume_guest_quota(db: Session, guest_id: str) -> GuestIdentityModel:
     guest = db.query(GuestIdentityModel).filter(GuestIdentityModel.id == guest_id).with_for_update().one_or_none()
-    if guest is None or guest.claimed_user_id is not None:
+    if guest is None or guest.claimed_user_id is not None or is_guest_identity_expired(guest):
         raise ValueError("guest identity missing")
     if int(guest.quota_used or 0) >= int(guest.quota_total or 0):
         from app.core.errors import AppError
@@ -145,41 +158,57 @@ def consume_guest_quota(db: Session, guest_id: str) -> GuestIdentityModel:
     return guest
 
 
-def claim_guest_identity(db: Session, guest_id: str, user_id: str) -> bool:
+def claim_guest_session(db: Session, session_id: str, guest_id: str, user_id: str) -> bool:
     guest = db.query(GuestIdentityModel).filter(GuestIdentityModel.id == guest_id).one_or_none()
-    if guest is None:
-        return False
-    if guest.claimed_user_id == user_id:
-        return True
-    if guest.claimed_user_id is not None:
+    if guest is None or guest.claimed_user_id is not None or is_guest_identity_expired(guest):
         return False
 
-    db.query(SessionModel).filter(SessionModel.guest_id == guest_id, SessionModel.user_id.is_(None)).update(
-        {"user_id": user_id, "guest_id": None},
-        synchronize_session=False,
-    )
-    db.query(JobModel).filter(JobModel.guest_id == guest_id, JobModel.user_id.is_(None)).update(
-        {"user_id": user_id, "guest_id": None},
-        synchronize_session=False,
-    )
-    db.query(IdempotencyRecordModel).filter(
-        IdempotencyRecordModel.guest_id == guest_id,
-        IdempotencyRecordModel.user_id.is_(None),
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).with_for_update().one_or_none()
+    if session is None:
+        return False
+    if session.user_id == user_id and session.guest_id is None:
+        return True
+    if session.user_id is not None or session.guest_id != guest_id:
+        return False
+
+    session.user_id = user_id
+    session.guest_id = None
+
+    db.query(JobModel).filter(
+        JobModel.session_id == session_id,
+        JobModel.guest_id == guest_id,
+        JobModel.user_id.is_(None),
     ).update(
         {"user_id": user_id, "guest_id": None},
         synchronize_session=False,
     )
-    guest.claimed_user_id = user_id
-    guest.claimed_at = now_utc()
+
+    session_endpoint_scope = IdempotencyRecordModel.endpoint.like(f"%/sessions/{session_id}/%")
+    asset_ids = [asset_id for asset_id, in db.query(AssetModel.id).filter(AssetModel.session_id == session_id).all()]
+    if asset_ids:
+        asset_endpoint_scope = or_(
+            *[IdempotencyRecordModel.endpoint == f"POST /assets/{asset_id}/regenerate" for asset_id in asset_ids]
+        )
+        idempotency_scope = or_(session_endpoint_scope, asset_endpoint_scope)
+    else:
+        idempotency_scope = session_endpoint_scope
+
+    db.query(IdempotencyRecordModel).filter(
+        IdempotencyRecordModel.guest_id == guest_id,
+        IdempotencyRecordModel.user_id.is_(None),
+        idempotency_scope,
+    ).update(
+        {"user_id": user_id, "guest_id": None},
+        synchronize_session=False,
+    )
+
     guest.last_seen_at = now_utc()
     db.flush()
     return True
-
-
-def claim_guest_from_request(db: Session, request: Request, response: Response, user_id: str) -> bool:
-    guest_id = decode_guest_cookie_token(request.cookies.get(get_settings().guest_cookie_name))
+def get_active_guest_identity_by_id(db: Session, guest_id: str | None) -> GuestIdentityModel | None:
     if not guest_id:
-        return False
-    claimed = claim_guest_identity(db, guest_id, user_id)
-    clear_guest_cookie(response)
-    return claimed
+        return None
+    guest = db.query(GuestIdentityModel).filter(GuestIdentityModel.id == guest_id).one_or_none()
+    if guest is None or guest.claimed_user_id is not None or is_guest_identity_expired(guest):
+        return None
+    return guest

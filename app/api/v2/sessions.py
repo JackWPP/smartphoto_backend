@@ -11,7 +11,6 @@ from app.core.response import success_response
 from app.db.session import get_db
 from app.models.asset import AssetModel
 from app.models.detail_style_image import DetailStyleImageModel
-from app.models.guest_identity import GuestIdentityModel
 from app.models.parameter_attachment import ParameterAttachmentModel
 from app.models.prompt_preset import PromptPresetModel
 from app.models.session import SessionModel
@@ -79,7 +78,6 @@ from app.services.detail_pages import (
 )
 from app.services.dispatcher import dispatch_job
 from app.services.download import build_zip_for_assets
-from app.services.guest_identities import consume_guest_quota, get_guest_quota_remaining
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
 from app.services.jobs import append_job_event, create_job, update_job_status
@@ -153,31 +151,45 @@ def _generation_response_data(
     }
 
 
-def _guest_identity(db: Session, actor: RequestActor) -> GuestIdentityModel | None:
-    if actor.kind != "guest" or not actor.guest_id:
-        return None
-    return db.query(GuestIdentityModel).filter(GuestIdentityModel.id == actor.guest_id).one_or_none()
+def _can_continue_editing(actor: RequestActor, session: SessionModel) -> bool:
+    return True
 
 
-def _guest_quota_remaining_for_actor(db: Session, actor: RequestActor) -> int | None:
-    guest = _guest_identity(db, actor)
-    return get_guest_quota_remaining(guest)
-
-
-def _login_required_actions(actor: RequestActor) -> list[str]:
+def _login_required_actions(actor: RequestActor, session: SessionModel) -> list[str]:
     if actor.kind == "user":
         return []
-    return [
-        "download",
-        "save_history",
-        "continue_editing",
-        "regenerate",
-        "detail_page_generation",
-    ]
+    return ["download", "save_history"]
 
 
 def _session_owner_kwargs(actor: RequestActor) -> dict[str, str | None]:
     return {"user_id": actor.user_id, "guest_id": actor.guest_id}
+
+
+def _session_snapshot_payload(db: Session, session: SessionModel, actor: RequestActor) -> dict:
+    return {
+        "session_id": session.id,
+        "status": session.status,
+        "current_step": session.current_step,
+        "selected_platform_ids": session.selected_platform_ids,
+        "active_platform_id": session.active_platform_id,
+        "analysis_snapshot": session.analysis_snapshot,
+        "parameter_snapshot": session.parameter_snapshot,
+        "confirmed_copy": session.confirmed_copy,
+        "strategy_preview": session.strategy_preview,
+        "detail_strategy_preview": session.detail_strategy_preview,
+        "latest_generate_job_id": session.latest_generate_job_id,
+        "latest_detail_generate_job_id": session.latest_detail_generate_job_id,
+        "latest_parameter_job_id": session.latest_parameter_job_id,
+        "generation_round": session.generation_round,
+        "latest_result_version": session.latest_result_version,
+        "detail_generation_round": session.detail_generation_round,
+        "detail_latest_result_version": session.detail_latest_result_version,
+        "auth_mode": actor.auth_mode,
+        "guest_quota_remaining": None,
+        "login_required_actions": _login_required_actions(actor, session),
+        "can_download": actor.can_download,
+        "can_continue_editing": _can_continue_editing(actor, session),
+    }
 
 
 def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
@@ -393,31 +405,7 @@ def create_session(db: Session = Depends(get_db), actor: RequestActor = Depends(
 )
 def get_session_snapshot(session_id: str, db: Session = Depends(get_db), actor: RequestActor = Depends(get_request_actor)) -> dict:
     session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
-    data = {
-        "session_id": session.id,
-        "status": session.status,
-        "current_step": session.current_step,
-        "selected_platform_ids": session.selected_platform_ids,
-        "active_platform_id": session.active_platform_id,
-        "analysis_snapshot": session.analysis_snapshot,
-        "parameter_snapshot": session.parameter_snapshot,
-        "confirmed_copy": session.confirmed_copy,
-        "strategy_preview": session.strategy_preview,
-        "detail_strategy_preview": session.detail_strategy_preview,
-        "latest_generate_job_id": session.latest_generate_job_id,
-        "latest_detail_generate_job_id": session.latest_detail_generate_job_id,
-        "latest_parameter_job_id": session.latest_parameter_job_id,
-        "generation_round": session.generation_round,
-        "latest_result_version": session.latest_result_version,
-        "detail_generation_round": session.detail_generation_round,
-        "detail_latest_result_version": session.detail_latest_result_version,
-        "auth_mode": actor.auth_mode,
-        "guest_quota_remaining": _guest_quota_remaining_for_actor(db, actor),
-        "login_required_actions": _login_required_actions(actor),
-        "can_download": actor.can_download,
-        "can_continue_editing": actor.can_continue_editing,
-    }
-    return success_response(data)
+    return success_response(_session_snapshot_payload(db, session, actor))
 
 
 @router.post(
@@ -581,9 +569,9 @@ async def upload_detail_style_image(
     file: UploadFile = File(..., description="要上传的风格参考图文件。"),
     display_order: int = Form(..., description="显示顺序。"),
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     current_images = list_active_detail_style_images(db, session_id)
     if len(current_images) >= MAX_DETAIL_STYLE_IMAGES:
         raise AppError("too_many_images", http_status=400)
@@ -641,9 +629,9 @@ async def upload_detail_style_image(
 def list_detail_style_images(
     session_id: str,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    get_session_or_404(db, session_id, str(user_id))
+    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     images = list_active_detail_style_images(db, session_id)
     return success_response(
         {
@@ -921,9 +909,9 @@ def delete_detail_style_image(
     session_id: str,
     image_id: str,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    get_session_or_404(db, session_id, str(user_id))
+    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     image = (
         db.query(DetailStyleImageModel)
         .filter(DetailStyleImageModel.id == image_id, DetailStyleImageModel.session_id == session_id)
@@ -1380,9 +1368,9 @@ def build_detail_strategy(
     session_id: str,
     req: DetailStrategyPreviewRequest | None = None,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     if not session.confirmed_copy:
         raise AppError("invalid_session_status", "copy not ready", 400)
     if not session.active_platform_id:
@@ -1403,7 +1391,7 @@ def build_detail_strategy(
         planner_instruction=payload.get("planner_instruction"),
         panel_preferences=payload.get("panel_preferences") or [],
         active_platform_id=session.active_platform_id,
-        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
+        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id),
     )
     session.detail_strategy_preview = preview
     db.commit()
@@ -1504,13 +1492,13 @@ def put_strategy_overrides(
 def get_detail_strategy_overrides(
     session_id: str,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     return success_response(
         {
             "session_id": session.id,
-            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id),
         }
     )
 
@@ -1526,9 +1514,9 @@ def put_detail_strategy_overrides(
     session_id: str,
     req: StrategyOverridesRequest,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     detail_preview = _effective_detail_strategy_preview(session, db) if session.confirmed_copy else {}
     valid_slot_ids = {
         str(item.get("slot_id") or item.get("panel_id") or "").strip()
@@ -1552,7 +1540,7 @@ def put_detail_strategy_overrides(
             )
             db.add(record)
         if override.applied_preset_id:
-            get_prompt_preset_or_404(db, override.applied_preset_id, session.user_id)
+            get_prompt_preset_or_404(db, override.applied_preset_id, actor.prompt_owner_id)
         record.copy_blocks_override = override.copy_blocks_override or {}
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
@@ -1574,7 +1562,7 @@ def put_detail_strategy_overrides(
             planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
             panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
             active_platform_id=session.active_platform_id,
-            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
+            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id),
         )
         session.detail_strategy_preview = preview
 
@@ -1582,7 +1570,7 @@ def put_detail_strategy_overrides(
     return success_response(
         {
             "session_id": session.id,
-            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id),
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id),
         }
     )
 
@@ -1679,9 +1667,9 @@ def preview_detail_prompts(
     session_id: str,
     req: PromptPreviewRequest,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     resolved_copy = _resolved_copy_for_session(session, db)
     detail_strategy_preview = _effective_detail_strategy_preview(session, db)
     prompts = build_detail_prompt_previews(
@@ -1752,11 +1740,7 @@ def generate_gallery(
     session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     if session.status not in {"strategy_ready", "completed"}:
         raise AppError("invalid_session_status", "strategy not ready", 400)
-    if actor.kind == "guest" and session.latest_result_version > 0:
-        raise AppError("login_required", "login required for additional generations", 401)
     if req.slot_ids:
-        if actor.kind == "guest":
-            raise AppError("login_required", "login required for slot-specific generation", 401)
         strategy_preview = _effective_strategy_preview(session, db)
         valid_slot_ids = {
             str(item.get("slot_id") or item.get("role") or "").strip()
@@ -1790,17 +1774,13 @@ def generate_gallery(
         if hit:
             return success_response(cached)
 
-    guest_trial = actor.kind == "guest"
-    guest_quota_remaining = None
-    if guest_trial:
-        guest = consume_guest_quota(db, str(actor.guest_id))
+    is_guest = actor.kind == "guest"
+    if is_guest:
         payload["pricing"]["charged_credits"] = 0
         payload["pricing"]["pricing_rule_id"] = None
         payload["pricing"]["wallet_transaction_id"] = None
-        payload["guest_trial"] = True
         wallet = None
         transaction = None
-        guest_quota_remaining = get_guest_quota_remaining(guest)
     else:
         wallet, transaction, pricing_rule = charge_wallet_for_action(
             db,
@@ -1835,12 +1815,9 @@ def generate_gallery(
         status=job.status,
         session_id=session.id,
         generation_round=session.generation_round + 1,
-        charged_credits=0 if guest_trial else pricing_rule.credits,
-        balance_after=0 if guest_trial else int(wallet.balance),
-        pricing_rule_id=None if guest_trial else pricing_rule.rule_id,
-        guest_trial=guest_trial,
-        guest_quota_remaining=guest_quota_remaining,
-        login_required_after_result=guest_trial,
+        charged_credits=0 if is_guest else pricing_rule.credits,
+        balance_after=0 if is_guest else int(wallet.balance),
+        pricing_rule_id=None if is_guest else pricing_rule.rule_id,
     )
     if idem_record is not None:
         idem_record.response_payload = response_data
@@ -1863,16 +1840,15 @@ def generate_detail_page(
     req: GenerateGalleryRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     if not session.confirmed_copy:
         raise AppError("invalid_session_status", "copy not ready", 400)
     if not session.active_platform_id:
         raise AppError("invalid_platform", "active platform required", 400)
     if not list_active_session_images(db, session.id):
         raise AppError("missing_required_images", http_status=400)
-
     pricing_rule = get_pricing_rule("generate_detail_page")
     payload = req.model_dump()
 
@@ -1880,34 +1856,41 @@ def generate_detail_page(
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            str(user_id),
+            actor.user_id,
             f"POST /sessions/{session_id}/detail-pages/generations",
             idempotency_key,
             payload,
+            guest_id=actor.guest_id,
         )
         if hit:
             return success_response(cached)
 
-    ensure_no_running_generation_jobs(db, session.id, str(user_id))
-    wallet, transaction, pricing_rule = charge_wallet_for_action(
-        db,
-        user_id=str(user_id),
-        action="generate_detail_page",
-        session_id=session.id,
-    )
-    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    ensure_no_running_generation_jobs(db, session.id, user_id=actor.user_id, guest_id=actor.guest_id)
+    is_guest = actor.kind == "guest"
+    if is_guest:
+        wallet = None
+        transaction = None
+    else:
+        wallet, transaction, pricing_rule = charge_wallet_for_action(
+            db,
+            user_id=str(actor.user_id),
+            action="generate_detail_page",
+            session_id=session.id,
+        )
+    lock_keys = acquire_generation_locks(session.id, user_id=actor.user_id, guest_id=actor.guest_id)
     payload["lock_keys"] = lock_keys
     payload["pricing"] = {
         "action": pricing_rule.action,
-        "pricing_rule_id": pricing_rule.rule_id,
-        "charged_credits": pricing_rule.credits,
+        "pricing_rule_id": None if is_guest else pricing_rule.rule_id,
+        "charged_credits": 0 if is_guest else pricing_rule.credits,
         "wallet_transaction_id": transaction.id if transaction else None,
     }
     try:
         job = create_job(
             db,
             session_id=session.id,
-            user_id=str(user_id),
+            user_id=actor.user_id,
+            guest_id=actor.guest_id,
             job_type="generate_detail_page",
             input_payload=payload,
             idempotency_key=idempotency_key,
@@ -1924,9 +1907,9 @@ def generate_detail_page(
         status=job.status,
         session_id=session.id,
         detail_generation_round=session.detail_generation_round + 1,
-        charged_credits=pricing_rule.credits,
-        balance_after=int(wallet.balance),
-        pricing_rule_id=pricing_rule.rule_id,
+        charged_credits=0 if is_guest else pricing_rule.credits,
+        balance_after=0 if is_guest else int(wallet.balance),
+        pricing_rule_id=None if is_guest else pricing_rule.rule_id,
     )
     if idem_record is not None:
         idem_record.response_payload = response_data
@@ -1999,9 +1982,9 @@ def get_detail_page_results(
     session_id: str,
     version: int | None = Query(default=None, description="可选详情页结果版本号。为空时返回最近一版。"),
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     target_version = version or session.detail_latest_result_version
     available_versions = _available_versions(db, session.id, asset_family="detail_page")
     version_summaries = _version_summaries(db, session.id, asset_family="detail_page")
@@ -2079,12 +2062,12 @@ def global_edit(
     req: GlobalEditRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     if session.latest_result_version <= 0:
         raise AppError("invalid_session_status", "results not ready", 400)
-    ensure_no_running_generation_jobs(db, session.id, str(user_id))
+    ensure_no_running_generation_jobs(db, session.id, user_id=actor.user_id, guest_id=actor.guest_id)
 
     if req.scope == "selected" and not req.asset_ids:
         raise AppError("invalid_request", "asset_ids required when scope is selected", 400)
@@ -2101,29 +2084,39 @@ def global_edit(
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            str(user_id),
+            actor.user_id,
             f"POST /sessions/{session_id}/results/global-edit",
             idempotency_key,
             payload,
+            guest_id=actor.guest_id,
         )
         if hit:
             return success_response(cached)
 
-    wallet, transaction, pricing_rule = charge_wallet_for_action(
-        db,
-        user_id=str(user_id),
-        action="global_edit",
-        session_id=session.id,
-        payload={"scope": req.scope, "asset_ids": req.asset_ids},
-    )
-    payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    is_guest = actor.kind == "guest"
+    if is_guest:
+        payload["pricing"]["charged_credits"] = 0
+        payload["pricing"]["pricing_rule_id"] = None
+        payload["pricing"]["wallet_transaction_id"] = None
+        wallet = None
+        transaction = None
+    else:
+        wallet, transaction, pricing_rule = charge_wallet_for_action(
+            db,
+            user_id=str(actor.user_id),
+            action="global_edit",
+            session_id=session.id,
+            payload={"scope": req.scope, "asset_ids": req.asset_ids},
+        )
+        payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+    lock_keys = acquire_generation_locks(session.id, user_id=actor.user_id, guest_id=actor.guest_id)
     payload["lock_keys"] = lock_keys
     try:
         job = create_job(
             db,
             session_id=session.id,
-            user_id=str(user_id),
+            user_id=actor.user_id,
+            guest_id=actor.guest_id,
             job_type="global_edit",
             input_payload=payload,
             idempotency_key=idempotency_key,
@@ -2137,9 +2130,9 @@ def global_edit(
         job_id=job.id,
         job_type=job.job_type,
         status=job.status,
-        charged_credits=pricing_rule.credits,
-        balance_after=int(wallet.balance),
-        pricing_rule_id=pricing_rule.rule_id,
+        charged_credits=0 if is_guest else pricing_rule.credits,
+        balance_after=0 if is_guest else int(wallet.balance),
+        pricing_rule_id=None if is_guest else pricing_rule.rule_id,
     )
     if idem_record is not None:
         idem_record.response_payload = response_data
@@ -2162,12 +2155,12 @@ def regenerate_gallery(
     req: GalleryRegenerateRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    actor: RequestActor = Depends(get_request_actor),
 ) -> dict:
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     if session.latest_result_version <= 0:
         raise AppError("invalid_session_status", "results not ready", 400)
-    ensure_no_running_generation_jobs(db, session.id, str(user_id))
+    ensure_no_running_generation_jobs(db, session.id, user_id=actor.user_id, guest_id=actor.guest_id)
     pricing_rule = get_pricing_rule("regenerate_gallery")
     payload = req.model_dump()
     payload["pricing"] = {
@@ -2181,28 +2174,38 @@ def regenerate_gallery(
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            str(user_id),
+            actor.user_id,
             f"POST /sessions/{session_id}/results/regenerate",
             idempotency_key,
             payload,
+            guest_id=actor.guest_id,
         )
         if hit:
             return success_response(cached)
 
-    wallet, transaction, pricing_rule = charge_wallet_for_action(
-        db,
-        user_id=str(user_id),
-        action="regenerate_gallery",
-        session_id=session.id,
-    )
-    payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-    lock_keys = acquire_generation_locks(session.id, str(user_id))
+    is_guest = actor.kind == "guest"
+    if is_guest:
+        payload["pricing"]["charged_credits"] = 0
+        payload["pricing"]["pricing_rule_id"] = None
+        payload["pricing"]["wallet_transaction_id"] = None
+        wallet = None
+        transaction = None
+    else:
+        wallet, transaction, pricing_rule = charge_wallet_for_action(
+            db,
+            user_id=str(actor.user_id),
+            action="regenerate_gallery",
+            session_id=session.id,
+        )
+        payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
+    lock_keys = acquire_generation_locks(session.id, user_id=actor.user_id, guest_id=actor.guest_id)
     payload["lock_keys"] = lock_keys
     try:
         job = create_job(
             db,
             session_id=session.id,
-            user_id=str(user_id),
+            user_id=actor.user_id,
+            guest_id=actor.guest_id,
             job_type="regenerate_gallery",
             input_payload=payload,
             idempotency_key=idempotency_key,
@@ -2216,9 +2219,9 @@ def regenerate_gallery(
         job_id=job.id,
         job_type=job.job_type,
         status=job.status,
-        charged_credits=pricing_rule.credits,
-        balance_after=int(wallet.balance),
-        pricing_rule_id=pricing_rule.rule_id,
+        charged_credits=0 if is_guest else pricing_rule.credits,
+        balance_after=0 if is_guest else int(wallet.balance),
+        pricing_rule_id=None if is_guest else pricing_rule.rule_id,
     )
     if idem_record is not None:
         idem_record.response_payload = response_data

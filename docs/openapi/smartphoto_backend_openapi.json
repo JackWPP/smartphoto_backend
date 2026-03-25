@@ -705,6 +705,151 @@
         }
       }
     },
+    "/api/v2/guest/sessions/{session_id}/claim": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "认领匿名会话",
+        "description": "登录成功后显式认领当前浏览器 guest 关联的 session，并继续复用原 session_id。",
+        "operationId": "claimGuestSession",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "X-Dev-User-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dev-User-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_SessionSnapshotData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/account/overview": {
       "get": {
         "tags": [
@@ -26174,7 +26319,7 @@
           "guest_trial": {
             "type": "boolean",
             "title": "Guest Trial",
-            "description": "详情页生成不支持匿名试用，固定为 false。",
+            "description": "兼容字段，当前固定返回 false。",
             "default": false
           },
           "guest_quota_remaining": {
@@ -26187,12 +26332,12 @@
               }
             ],
             "title": "Guest Quota Remaining",
-            "description": "匿名访客剩余可用的首轮生成次数。"
+            "description": "兼容字段，当前固定返回 null。"
           },
           "login_required_after_result": {
             "type": "boolean",
             "title": "Login Required After Result",
-            "description": "详情页生成不支持匿名继续。",
+            "description": "兼容字段，当前固定返回 false。",
             "default": false
           }
         },
@@ -27203,7 +27348,7 @@
           "guest_trial": {
             "type": "boolean",
             "title": "Guest Trial",
-            "description": "本次是否消耗匿名试用次数。",
+            "description": "兼容字段，当前固定返回 false。",
             "default": false
           },
           "guest_quota_remaining": {
@@ -27216,12 +27361,12 @@
               }
             ],
             "title": "Guest Quota Remaining",
-            "description": "匿名访客剩余可用的首轮生成次数。"
+            "description": "兼容字段，当前固定返回 null。"
           },
           "login_required_after_result": {
             "type": "boolean",
             "title": "Login Required After Result",
-            "description": "本轮结果出来后是否需要登录才能继续后续动作。",
+            "description": "兼容字段，当前固定返回 false。",
             "default": false
           }
         },
@@ -27279,7 +27424,7 @@
           "guest_trial": {
             "type": "boolean",
             "title": "Guest Trial",
-            "description": "非首轮主图生成固定为 false。",
+            "description": "兼容字段，当前固定返回 false。",
             "default": false
           },
           "guest_quota_remaining": {
@@ -27292,12 +27437,12 @@
               }
             ],
             "title": "Guest Quota Remaining",
-            "description": "匿名访客剩余可用的首轮生成次数。"
+            "description": "兼容字段，当前固定返回 null。"
           },
           "login_required_after_result": {
             "type": "boolean",
             "title": "Login Required After Result",
-            "description": "该动作是否要求结果后先登录。",
+            "description": "兼容字段，当前固定返回 false。",
             "default": false
           }
         },
@@ -29557,7 +29702,7 @@
               }
             ],
             "title": "Guest Quota Remaining",
-            "description": "匿名访客剩余可用的首轮生成次数。"
+            "description": "兼容字段，当前固定返回 null。"
           },
           "login_required_actions": {
             "items": {
@@ -29565,7 +29710,7 @@
             },
             "type": "array",
             "title": "Login Required Actions",
-            "description": "当前结果后需要先登录的动作列表。"
+            "description": "当前仍要求登录的动作列表。"
           },
           "can_download": {
             "type": "boolean",
@@ -29576,7 +29721,7 @@
           "can_continue_editing": {
             "type": "boolean",
             "title": "Can Continue Editing",
-            "description": "当前身份是否可继续编辑或再次生成。",
+            "description": "当前身份是否仍可继续当前 session 的创作/编辑流程。",
             "default": true
           }
         },

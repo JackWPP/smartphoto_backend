@@ -25,6 +25,7 @@ INCLUDE_PATHS=(
   "adminfront"
   "scripts"
   "docs/运行与排障手册.md"
+  "docs/生产上线SOP.md"
 )
 
 # Only package git-tracked files from the approved whitelist so untracked workspace

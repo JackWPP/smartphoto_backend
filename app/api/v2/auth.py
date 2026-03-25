@@ -24,7 +24,6 @@ from app.models.user_refresh_token import UserRefreshTokenModel
 from app.schemas.account import AuthLoginRequest, AuthRegisterRequest, AuthResponseData, UserProfile
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.services.rate_limit import enforce_rate_limit
-from app.services.guest_identities import claim_guest_from_request
 from app.services.user_accounts import create_user, get_user_by_email, serialize_user_profile
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -96,7 +95,6 @@ def register(
             is_revoked=False,
         )
     )
-    claim_guest_from_request(db, request, response, user.id)
     db.commit()
     _set_refresh_cookie(response, token_payload["refresh_token"])
     return success_response(
@@ -130,7 +128,6 @@ def login(req: AuthLoginRequest, request: Request, response: Response, db: Sessi
             is_revoked=False,
         )
     )
-    claim_guest_from_request(db, request, response, user.id)
     db.commit()
     _set_refresh_cookie(response, token_payload["refresh_token"])
     return success_response(

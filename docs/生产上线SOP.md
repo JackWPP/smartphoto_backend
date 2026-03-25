@@ -193,12 +193,129 @@ chmod +x scripts/docker-*.sh
 - CORS 和普通应用配置调整
 - 不包含 Alembic revision
 
+强约束：
+
+- 只有在“代码包不包含新的 Alembic revision，且生产库已处于本次代码要求的 schema”时，才允许使用 `--skip-migrate`
+- 只要这次代码依赖新增表/字段/索引，即使主体是逻辑改动，也不能跳过迁移
+- 若上线后出现 `UndefinedTable`、`UndefinedColumn`、`relation "...\" does not exist`，优先判断为误用了 `--skip-migrate`
+
 ### 9.1 发布命令
 
 ```bash
 export IMAGE_TAG=<release-tag>
 
 ./scripts/deploy-prod.sh --image-tag "$IMAGE_TAG" --skip-migrate
+```
+
+### 9.2 `--skip-migrate` 前的最小核对
+
+```bash
+cd "$NEW_ROOT"
+
+set -a
+source .env.prod
+set +a
+
+echo "== package revisions =="
+ls alembic/versions
+
+echo "== current alembic version =="
+docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version_num FROM alembic_version ORDER BY version_num;"
+```
+
+判断规则：
+
+- 若代码包里的最新 revision 高于生产库当前 `alembic_version`，不要再用 `--skip-migrate`
+- 例如代码已包含 `20260324_0011_guest_identities.py`，但生产库未到 `20260324_0011`，则必须走迁移发布
+
+### 9.3 构建网络慢时的完整替代命令
+
+若 `docker build` 长时间卡在：
+
+- `RUN npm install`
+- `RUN apt-get update`
+- `RUN pip install --upgrade ...`
+- `RUN pip install .`
+
+直接在当前 release 目录使用“临时 Dockerfile + 国内镜像源”的完整命令：
+
+```bash
+set -euo pipefail
+
+export COMPOSE_PROJECT_NAME=smartphoto_backend
+export IMAGE_REPO="${SMARTPHOTO_IMAGE_REPO:-smartphoto-backend}"
+export IMAGE_TAG=<release-tag>
+export IMAGE_REF="${IMAGE_REPO}:${IMAGE_TAG}"
+
+cd "$NEW_ROOT"
+
+mkdir -p .release
+if [[ -f .release/current_image ]]; then
+  cp .release/current_image .release/previous_image
+fi
+
+cat > Dockerfile.fast-mirror <<'EOF'
+FROM node:20-alpine AS adminfront-builder
+
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+
+WORKDIR /build/adminfront
+
+COPY adminfront/package.json ./
+RUN npm install
+
+COPY adminfront/ ./
+RUN npm run build
+
+
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120
+
+WORKDIR /app
+
+RUN sed -i 's@http://deb.debian.org@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml Readme.md alembic.ini ./
+COPY app ./app
+COPY alembic ./alembic
+COPY scripts ./scripts
+COPY --from=adminfront-builder /build/adminfront/dist ./adminfront/dist
+
+RUN PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
+    PIP_TRUSTED_HOST=mirrors.tuna.tsinghua.edu.cn \
+    pip install --upgrade pip setuptools wheel \
+    && PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
+       PIP_TRUSTED_HOST=mirrors.tuna.tsinghua.edu.cn \
+       pip install . \
+    && chmod +x ./scripts/*.sh
+
+EXPOSE 8000
+
+CMD ["./scripts/docker-api.sh"]
+EOF
+
+docker build --network host --progress=plain -t "$IMAGE_REF" -f Dockerfile.fast-mirror .
+
+rm -f Dockerfile.fast-mirror
+```
+
+注意：
+
+- 这条替代命令只解决构建阶段 `npm/apt/pip` 出网慢的问题，不会替代数据库迁移
+- 若本次包含 migration，仍要在构建完成后执行：
+
+```bash
+SMARTPHOTO_IMAGE="$IMAGE_REF" \
+docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
 ```
 
 ## 10. 有迁移发布
@@ -221,6 +338,42 @@ export IMAGE_TAG=<release-tag>
 
 - 这类发布前必须先做 PostgreSQL 备份
 - 如果 migration 不向后兼容，不能把“镜像回滚”当成“数据回滚”
+
+### 10.2 已误用 `--skip-migrate` 的补救
+
+若镜像已更新成功，但业务接口报：
+
+- `relation "guest_identities" does not exist`
+- `column "...\" does not exist`
+- `UndefinedTable`
+- `UndefinedColumn`
+
+不要重新发包，直接在当前 release 目录补执行迁移：
+
+```bash
+set -euo pipefail
+
+export COMPOSE_PROJECT_NAME=smartphoto_backend
+export IMAGE_REF=<current-image-ref>
+
+cd "$NEW_ROOT"
+
+set -a
+source .env.prod
+set +a
+
+docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version_num FROM alembic_version ORDER BY version_num;"
+
+SMARTPHOTO_IMAGE="$IMAGE_REF" \
+docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
+
+docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version_num FROM alembic_version ORDER BY version_num;"
+
+SMARTPHOTO_IMAGE="$IMAGE_REF" \
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps api worker
+```
 
 ## 11. 只改 `.env.prod`
 
@@ -267,6 +420,20 @@ curl -i -X OPTIONS http://127.0.0.1:8000/api/admin/v1/auth/login \
   -H 'Origin: https://api.wppjkw.online' \
   -H 'Access-Control-Request-Method: POST' \
   -H 'Access-Control-Request-Headers: content-type'
+```
+
+若返回 `Disallowed CORS origin`，说明 `.env.prod` 的 `CORS_ALLOW_ORIGINS` 未包含真实前端域名。修复方式：
+
+```bash
+cd "$NEW_ROOT"
+
+if grep -q '^CORS_ALLOW_ORIGINS=' .env.prod; then
+  sed -i 's#^CORS_ALLOW_ORIGINS=.*#CORS_ALLOW_ORIGINS=https://smartphoto.vip#' .env.prod
+else
+  echo 'CORS_ALLOW_ORIGINS=https://smartphoto.vip' >> .env.prod
+fi
+
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --force-recreate api worker
 ```
 
 ### 12.3 日志检查
