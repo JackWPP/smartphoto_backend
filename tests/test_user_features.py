@@ -164,7 +164,7 @@ def test_unauthorized_when_dev_bypass_disabled(client, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_guest_can_finish_first_main_generation_then_must_login_for_restricted_actions(client, monkeypatch):
+def test_guest_can_continue_creating_but_download_and_history_still_require_login(client, monkeypatch):
     monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "false")
     get_settings.cache_clear()
 
@@ -172,30 +172,81 @@ def test_guest_can_finish_first_main_generation_then_must_login_for_restricted_a
     snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     assert snapshot["auth_mode"] == "guest"
     assert snapshot["can_download"] is False
-    assert snapshot["can_continue_editing"] is False
-    assert "download" in snapshot["login_required_actions"]
-    assert snapshot["guest_quota_remaining"] == 3
+    assert snapshot["can_continue_editing"] is True
+    assert snapshot["login_required_actions"] == ["download", "save_history"]
+    assert snapshot["guest_quota_remaining"] is None
 
     generation = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "先生成一轮"})
     assert generation.status_code == 200, generation.text
     generation_data = generation.json()["data"]
-    assert generation_data["guest_trial"] is True
-    assert generation_data["guest_quota_remaining"] == 2
-    assert generation_data["login_required_after_result"] is True
+    assert generation_data["guest_trial"] is False
+    assert generation_data["guest_quota_remaining"] is None
+    assert generation_data["login_required_after_result"] is False
 
     results = client.get(f"/api/v2/sessions/{sid}/results")
     assert results.status_code == 200, results.text
     assert results.json()["data"]["summary"]["ready_count"] >= 1
+    first_asset_id = results.json()["data"]["assets"][0]["asset_id"]
+
+    global_edit = client.post(
+        f"/api/v2/sessions/{sid}/results/global-edit",
+        json={"instruction": "整体更通透", "scope": "all", "asset_ids": []},
+    )
+    assert global_edit.status_code == 200, global_edit.text
+    assert global_edit.json()["data"]["charged_credits"] == 0
+
+    slot_regen = client.post(
+        f"/api/v2/assets/{first_asset_id}/regenerate",
+        json={"instruction": "这张换成更强卖点角度", "keep_style_consistency": True},
+    )
+    assert slot_regen.status_code == 200, slot_regen.text
+    assert slot_regen.json()["data"]["charged_credits"] == 0
+
+    gallery_regen = client.post(f"/api/v2/sessions/{sid}/results/regenerate", json={"instruction": "再来一版"})
+    assert gallery_regen.status_code == 200, gallery_regen.text
+    assert gallery_regen.json()["data"]["charged_credits"] == 0
+
+    slot_only = client.post(
+        f"/api/v2/sessions/{sid}/generations",
+        json={"instruction": "只调 hero", "slot_ids": ["hero"]},
+    )
+    assert slot_only.status_code == 200, slot_only.text
+    assert slot_only.json()["data"]["charged_credits"] == 0
+
+    detail_preview = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
+        json={"planner_instruction": "补充详情页结构"},
+    )
+    assert detail_preview.status_code == 200, detail_preview.text
+    detail_generation = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/generations",
+        json={"instruction": "详情页也来一版"},
+    )
+    assert detail_generation.status_code == 200, detail_generation.text
+    detail_generation_data = detail_generation.json()["data"]
+    assert detail_generation_data["guest_trial"] is False
+    assert detail_generation_data["guest_quota_remaining"] is None
+    assert detail_generation_data["login_required_after_result"] is False
+
+    detail_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results")
+    assert detail_results.status_code == 200, detail_results.text
+    assert detail_results.json()["data"]["summary"]["ready_count"] >= 1
+
+    post_detail_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert post_detail_snapshot["can_continue_editing"] is True
+    assert post_detail_snapshot["login_required_actions"] == ["download", "save_history"]
 
     assert client.get(f"/api/v2/sessions/{sid}/download").status_code == 401
-    assert client.post(f"/api/v2/sessions/{sid}/results/regenerate", json={"instruction": "再来一版"}).status_code == 401
-    assert client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "详情页也来一版"}).status_code == 401
+    assert client.get(f"/api/v2/sessions/{sid}/detail-pages/download").status_code == 401
 
     headers = register_user(client, "guest-claim@example.com", display_name="Guest Claimed")
     claimed_snapshot = client.get(f"/api/v2/sessions/{sid}", headers=headers)
-    assert claimed_snapshot.status_code == 200
-    assert claimed_snapshot.json()["data"]["auth_mode"] == "user"
-    assert claimed_snapshot.json()["data"]["can_download"] is True
+    assert claimed_snapshot.status_code == 404
+    claim_response = client.post(f"/api/v2/guest/sessions/{sid}/claim", headers=headers)
+    assert claim_response.status_code == 200
+    assert claim_response.json()["data"]["session_id"] == sid
+    assert claim_response.json()["data"]["auth_mode"] == "user"
+    assert claim_response.json()["data"]["can_download"] is True
 
     assets = client.get("/api/v2/account/assets", headers=headers).json()["data"]["items"]
     assert sid in {item["session_id"] for item in assets}
@@ -203,7 +254,7 @@ def test_guest_can_finish_first_main_generation_then_must_login_for_restricted_a
     get_settings.cache_clear()
 
 
-def test_guest_trial_quota_exhausts_on_fourth_gallery_generation(client, monkeypatch):
+def test_guest_generation_no_longer_has_product_quota_limit(client, monkeypatch):
     monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "false")
     get_settings.cache_clear()
 
@@ -213,27 +264,114 @@ def test_guest_trial_quota_exhausts_on_fourth_gallery_generation(client, monkeyp
         assert response.status_code == 200
         return sid
 
-    for expected_remaining in (2, 1, 0):
-        sid = _guest_ready_session()
-        response = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "匿名主图首轮"})
-        assert response.status_code == 200, response.text
-        payload = response.json()["data"]
-        assert payload["guest_trial"] is True
-        assert payload["guest_quota_remaining"] == expected_remaining
+    sid_main_1 = _guest_ready_session()
+    payload = client.post(f"/api/v2/sessions/{sid_main_1}/generations", json={"instruction": "匿名主图首轮"}).json()["data"]
+    assert payload["guest_trial"] is False
+    assert payload["guest_quota_remaining"] is None
+
+    sid_detail = _guest_ready_session()
+    detail_preview = client.post(
+        f"/api/v2/sessions/{sid_detail}/detail-pages/strategy/preview",
+        json={"planner_instruction": "详情页也试用一次"},
+    )
+    assert detail_preview.status_code == 200, detail_preview.text
+    detail_payload = client.post(
+        f"/api/v2/sessions/{sid_detail}/detail-pages/generations",
+        json={"instruction": "匿名详情页首轮"},
+    ).json()["data"]
+    assert detail_payload["guest_trial"] is False
+    assert detail_payload["guest_quota_remaining"] is None
+
+    sid_main_2 = _guest_ready_session()
+    payload = client.post(f"/api/v2/sessions/{sid_main_2}/generations", json={"instruction": "匿名主图第三次"}).json()["data"]
+    assert payload["guest_trial"] is False
+    assert payload["guest_quota_remaining"] is None
 
     sid = _guest_ready_session()
-    exhausted = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "第四次匿名主图"})
-    assert exhausted.status_code == 403
-    exhausted_payload = exhausted.json()
-    assert exhausted_payload["message"] == "guest trial exhausted"
-    assert exhausted_payload["code"] == 40302
+    extra_generation = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "第四次匿名生成"})
+    assert extra_generation.status_code == 200, extra_generation.text
+    assert extra_generation.json()["data"]["guest_trial"] is False
+    assert extra_generation.json()["data"]["guest_quota_remaining"] is None
 
     guest_cookie = client.cookies.get(get_settings().guest_cookie_name)
     guest_id = decode_guest_cookie_token(guest_cookie)
     assert guest_id
     with db_session.SessionLocal() as db:
         guest = db.get(GuestIdentityModel, guest_id)
-        assert int(guest.quota_used) == 3
+        assert int(guest.quota_used) == 0
+    get_settings.cache_clear()
+
+
+def test_guest_explicit_claim_reuses_original_session_without_auto_claim(client, monkeypatch):
+    monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "false")
+    get_settings.cache_clear()
+
+    sid = create_ready_session(client, headers={})
+    generation = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "先出主图"})
+    assert generation.status_code == 200, generation.text
+
+    explicit_headers = register_user(client, "guest-explicit-claim@example.com", display_name="Explicit Claimer")
+    assets_before_claim = client.get("/api/v2/account/assets", headers=explicit_headers).json()["data"]["items"]
+    assert sid not in {item["session_id"] for item in assets_before_claim}
+    assert client.get(f"/api/v2/sessions/{sid}").status_code == 200
+    assert client.get(f"/api/v2/sessions/{sid}", headers=explicit_headers).status_code == 404
+
+    claim = client.post(f"/api/v2/guest/sessions/{sid}/claim", headers=explicit_headers)
+    assert claim.status_code == 200, claim.text
+    assert claim.json()["data"]["session_id"] == sid
+    assert claim.json()["data"]["auth_mode"] == "user"
+
+    claimed_again = client.post(f"/api/v2/guest/sessions/{sid}/claim", headers=explicit_headers)
+    assert claimed_again.status_code == 200
+    assert claimed_again.json()["data"]["session_id"] == sid
+
+    assets = client.get("/api/v2/account/assets", headers=explicit_headers).json()["data"]["items"]
+    assert sid in {item["session_id"] for item in assets}
+    assert client.get(f"/api/v2/sessions/{sid}/download", headers=explicit_headers).status_code == 200
+    get_settings.cache_clear()
+
+
+def test_guest_claim_only_binds_current_session_not_all_browser_sessions(client, monkeypatch):
+    monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "false")
+    get_settings.cache_clear()
+
+    sid_a = create_ready_session(client, headers={})
+    sid_b = create_ready_session(client, headers={})
+
+    headers = register_user(client, "guest-current-session-only@example.com", display_name="Current Session Only")
+    claim = client.post(f"/api/v2/guest/sessions/{sid_a}/claim", headers=headers)
+    assert claim.status_code == 200, claim.text
+
+    assets = client.get("/api/v2/account/assets", headers=headers).json()["data"]["items"]
+    session_ids = {item["session_id"] for item in assets}
+    assert sid_a in session_ids
+    assert sid_b not in session_ids
+
+    assert client.get(f"/api/v2/sessions/{sid_a}", headers=headers).status_code == 200
+    assert client.get(f"/api/v2/sessions/{sid_b}", headers=headers).status_code == 404
+    assert client.get(f"/api/v2/sessions/{sid_b}").status_code == 200
+    get_settings.cache_clear()
+
+
+def test_expired_guest_session_cannot_continue_or_claim(client, monkeypatch):
+    monkeypatch.setenv("ALLOW_DEV_AUTH_BYPASS", "false")
+    get_settings.cache_clear()
+
+    headers = register_user(client, "guest-expired-claim@example.com", display_name="Expired Claimer")
+    sid = create_ready_session(client, headers={})
+    guest_cookie = client.cookies.get(get_settings().guest_cookie_name)
+    guest_id = decode_guest_cookie_token(guest_cookie)
+    assert guest_id
+    with db_session.SessionLocal() as db:
+        guest = db.get(GuestIdentityModel, guest_id)
+        assert guest is not None
+        guest.first_seen_at = guest.first_seen_at.replace(year=guest.first_seen_at.year - 1)
+        db.commit()
+
+    assert client.get(f"/api/v2/sessions/{sid}").status_code == 404
+    expired_claim = client.post(f"/api/v2/guest/sessions/{sid}/claim", headers=headers)
+    assert expired_claim.status_code == 400
+    assert expired_claim.json()["message"] == "active guest identity required for claim"
     get_settings.cache_clear()
 
 

@@ -9,7 +9,7 @@
 | 逻辑 Agent | 职责 | 主要代码映射 |
 |---|---|---|
 | Session Orchestrator | 接收请求、做前置状态校验、创建 job、分发任务 | `app/api/v2/sessions.py`, `app/api/v2/assets.py` |
-| Guest Identity Agent | 维护 guest cookie、试用额度与登录后自动认领 | `app/core/deps.py`, `app/services/guest_identities.py` |
+| Guest Identity Agent | 维护 guest cookie、24h 有效期与显式认领当前 session | `app/core/deps.py`, `app/services/guest_identities.py` |
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
 | Parameter Extract Agent | 读取参数附件，产出 `parameter_snapshot` | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
@@ -38,21 +38,20 @@
   - `POST /sessions/{id}/detail-pages/generations` 创建 `generate_detail_page`
   - 与主图 generation 共用同一套并发锁与冲突码 `40901/40902`
 - Guest 补充：
-  - guest 允许跑完整 Step1~Step6 首轮主图生成与结果查询
-  - guest 不允许下载、详情页生成、全局修改、整组重生成、单图重生成
-  - 登录/注册成功时，由 Guest Identity Agent 自动认领当前浏览器 guest 下的 `sessions/jobs/idempotency_records`
+  - guest 允许跑完整 Step1~Step6 的真实链路，并可继续主图/详情页生成、全局修改、整组重生成、单图重生成
+  - guest 不允许下载，也没有 `History` / 账户资产列表
+  - 登录/注册成功后不会自动认领；若前端要把当前创作纳入账号，需显式调用 `POST /guest/sessions/{id}/claim`
 
 ### 3.1.1 Guest Identity Agent
-- 输入：浏览器 Cookie、登录/注册事件、guest 配额消耗动作
+- 输入：浏览器 Cookie、登录/注册事件、显式 claim 当前 session
 - 输出：`RequestActor(kind=guest|user)`、guest cookie、claim 结果
 - 状态责任：
   - 创建 `guest_identities`
-  - 维护 `quota_total/quota_used`
-  - 追踪 `claimed_user_id/claimed_at`
-  - 登录或注册成功时把 guest 资源迁移给当前用户
+  - 通过 `first_seen_at + GUEST_COOKIE_TTL_DAYS` 控制 guest 24h 软失效窗口
+  - 显式 claim 时只把目标 session 及其关联 jobs / idempotency_records 迁移给当前用户
+  - 支持显式 claim 时按 session + guest cookie 做二次校验
 - 失败处理：
-  - 试用额度耗尽返回 `40302 guest_trial_exhausted`
-  - 结果后动作需要登录时返回 `40102 login_required`
+  - 下载动作需要登录时返回 `40102 login_required`
 
 ### 3.2 Analysis Agent
 - 输入：session 可用图片 + active_platform（可空）
@@ -119,10 +118,10 @@
   - 详情页默认并发 `detail_generation_concurrency=6`
   - 上游任务提交默认并发 `generation_submit_concurrency=6`
   - 即使内部并发执行，Asset 最终持久化顺序仍按 `display_order`
-- Guest 首轮生成补充：
-  - 仅 `generate_gallery` 整组首轮允许 guest 触发
-  - guest 首轮生成不调用钱包扣费，而是原子消耗 `guest_identities.quota_used`
-  - guest 首轮生成响应会追加 `guest_trial/guest_quota_remaining/login_required_after_result`
+- Guest 生成补充：
+  - `generate_gallery` 与 `generate_detail_page` 都允许 guest 持续触发，不区分首轮与后续
+  - guest 生成不调用钱包扣费
+  - 响应保留 `guest_trial/guest_quota_remaining/login_required_after_result` 兼容字段，但固定返回 `false/null/false`
 - Prompt 结构：
   - `blocks.goal`
   - `blocks.subject`

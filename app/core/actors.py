@@ -37,5 +37,4 @@ class RequestActor:
 
     @property
     def can_continue_editing(self) -> bool:
-        return self.kind == "user"
-
+        return True

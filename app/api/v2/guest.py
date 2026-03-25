@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.api.v2.sessions import _session_snapshot_payload
@@ -16,7 +16,6 @@ from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.schemas.session import SessionSnapshotData
 from app.services.guest_identities import (
     claim_guest_session,
-    clear_guest_cookie,
     decode_guest_cookie_token,
     get_active_guest_identity_by_id,
 )
@@ -35,7 +34,6 @@ router = APIRouter(prefix="/guest", tags=["sessions"])
 def claim_session(
     session_id: str,
     request: Request,
-    response: Response,
     db: Session = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
 ) -> dict:
@@ -54,7 +52,6 @@ def claim_session(
     if not claim_guest_session(db, session_id=session_id, guest_id=guest.id, user_id=current_user.id):
         raise AppError("session_not_found", http_status=404)
 
-    clear_guest_cookie(response)
     db.commit()
     claimed_session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
     return success_response(_session_snapshot_payload(db, claimed_session, actor))
