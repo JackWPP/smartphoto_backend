@@ -43,12 +43,16 @@ def strategy_preview_input_hash(
     slot_preferences: list[dict[str, Any]] | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
     strategy_reference_images: list[Any] | None = None,
+    loaded_reference_images: list[LoadedReferenceImage] | None = None,
+    loaded_strategy_reference_images: list[LoadedReferenceImage] | None = None,
+    reference_manifest: list[dict[str, Any]] | None = None,
+    strategy_reference_manifest: list[dict[str, Any]] | None = None,
 ) -> str:
     normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
-    loaded_reference_images = load_reference_images(session_images or []) if session_images else []
-    loaded_strategy_reference_images = load_reference_images(strategy_reference_images or []) if strategy_reference_images else []
-    reference_manifest = build_reference_manifest(loaded_reference_images)
-    strategy_reference_manifest = build_reference_manifest(loaded_strategy_reference_images)
+    loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
+    loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
+    reference_manifest = reference_manifest if reference_manifest is not None else build_reference_manifest(loaded_reference_images)
+    strategy_reference_manifest = strategy_reference_manifest if strategy_reference_manifest is not None else build_reference_manifest(loaded_strategy_reference_images)
     resolved_slot_preferences = resolve_slot_preferences(active_platform_id, slot_preferences, db=db)
     resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
     slot_blueprints = get_main_gallery_slot_blueprints(active_platform_id, db=db)
@@ -82,6 +86,10 @@ def build_strategy_preview(
     slot_preferences: list[dict[str, Any]] | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
     strategy_reference_images: list[Any] | None = None,
+    loaded_reference_images: list[LoadedReferenceImage] | None = None,
+    loaded_strategy_reference_images: list[LoadedReferenceImage] | None = None,
+    reference_manifest: list[dict[str, Any]] | None = None,
+    strategy_reference_manifest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
     profile = platform_profile(active_platform_id)
@@ -89,10 +97,10 @@ def build_strategy_preview(
     aspect_ratio = profile.default_aspect_ratio if profile else "1:1"
     overlay = get_platform_overlay(active_platform_id)
 
-    loaded_reference_images = load_reference_images(session_images or []) if session_images else []
-    loaded_strategy_reference_images = load_reference_images(strategy_reference_images or []) if strategy_reference_images else []
-    reference_manifest = build_reference_manifest(loaded_reference_images)
-    strategy_reference_manifest = build_reference_manifest(loaded_strategy_reference_images)
+    loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
+    loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
+    reference_manifest = reference_manifest if reference_manifest is not None else build_reference_manifest(loaded_reference_images)
+    strategy_reference_manifest = strategy_reference_manifest if strategy_reference_manifest is not None else build_reference_manifest(loaded_strategy_reference_images)
     resolved_slot_preferences = resolve_slot_preferences(active_platform_id, slot_preferences, db=db)
     resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
     asset_plan = _build_asset_plan(
@@ -105,17 +113,27 @@ def build_strategy_preview(
         prompt_overrides=resolved_prompt_overrides,
         db=db,
     )
+    llm_slot_plan = _plan_main_gallery(
+        confirmed_copy=normalized_copy,
+        active_platform_id=active_platform_id,
+        asset_plan=asset_plan,
+        loaded_reference_images=loaded_reference_images,
+        loaded_strategy_reference_images=loaded_strategy_reference_images,
+        analysis_snapshot=analysis_snapshot or {},
+        planner_instruction=planner_instruction,
+    )
+    if llm_slot_plan:
+        asset_plan = [_merge_asset_plan_item(plan_item, llm_slot_plan.get(str(plan_item["slot_id"])) or llm_slot_plan.get(str(plan_item["role"]))) for plan_item in asset_plan]
     prompt_plan = _build_prompt_plan(
         confirmed_copy=normalized_copy,
         active_platform_id=active_platform_id,
         platform_name=platform_name,
         asset_plan=asset_plan,
         reference_manifest=reference_manifest,
-        loaded_reference_images=loaded_reference_images,
-        loaded_strategy_reference_images=loaded_strategy_reference_images,
         analysis_snapshot=analysis_snapshot or {},
         planner_instruction=planner_instruction,
         platform_overlay=overlay,
+        llm_plan=llm_slot_plan,
     )
 
     return {
@@ -154,6 +172,10 @@ def build_strategy_preview(
             slot_preferences=slot_preferences,
             prompt_overrides=prompt_overrides,
             strategy_reference_images=strategy_reference_images,
+            loaded_reference_images=loaded_reference_images,
+            loaded_strategy_reference_images=loaded_strategy_reference_images,
+            reference_manifest=reference_manifest,
+            strategy_reference_manifest=strategy_reference_manifest,
         ),
     }
 
@@ -293,11 +315,10 @@ def _build_prompt_plan(
     platform_name: str,
     asset_plan: list[dict[str, Any]],
     reference_manifest: list[dict[str, Any]],
-    loaded_reference_images: list[LoadedReferenceImage],
-    loaded_strategy_reference_images: list[LoadedReferenceImage],
     analysis_snapshot: dict[str, Any],
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
+    llm_plan: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     base_plan = [
         _build_default_prompt_plan_item(
@@ -312,19 +333,6 @@ def _build_prompt_plan(
         for plan_item in asset_plan
     ]
 
-    if not loaded_reference_images:
-        return base_plan
-
-    client = WhataiClient()
-    llm_plan = client.plan_prompt_plan(
-        confirmed_copy=confirmed_copy,
-        active_platform_id=active_platform_id,
-        asset_plan=asset_plan,
-        reference_images=loaded_reference_images,
-        supplemental_reference_images=loaded_strategy_reference_images,
-        reference_summary=_safe_analysis_section(analysis_snapshot, "reference_summary"),
-        planner_instruction=planner_instruction,
-    )
     if not llm_plan:
         return base_plan
 
@@ -333,6 +341,48 @@ def _build_prompt_plan(
     for plan_item in asset_plan:
         slot_id = str(plan_item["slot_id"])
         merged.append(_merge_prompt_plan_item(base_by_slot[slot_id], llm_plan.get(slot_id) or llm_plan.get(plan_item["role"])))
+    return merged
+
+
+def _plan_main_gallery(
+    *,
+    confirmed_copy: dict[str, Any],
+    active_platform_id: str,
+    asset_plan: list[dict[str, Any]],
+    loaded_reference_images: list[LoadedReferenceImage],
+    loaded_strategy_reference_images: list[LoadedReferenceImage],
+    analysis_snapshot: dict[str, Any],
+    planner_instruction: str | None,
+) -> dict[str, dict[str, Any]]:
+    if not loaded_reference_images:
+        return {}
+    client = WhataiClient()
+    return client.plan_prompt_plan(
+        confirmed_copy=confirmed_copy,
+        active_platform_id=active_platform_id,
+        asset_plan=asset_plan,
+        reference_images=loaded_reference_images,
+        supplemental_reference_images=loaded_strategy_reference_images,
+        reference_summary=_safe_analysis_section(analysis_snapshot, "reference_summary"),
+        planner_instruction=planner_instruction,
+    )
+
+
+def _merge_asset_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(llm_item, dict):
+        return base
+    merged = {**base}
+    expression_mode = repair_broken_text(llm_item.get("expression_mode"))
+    if expression_mode and expression_mode in set(base.get("candidate_expression_modes") or []):
+        meta = expression_metadata(expression_mode)
+        merged.update(meta)
+        merged["expression_mode"] = expression_mode
+    copy_focus = repair_broken_text(llm_item.get("copy_focus"))
+    if copy_focus:
+        merged["copy_focus"] = copy_focus
+    focus_selling_point = repair_broken_text(llm_item.get("focus_selling_point"))
+    if focus_selling_point:
+        merged["focus_selling_point"] = focus_selling_point
     return merged
 
 
@@ -484,6 +534,8 @@ def _build_default_prompt_plan_item(
         "expression_mode": plan_item.get("expression_mode"),
         "expression_label": plan_item.get("expression_label"),
         "expression_reason": plan_item.get("expression_reason"),
+        "copy_focus": plan_item.get("copy_focus"),
+        "focus_selling_point": plan_item.get("focus_selling_point"),
         "copy_blocks": copy_blocks,
         "raw_prompt_override": plan_item.get("raw_prompt_override"),
         "applied_preset_id": plan_item.get("applied_preset_id"),
@@ -550,6 +602,10 @@ def _merge_prompt_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | Non
         merged["reference_slots"] = normalized_reference_slots
 
     merged["planner_source"] = "llm"
+    for key in ("expression_mode", "copy_focus", "focus_selling_point"):
+        value = repair_broken_text(llm_item.get(key))
+        if value:
+            merged[key] = value
     return merged
 
 

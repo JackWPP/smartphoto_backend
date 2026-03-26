@@ -19,6 +19,7 @@ from app.services.copy_normalization import (
     normalize_phrase_list,
     repair_broken_text,
 )
+from app.services.llm_router import LLMRouter
 from app.services.reference_images import LoadedReferenceImage
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ class WhataiClient:
 
     def __init__(self) -> None:
         self.settings = get_settings()
+        self.llm_router = LLMRouter(self.settings)
 
     def analyze_images(
         self,
@@ -77,32 +79,44 @@ class WhataiClient:
     ) -> dict[str, Any]:
         normalized_images = [item for item in reference_images if isinstance(item, LoadedReferenceImage)]
         fallback = self._fake_analysis(active_platform_id, normalized_images)
-        if not self.settings.whatai_api_key or not normalized_images:
+        if not normalized_images or not self.llm_router.is_available():
             return fallback
 
-        content: list[dict[str, Any]] = [
-            {
-                "type": "text",
-                "text": (
-                    "你是 SmartPhoto 的商品视觉分析器。"
-                    "请阅读上传的商品参考图，只返回 JSON 对象，字段必须包含："
-                    "recognized_product,image_assessment,missing_views,suggestions,copy_draft,key_parameters,"
-                    "suggested_styles,reference_summary。"
-                    "其中 reference_summary 至少包含 shape,colors,materials,structures,must_keep。"
-                    f"当前平台：{active_platform_id or 'temu'}。"
-                ),
-            },
-            *self._build_chat_image_parts(normalized_images),
-        ]
+        analysis_model = (
+            self.llm_router.model_for_task("analysis")
+            if self.settings.llm_provider == "openrouter"
+            else self.settings.whatai_analysis_model
+        )
         payload = {
-            "model": self.settings.whatai_analysis_model or self.settings.whatai_chat_model,
-            "messages": [{"role": "user", "content": content}],
+            "model": analysis_model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "你是 SmartPhoto 的商品视觉分析器。"
+                            "请阅读上传的商品参考图，只返回 JSON 对象。"
+                            "字段必须包含：recognized_product,image_assessment,missing_views,suggestions,copy_draft,"
+                            "key_parameters,suggested_styles,reference_summary,category_candidates,scene_tags,"
+                            "supplement_image_recommendations,detected_view_slots。"
+                            "recognized_product 至少包含 product_name,category,image_type,confidence。"
+                            "category_candidates 至少返回 3 个候选项，每项包含 category,confidence,reason，并按置信度排序。"
+                            "supplement_image_recommendations 每项必须包含 slot_type,label,reason,priority。"
+                            "slot_type 只能是 front,angle45,side,extra。"
+                            "missing_views 和 detected_view_slots 优先使用这 4 个槽位语义。"
+                            "reference_summary 至少包含 shape,colors,materials,structures,must_keep。"
+                            f"当前平台：{active_platform_id or 'temu'}。"
+                        ),
+                    },
+                    *self._build_chat_image_parts(normalized_images),
+                ],
+            }],
             "temperature": 0.2,
+            "response_format": {"type": "json_object"},
         }
-
-        resp = self._post_chat_json(payload, "upstream_llm_error")
-        text = self._extract_text(resp)
-        parsed = self._parse_json_object(text)
+        response = self._post_chat_json(payload, "upstream_llm_error")
+        parsed = self._parse_json_object(self._extract_text(response))
         if not isinstance(parsed, dict):
             return fallback
         merged = self._merge_analysis_result(fallback, parsed)
@@ -120,7 +134,7 @@ class WhataiClient:
         reference_summary: dict[str, Any] | None,
         planner_instruction: str | None,
     ) -> dict[str, dict[str, Any]]:
-        if not self.settings.whatai_api_key or not reference_images:
+        if not self.llm_router.is_available() or not reference_images:
             return {}
 
         defaults = [
@@ -136,34 +150,38 @@ class WhataiClient:
         ]
         manifest = [image.to_manifest_item() for image in reference_images]
         supplemental_manifest = [image.to_manifest_item() for image in supplemental_reference_images or []]
-        content: list[dict[str, Any]] = [
-            {
-                "type": "text",
-                "text": (
-                    "你是 SmartPhoto 的电商主图 Prompt Planner。"
-                    "请根据商品 copy、平台信息、槽位定义和参考图，为 5 个主图槽位输出 JSON。"
-                    "只能返回 JSON 对象，顶层键必须是 prompt_plan，值是数组。"
-                    "prompt_plan 中每项必须包含：role,reference_image_ids,must_keep,must_avoid,"
-                    "background_rule,composition_rule,lighting_rule,fidelity_rule,final_prompt_base。"
-                    "reference_image_ids 只能从可用参考图 id 中选择。"
-                    "需要白底的槽位必须严格强调纯白无缝背景、单主体、不要人物和道具。"
-                    "所有角色都必须以商品保真为最高优先级。"
-                    f"平台：{active_platform_id}。"
-                    f"商品 copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
-                    f"角色定义：{json.dumps(defaults, ensure_ascii=False)}。"
-                    f"可用参考图：{json.dumps(manifest, ensure_ascii=False)}。"
-                    f"补充策略参考图：{json.dumps(supplemental_manifest, ensure_ascii=False)}。"
-                    f"参考图摘要：{json.dumps(reference_summary or {}, ensure_ascii=False)}。"
-                    f"额外策略指令：{planner_instruction or '无'}。"
-                ),
-            },
-            *self._build_chat_image_parts(reference_images),
-            *self._build_chat_image_parts(supplemental_reference_images or []),
-        ]
         payload = {
-            "model": self.settings.whatai_planner_model or self.settings.whatai_chat_model,
-            "messages": [{"role": "user", "content": content}],
+            "model": self.llm_router.model_for_task("main_planner"),
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "你是 SmartPhoto 的电商主图规划 Agent。"
+                            "请根据商品 copy、平台信息、槽位定义和参考图，为 5 个主图槽位输出 JSON。"
+                            "只能返回 JSON 对象，顶层键必须是 prompt_plan，值是数组。"
+                            "每项必须包含：role,expression_mode,copy_focus,focus_selling_point,reference_image_ids,"
+                            "must_keep,must_avoid,background_rule,composition_rule,lighting_rule,fidelity_rule,final_prompt_base。"
+                            "reference_image_ids 只能从可用参考图 id 中选择。"
+                            "需要白底的槽位必须严格强调纯白无缝背景、单主体、不要人物和道具。"
+                            "主图 5 槽位必须职责分开，不要把同一个卖点重复铺满全部槽位。"
+                            "所有角色都必须以商品保真为最高优先级。"
+                            f"平台：{active_platform_id}。"
+                            f"商品 copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
+                            f"角色定义：{json.dumps(defaults, ensure_ascii=False)}。"
+                            f"可用参考图：{json.dumps(manifest, ensure_ascii=False)}。"
+                            f"补充策略参考图：{json.dumps(supplemental_manifest, ensure_ascii=False)}。"
+                            f"参考图摘要：{json.dumps(reference_summary or {}, ensure_ascii=False)}。"
+                            f"额外策略指令：{planner_instruction or '无'}。"
+                        ),
+                    },
+                    *self._build_chat_image_parts(reference_images),
+                    *self._build_chat_image_parts(supplemental_reference_images or []),
+                ],
+            }],
             "temperature": 0.3,
+            "response_format": {"type": "json_object"},
         }
         response = self._post_chat_json(payload, "upstream_llm_error")
         parsed = self._parse_json_object(self._extract_text(response))
@@ -186,6 +204,9 @@ class WhataiClient:
                 if image_id in valid_image_ids
             ]
             by_role[role] = {
+                "expression_mode": str(item.get("expression_mode") or "").strip(),
+                "copy_focus": str(item.get("copy_focus") or "").strip(),
+                "focus_selling_point": str(item.get("focus_selling_point") or "").strip(),
                 "reference_image_ids": reference_image_ids,
                 "must_keep": _normalize_planner_text_entries(item.get("must_keep")),
                 "must_avoid": _normalize_planner_text_entries(item.get("must_avoid")),
@@ -198,7 +219,7 @@ class WhataiClient:
             }
         return by_role
 
-    def plan_detail_page_panels(
+    def plan_detail_page_narrative(
         self,
         *,
         confirmed_copy: dict[str, Any],
@@ -208,22 +229,24 @@ class WhataiClient:
         style_grid: LoadedReferenceImage | None,
         planner_instruction: str | None,
         analysis_snapshot: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        if not self.settings.whatai_api_key:
-            return []
+    ) -> dict[str, Any]:
+        if not self.llm_router.is_available():
+            return {}
 
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": (
-                    "You are SmartPhoto's Amazon detail page planner. "
+                    "You are SmartPhoto's detail-page narrative planner. "
                     "Image 1 is the product multi-angle grid. "
                     "Image 2 is the optional style/font reference grid. "
-                    "Return JSON only with top-level key panel_plan. "
+                    "Return JSON only with top-level keys detail_story_brief and panel_plan. "
+                    "detail_story_brief must contain exactly these keys: trust_overview,mechanism,feature_a,feature_b,usage_scene,parameter_proof,differentiator,closing_cta. "
                     "panel_plan must be an array of exactly 8 items. "
-                    "Each item must contain: panel_id, panel_label, planner_prompt_base, copy_lines, layout_notes, "
-                    "product_reference_ids, style_reference_ids. "
-                    "Visible copy should be concise and suitable for English Amazon detail page panels. "
+                    "Each item must contain: panel_id,panel_label,narrative_section,panel_goal,copy_focus,panel_type,layout_template,"
+                    "planner_prompt_base,copy_lines,layout_notes,product_reference_ids,style_reference_ids. "
+                    "Visible copy should be concise and suitable for ecommerce detail page panels. "
+                    "Do not make all panels feel like horizontal main images; they must form a narrative sequence. "
                     f"Confirmed copy: {json.dumps(confirmed_copy, ensure_ascii=False)}. "
                     f"Product manifest: {json.dumps(product_manifest, ensure_ascii=False)}. "
                     f"Style manifest: {json.dumps(style_manifest, ensure_ascii=False)}. "
@@ -231,35 +254,30 @@ class WhataiClient:
                     f"Extra planner instruction: {planner_instruction or 'None'}."
                 ),
             },
-            {
-                "type": "text",
-                "text": "Image 1 is the product multi-angle grid.",
-            },
+            {"type": "text", "text": "Image 1 is the product multi-angle grid."},
             {"type": "image_url", "image_url": {"url": self._optimized_data_uri(product_grid)}},
         ]
         if style_grid is not None:
             content.extend(
                 [
-                    {
-                        "type": "text",
-                        "text": "Image 2 is the style/font reference grid.",
-                    },
+                    {"type": "text", "text": "Image 2 is the style/font reference grid."},
                     {"type": "image_url", "image_url": {"url": self._optimized_data_uri(style_grid)}},
                 ]
             )
 
         payload = {
-            "model": self.settings.whatai_planner_model or self.settings.whatai_chat_model,
+            "model": self.llm_router.model_for_task("detail_planner"),
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.4,
+            "response_format": {"type": "json_object"},
         }
         response = self._post_chat_json(payload, "upstream_llm_error")
         parsed = self._parse_json_object(self._extract_text(response))
         if not isinstance(parsed, dict):
-            return []
+            return {}
         panel_plan = parsed.get("panel_plan")
         if not isinstance(panel_plan, list):
-            return []
+            return {}
 
         valid_product_ids = {str(item["image_id"]) for item in product_manifest if item.get("image_id")}
         valid_style_ids = {str(item["image_id"]) for item in style_manifest if item.get("image_id")}
@@ -274,6 +292,11 @@ class WhataiClient:
                 {
                     "panel_id": panel_id,
                     "panel_label": str(item.get("panel_label") or "").strip(),
+                    "narrative_section": str(item.get("narrative_section") or "").strip(),
+                    "panel_goal": str(item.get("panel_goal") or "").strip(),
+                    "copy_focus": str(item.get("copy_focus") or "").strip(),
+                    "panel_type": str(item.get("panel_type") or "").strip(),
+                    "layout_template": str(item.get("layout_template") or "").strip(),
                     "planner_prompt_base": str(item.get("planner_prompt_base") or "").strip(),
                     "copy_lines": [str(value).strip() for value in item.get("copy_lines", []) if str(value).strip()],
                     "layout_notes": str(item.get("layout_notes") or "").strip(),
@@ -289,7 +312,21 @@ class WhataiClient:
                     ],
                 }
             )
-        return normalized
+        story = parsed.get("detail_story_brief")
+        normalized_story = story if isinstance(story, dict) else {}
+        return {
+            "detail_story_brief": {
+                "trust_overview": str(normalized_story.get("trust_overview") or "").strip(),
+                "mechanism": str(normalized_story.get("mechanism") or "").strip(),
+                "feature_a": str(normalized_story.get("feature_a") or "").strip(),
+                "feature_b": str(normalized_story.get("feature_b") or "").strip(),
+                "usage_scene": str(normalized_story.get("usage_scene") or "").strip(),
+                "parameter_proof": str(normalized_story.get("parameter_proof") or "").strip(),
+                "differentiator": str(normalized_story.get("differentiator") or "").strip(),
+                "closing_cta": str(normalized_story.get("closing_cta") or "").strip(),
+            },
+            "panel_plan": normalized,
+        }
 
     def extract_parameters(
         self,
@@ -300,7 +337,7 @@ class WhataiClient:
         file_attachments: list[dict[str, Any]],
     ) -> dict[str, Any]:
         fallback = self._fake_parameter_snapshot(confirmed_copy, active_platform_id, image_attachments, file_attachments)
-        if not self.settings.whatai_api_key:
+        if not self.llm_router.is_available():
             return fallback
 
         attachment_manifest = [
@@ -333,9 +370,10 @@ class WhataiClient:
             *self._build_chat_image_parts(image_attachments),
         ]
         payload = {
-            "model": self.settings.whatai_parameter_model,
+            "model": self.llm_router.model_for_task("parameter"),
             "messages": [{"role": "user", "content": content}],
             "temperature": 0.2,
+            "response_format": {"type": "json_object"},
         }
         response = self._post_chat_json(payload, "upstream_llm_error")
         parsed = self._parse_json_object(self._extract_text(response))
@@ -560,6 +598,8 @@ class WhataiClient:
         )
 
     def _post_chat_json(self, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
+        if self.settings.llm_provider == "openrouter":
+            return self.llm_router._post_chat_json(payload, error_key)
         model = str(payload.get("model", ""))
         if not model.startswith("gemini-"):
             return self._post_json("/chat/completions", payload, error_key)
@@ -947,6 +987,10 @@ class WhataiClient:
             "suggestions",
             "suggested_styles",
             "key_parameters",
+            "category_candidates",
+            "scene_tags",
+            "supplement_image_recommendations",
+            "detected_view_slots",
         }
         for key, value in parsed.items():
             if key in handled_keys or value is None:
@@ -958,6 +1002,10 @@ class WhataiClient:
             fallback.get("recognized_product", {}),
             text_key="product_name",
         )
+        recognized_confidence = float(merged["recognized_product"].get("confidence") or 0)
+        if recognized_confidence <= 1:
+            recognized_confidence *= 100
+        merged["recognized_product"]["confidence"] = max(0.0, min(recognized_confidence, 100.0))
         merged["image_assessment"] = self._normalize_analysis_dict(
             parsed.get("image_assessment"),
             fallback.get("image_assessment", {}),
@@ -987,6 +1035,33 @@ class WhataiClient:
             parsed.get("key_parameters"),
             fallback.get("key_parameters", []),
         )
+        merged["category_candidates"] = self._normalize_category_candidates(
+            parsed.get("category_candidates"),
+            merged["recognized_product"],
+            fallback.get("category_candidates", []),
+        )
+        merged["detected_view_slots"] = self._normalize_slot_list(
+            parsed.get("detected_view_slots"),
+            fallback.get("detected_view_slots", []),
+        )
+        merged["missing_views"] = self._normalize_slot_list(
+            parsed.get("missing_views"),
+            fallback.get("missing_views", []),
+        )
+        merged["scene_tags"] = self._normalize_string_list(
+            parsed.get("scene_tags"),
+            fallback.get("scene_tags", []),
+        )
+        merged["supplement_image_recommendations"] = self._normalize_supplement_recommendations(
+            parsed.get("supplement_image_recommendations"),
+            merged["missing_views"],
+            fallback.get("supplement_image_recommendations", []),
+        )
+        if not merged["suggestions"]:
+            merged["suggestions"] = [
+                f"建议补充 {item['label']}：{item['reason']}"
+                for item in merged["supplement_image_recommendations"]
+            ]
         return merged
 
     def _normalize_analysis_dict(
@@ -1039,6 +1114,99 @@ class WhataiClient:
         items = parsed if isinstance(parsed, list) else fallback
         return normalize_structured_key_parameters(items)
 
+    def _normalize_category_candidates(
+        self,
+        value: Any,
+        recognized_product: dict[str, Any],
+        fallback: list[Any],
+    ) -> list[dict[str, Any]]:
+        parsed = self._decode_json_like(value)
+        items = parsed if isinstance(parsed, list) else fallback
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if isinstance(item, dict):
+                category = repair_broken_text(item.get("category"))
+                reason = repair_broken_text(item.get("reason"))
+                confidence = float(item.get("confidence") or 0)
+            else:
+                category = repair_broken_text(item)
+                reason = ""
+                confidence = 0
+            if not category or category in seen:
+                continue
+            normalized.append({
+                "category": category,
+                "confidence": max(0.0, min(confidence * 100 if confidence <= 1 else confidence, 100.0)),
+                "reason": reason,
+            })
+            seen.add(category)
+
+        top_category = repair_broken_text(recognized_product.get("category")) or "其他"
+        if top_category not in seen:
+            normalized.insert(
+                0,
+                {
+                    "category": top_category,
+                    "confidence": float(recognized_product.get("confidence") or 35),
+                    "reason": "来自当前识别 top1。",
+                },
+            )
+        return normalized[:5]
+
+    def _normalize_slot_list(self, value: Any, fallback: list[Any]) -> list[str]:
+        allowed = {"front", "angle45", "side", "extra"}
+        values = self._normalize_string_list(value, fallback)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            slot = item.strip()
+            if slot in seen:
+                continue
+            normalized.append(slot)
+            seen.add(slot)
+        return normalized
+
+    def _normalize_supplement_recommendations(
+        self,
+        value: Any,
+        missing_views: list[str],
+        fallback: list[Any],
+    ) -> list[dict[str, Any]]:
+        allowed = {"front", "angle45", "side", "extra"}
+        parsed = self._decode_json_like(value)
+        items = parsed if isinstance(parsed, list) else fallback
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            slot_type = str(item.get("slot_type") or "").strip()
+            if slot_type not in allowed or slot_type in seen:
+                continue
+            normalized.append(
+                {
+                    "slot_type": slot_type,
+                    "label": repair_broken_text(item.get("label")) or self._slot_label(slot_type),
+                    "reason": repair_broken_text(item.get("reason")) or f"建议补充 {self._slot_label(slot_type)}。",
+                    "priority": max(1, min(int(item.get("priority") or len(normalized) + 1), 10)),
+                }
+            )
+            seen.add(slot_type)
+        for index, slot_type in enumerate(missing_views, start=len(normalized) + 1):
+            if slot_type in seen:
+                continue
+            normalized.append(
+                {
+                    "slot_type": slot_type,
+                    "label": self._slot_label(slot_type),
+                    "reason": f"当前缺少 {self._slot_label(slot_type)}，建议补充以提升识别和生成稳定性。",
+                    "priority": index,
+                }
+            )
+            seen.add(slot_type)
+        return normalized
+
     def _decode_json_like(self, value: Any) -> Any:
         if isinstance(value, str):
             stripped = value.strip()
@@ -1060,13 +1228,19 @@ class WhataiClient:
         platform_hint = active_platform_id or "temu"
         slots = [image.slot_type for image in reference_images or []]
         slot_hint = "、".join(slots) if slots else "front"
+        missing_views = [slot for slot in ("front", "angle45", "side") if slot not in slots]
+        category_candidates = [
+            {"category": "其他", "confidence": 35, "reason": "fallback 未拿到足够的商品语义，默认按其他处理。"},
+            {"category": "家电", "confidence": 18, "reason": "外观可能属于设备类商品，但缺少可靠证据。"},
+            {"category": "家居用品", "confidence": 12, "reason": "仅作为弱候选，不应直接视为结论。"},
+        ]
         return {
             "analysis_source": "fallback",
             "recognized_product": {
                 "product_name": "智能产品",
-                "category": "家居用品",
+                "category": "其他",
                 "image_type": "实物图",
-                "confidence": 0.8,
+                "confidence": 35,
             },
             "image_assessment": {
                 "quality_score": 0.86,
@@ -1074,10 +1248,25 @@ class WhataiClient:
                 "clarity": "good",
                 "background_cleanliness": "medium",
             },
-            "missing_views": ["side"] if "side" not in slots else [],
+            "category_candidates": category_candidates,
+            "missing_views": missing_views,
+            "detected_view_slots": [slot for slot in ("front", "angle45", "side", "extra") if slot in slots],
+            "scene_tags": ["白底产品"] if "front" in slots else ["基础产品图"],
+            "supplement_image_recommendations": [
+                {
+                    "slot_type": slot_type,
+                    "label": self._slot_label(slot_type),
+                    "reason": f"建议补充 {self._slot_label(slot_type)} 以提升 {platform_hint} 平台适配效果。",
+                    "priority": index + 1,
+                }
+                for index, slot_type in enumerate(missing_views[:3])
+            ],
             "suggestions": [
-                "图片质量良好，适合AI处理",
-                f"建议补充侧面图以提升{platform_hint}平台适配效果",
+                "图片质量良好，适合 AI 处理",
+                *[
+                    f"建议补充 {self._slot_label(slot_type)} 以提升 {platform_hint} 平台适配效果"
+                    for slot_type in missing_views[:2]
+                ],
             ],
             "copy_draft": {
                 "headline": "高效体验，稳定品质",
@@ -1104,6 +1293,14 @@ class WhataiClient:
                 "must_keep": "商品外观、比例、核心结构和主色不能漂移",
             },
         }
+
+    def _slot_label(self, slot_type: str) -> str:
+        return {
+            "front": "正面图",
+            "angle45": "45 度角图",
+            "side": "侧面图",
+            "extra": "补充图",
+        }.get(slot_type, slot_type)
 
     def _regenerated_text(self, original: str, instruction: str | None) -> str:
         suffix = instruction or "提升转化表达"

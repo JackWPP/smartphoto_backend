@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import io
+from contextlib import suppress
 
 from fastapi import APIRouter, Depends, Request
 from PIL import Image
@@ -17,7 +17,6 @@ from app.models.session_image import SessionImageModel
 from app.models.strategy_reference_image import StrategyReferenceImageModel
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.schemas.session import UploadCompleteData, UploadCompleteRequest, UploadPresignData, UploadPresignRequest
-from app.services.dispatcher import dispatch_job
 from app.services.repo import (
     get_session_or_404,
     list_active_detail_style_images,
@@ -27,6 +26,7 @@ from app.services.repo import (
 )
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import (
+    LocalStorageAdapter,
     build_upload_object_key,
     create_upload_token,
     decode_upload_token,
@@ -41,7 +41,6 @@ from .sessions import (
     MAX_DETAIL_STYLE_IMAGES,
     MAX_IMAGE_BYTES,
     MAX_SESSION_IMAGES,
-    _auto_trigger_reanalysis,
     _invalidate_strategy_inputs,
 )
 
@@ -62,12 +61,16 @@ def _resource_summary(resource_id: str, display_order: int, url: str | None, *, 
 
 
 def _inspect_uploaded_object(storage, object_key: str, content_type: str) -> tuple[int, int, str, int]:
-    content = storage.read_bytes(object_key)
-    try:
-        with Image.open(io.BytesIO(content)) as img:
-            return img.size[0], img.size[1], Image.MIME.get(img.format, content_type or "image/jpeg"), len(content)
-    except Exception:
-        return 0, 0, content_type or "application/octet-stream", len(content)
+    if isinstance(storage, LocalStorageAdapter):
+        path = storage.resolve_object_key(object_key)
+        file_size = path.stat().st_size
+        try:
+            with Image.open(path) as img:
+                return img.size[0], img.size[1], Image.MIME.get(img.format, content_type or "image/jpeg"), file_size
+        except Exception:
+            return 0, 0, content_type or "application/octet-stream", file_size
+    stat = storage.stat_object(object_key)
+    return 0, 0, content_type or stat.content_type or "application/octet-stream", stat.size_bytes
 
 
 @router.post("/presign", response_model=APIResponse[UploadPresignData], operation_id="presignUpload", responses={**OPENAPI_ERROR_RESPONSES})
@@ -146,12 +149,38 @@ def presign_upload(
 async def direct_upload_local(upload_id: str, request: Request):
     token = decode_upload_token(upload_id)
     storage = get_storage_adapter()
-    if storage.__class__.__name__ != "LocalStorageAdapter":
+    if not isinstance(storage, LocalStorageAdapter):
         raise AppError("invalid_request", "direct upload only available for local backend", 404)
-    content = await request.body()
-    if len(content) != token.size_bytes:
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_size = int(content_length)
+        except ValueError as exc:
+            raise AppError("invalid_request", "invalid content-length", 400) from exc
+        if declared_size != token.size_bytes:
+            raise AppError("invalid_request", "uploaded size mismatch", 400)
+
+    target_path = storage.resolve_object_key(token.object_key)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    try:
+        with target_path.open("wb") as fh:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                written += len(chunk)
+                if written > token.size_bytes:
+                    raise AppError("invalid_request", "uploaded size mismatch", 400)
+                fh.write(chunk)
+    except Exception:
+        with suppress(FileNotFoundError):
+            target_path.unlink()
+        raise
+
+    if written != token.size_bytes:
+        with suppress(FileNotFoundError):
+            target_path.unlink()
         raise AppError("invalid_request", "uploaded size mismatch", 400)
-    storage.write_bytes(token.object_key, content, content_type=token.content_type)
     return success_response({"upload_id": upload_id, "stored": True})
 
 
@@ -179,7 +208,6 @@ def complete_upload(
 
     width, height, resolved_mime_type, file_size = _inspect_uploaded_object(storage, token.object_key, token.content_type)
 
-    reanalysis_job_id = None
     if token.upload_kind == "session_image":
         model = SessionImageModel(
             session_id=session.id,
@@ -199,7 +227,6 @@ def complete_upload(
             session.current_step = 1
         else:
             _invalidate_strategy_inputs(session)
-        reanalysis_job_id = _auto_trigger_reanalysis(db, session, actor.user_id, actor.guest_id)
         db.flush()
         resource_id = model.id
         resource = _resource_summary(model.id, model.display_order, public_url_for(model.source_url), slot_type=model.slot_type)
@@ -253,8 +280,6 @@ def complete_upload(
         resource = _resource_summary(model.id, model.display_order, public_url_for(model.source_url))
 
     db.commit()
-    if reanalysis_job_id:
-        dispatch_job(reanalysis_job_id, queue="q.analysis")
     return success_response(
         {
             "upload_id": token.upload_id,

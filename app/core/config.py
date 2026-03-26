@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     whatai_image_model: str = "gpt-image-1"
     whatai_parameter_model: str = "gemini-3.1-flash-lite-preview"
     whatai_request_timeout_seconds: int = Field(default=180, ge=30, le=1800)
+    llm_provider: str = "whatai"
+    openrouter_api_base: str = "https://openrouter.ai/api/v1"
+    openrouter_api_key: str = ""
+    llm_analysis_model: str = "moonshotai/kimi-k2.5"
+    llm_main_planner_model: str = "xiaomi/mimo-v2-pro"
+    llm_detail_planner_model: str = "minimax/minimax-m2.7"
+    llm_parameter_model: str = "moonshotai/kimi-k2.5"
+    llm_fallback_model: str = "xiaomi/mimo-v2-pro"
 
     generation_lock_ttl_seconds: int = Field(default=600, ge=30)
     main_generation_concurrency: int = Field(default=4, ge=1, le=12)
@@ -191,4 +199,5 @@ def get_settings() -> Settings:
     settings.admin_frontend_dist.mkdir(parents=True, exist_ok=True)
     settings.database_url = resolve_database_url(settings.database_url)
     settings.storage_backend = (settings.storage_backend or "local").strip().lower()
+    settings.llm_provider = (settings.llm_provider or "whatai").strip().lower()
     return settings

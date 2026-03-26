@@ -14,6 +14,7 @@ from app.db import session as db_session
 from app.main import create_app
 from app.models.guest_identity import GuestIdentityModel
 from app.services.guest_identities import decode_guest_cookie_token
+from app.services.storage import get_storage_adapter
 from app.services.user_accounts import adjust_wallet_balance
 
 
@@ -579,6 +580,94 @@ def test_local_presign_upload_complete_flow(client):
     assert len(images) == 1
     assert images[0]["slot_type"] == "front"
     assert images[0]["url"].startswith("/storage/")
+
+
+def test_local_presign_upload_complete_invalidates_analysis_without_auto_requeue(client):
+    headers = register_user(client, "upload-reanalysis@example.com", display_name="UploadReanalysis")
+    session_id = create_ready_session(client, headers)
+    before = client.get(f"/api/v2/sessions/{session_id}", headers=headers).json()["data"]
+    previous_analysis_job_id = before["latest_analysis_job_id"]
+
+    image_bytes = make_image_bytes(color=(220, 220, 220))
+    presign = client.post(
+        "/api/v2/uploads/presign",
+        json={
+            "session_id": session_id,
+            "upload_kind": "session_image",
+            "original_name": "side.jpg",
+            "content_type": "image/jpeg",
+            "size_bytes": len(image_bytes),
+            "display_order": 2,
+            "slot_type": "side",
+        },
+        headers=headers,
+    )
+    assert presign.status_code == 200, presign.text
+    upload_data = presign.json()["data"]
+
+    uploaded = client.put(upload_data["upload_url"], content=image_bytes, headers=upload_data.get("headers") or {})
+    assert uploaded.status_code == 200, uploaded.text
+
+    completed = client.post("/api/v2/uploads/complete", json={"upload_id": upload_data["upload_id"]}, headers=headers)
+    assert completed.status_code == 200, completed.text
+
+    after = client.get(f"/api/v2/sessions/{session_id}", headers=headers).json()["data"]
+    assert after["latest_analysis_job_id"] == previous_analysis_job_id
+    assert after["strategy_preview"] is None
+    assert after["detail_strategy_preview"] is None
+    assert after["analysis_snapshot"]["reanalysis_required"] is True
+
+
+def test_presign_upload_rejects_file_too_large(client):
+    headers = register_user(client, "upload-limit@example.com", display_name="UploadLimit")
+    session_id = client.post("/api/v2/sessions", headers=headers).json()["data"]["session_id"]
+
+    presign = client.post(
+        "/api/v2/uploads/presign",
+        json={
+            "session_id": session_id,
+            "upload_kind": "session_image",
+            "original_name": "huge.jpg",
+            "content_type": "image/jpeg",
+            "size_bytes": 10 * 1024 * 1024 + 1,
+            "display_order": 1,
+            "slot_type": "front",
+        },
+        headers=headers,
+    )
+
+    assert presign.status_code == 400
+    assert presign.json()["code"] == 40007
+
+
+def test_local_direct_upload_size_mismatch_cleans_partial_file(client):
+    headers = register_user(client, "upload-mismatch@example.com", display_name="UploadMismatch")
+    session_id = client.post("/api/v2/sessions", headers=headers).json()["data"]["session_id"]
+    image_bytes = make_image_bytes()
+
+    presign = client.post(
+        "/api/v2/uploads/presign",
+        json={
+            "session_id": session_id,
+            "upload_kind": "session_image",
+            "original_name": "front.jpg",
+            "content_type": "image/jpeg",
+            "size_bytes": len(image_bytes) + 1,
+            "display_order": 1,
+            "slot_type": "front",
+        },
+        headers=headers,
+    )
+    assert presign.status_code == 200, presign.text
+    upload_data = presign.json()["data"]
+
+    uploaded = client.put(upload_data["upload_url"], content=image_bytes, headers=upload_data.get("headers") or {})
+    assert uploaded.status_code == 400
+    assert "uploaded size mismatch" in uploaded.text
+
+    storage = get_storage_adapter()
+    target_path = storage.resolve_object_key(upload_data["object_key"])
+    assert not target_path.exists()
 
 
 def test_insufficient_credits_and_failed_job_refund(client, monkeypatch):

@@ -26387,6 +26387,42 @@
             "title": "Panel Label",
             "description": "panel 中文名。"
           },
+          "narrative_section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Narrative Section",
+            "description": "详情页叙事段落。"
+          },
+          "panel_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Goal",
+            "description": "详情页 panel 目标。"
+          },
+          "copy_focus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Focus",
+            "description": "详情页文案重点。"
+          },
           "panel_type": {
             "anyOf": [
               {
@@ -26578,6 +26614,14 @@
             "title": "Style Reference Manifest",
             "description": "当前 session 可用详情页风格图清单。"
           },
+          "detail_story_brief": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Detail Story Brief",
+            "description": "详情页 8 段叙事摘要。"
+          },
           "prompts": {
             "items": {
               "$ref": "#/components/schemas/DetailPromptPreviewItem"
@@ -26633,6 +26677,42 @@
             "type": "string",
             "title": "Panel Label",
             "description": "panel 中文名。"
+          },
+          "narrative_section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Narrative Section",
+            "description": "详情页叙事段落。"
+          },
+          "panel_goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Panel Goal",
+            "description": "详情页 panel 目标。"
+          },
+          "copy_focus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Focus",
+            "description": "详情页文案重点。"
           },
           "display_order": {
             "type": "integer",
@@ -29629,6 +29709,18 @@
             ],
             "title": "Detail Strategy Preview",
             "description": "当前保存的详情页策略预览。"
+          },
+          "latest_analysis_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Analysis Job Id",
+            "description": "最近一次分析任务 ID。"
           },
           "latest_generate_job_id": {
             "anyOf": [

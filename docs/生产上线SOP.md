@@ -382,6 +382,9 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps a
 - `CORS_ALLOW_ORIGINS`
 - `PUBLIC_BASE_URL`
 - `WHATAI_*`
+- `LLM_PROVIDER`
+- `OPENROUTER_*`
+- `LLM_*`
 - `S3_*`
 
 则不需要重新发包，只需在当前 release 目录执行：
@@ -561,6 +564,77 @@ SMARTPHOTO_IMAGE=smartphoto-backend:<fix-tag> docker compose --env-file .env.pro
 
 - 生产上传优先走 `/api/v2/uploads/presign -> PUT -> /api/v2/uploads/complete`
 - 不要继续让大文件 multipart 经边缘层转发
+
+### 14.7 `bash: POSTGRES_USER: unbound variable`
+
+原因：
+
+- 当前 shell 开了 `set -u`
+- 但还没有 `source .env.prod`
+
+处理：
+
+```bash
+cd "$NEW_ROOT"
+
+set -a
+source .env.prod
+set +a
+```
+
+之后再执行：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atqc "SELECT version_num FROM alembic_version ORDER BY version_num;"
+```
+
+### 14.8 `FileNotFoundError: Dockerfile`
+
+原因：
+
+- SSH 断线后当前目录丢失
+- 实际不在 release 目录里执行构建命令
+
+处理：
+
+```bash
+export NEW_ROOT=/opt/smartphoto_backend/releases/<release-id>
+cd "$NEW_ROOT"
+pwd
+ls -l Dockerfile docker-compose.prod.yml .env.prod
+```
+
+只有确认 `Dockerfile` 在当前目录存在后，再继续构建。
+
+### 14.9 Guest 接口 500 且提示 `relation "guest_identities" does not exist`
+
+原因：
+
+- 镜像已升级到 guest 代码线
+- 但生产库没有执行 `20260324_0011_guest_identities` 迁移
+- 常见触发方式是误用了 `--skip-migrate`
+
+处理：
+
+```bash
+set -euo pipefail
+
+export COMPOSE_PROJECT_NAME=smartphoto_backend
+export IMAGE_REF=<current-image-ref>
+
+cd "$NEW_ROOT"
+
+set -a
+source .env.prod
+set +a
+
+SMARTPHOTO_IMAGE="$IMAGE_REF" \
+docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
+
+SMARTPHOTO_IMAGE="$IMAGE_REF" \
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps api worker
+```
 
 ## 15. 推荐上线节奏
 

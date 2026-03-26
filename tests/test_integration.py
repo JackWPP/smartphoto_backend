@@ -122,6 +122,34 @@ def test_trigger_analysis_recovers_created_session_with_uploaded_images(client):
     status = client.get(f"/api/v2/sessions/{sid}/analysis").json()["data"]
     assert status["status"] == "analyzed"
     assert status["analysis_snapshot"]["recognized_product"]["product_name"]
+    assert isinstance(status["analysis_snapshot"]["category_candidates"], list)
+    assert len(status["analysis_snapshot"]["category_candidates"]) >= 3
+    assert isinstance(status["analysis_snapshot"]["scene_tags"], list)
+    assert isinstance(status["analysis_snapshot"]["supplement_image_recommendations"], list)
+    assert status["analysis_snapshot"]["reanalysis_required"] is False
+
+
+def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, monkeypatch):
+    sid = create_ready_session(client)
+
+    first = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
+        json={"planner_instruction": "标题更短，版式更清晰"},
+    )
+    assert first.status_code == 200
+    original = first.json()["data"]["detail_strategy_preview"]
+
+    def _unexpected_rebuild(*args, **kwargs):
+        raise AssertionError("detail strategy preview should have been served from cache")
+
+    monkeypatch.setattr("app.api.v2.sessions.build_detail_strategy_preview", _unexpected_rebuild)
+
+    reused = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
+        json={"planner_instruction": "标题更短，版式更清晰"},
+    )
+    assert reused.status_code == 200
+    assert reused.json()["data"]["detail_strategy_preview"]["input_hash"] == original["input_hash"]
 
 
 def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, monkeypatch):
@@ -400,7 +428,22 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
     assert detail_strategy["panel_count"] == 8
     assert detail_strategy["style_source"] == "copy_fields"
     assert detail_strategy["style_reference_manifest"] == []
+    assert set(detail_strategy["detail_story_brief"].keys()) == {
+        "trust_overview",
+        "mechanism",
+        "feature_a",
+        "feature_b",
+        "usage_scene",
+        "parameter_proof",
+        "differentiator",
+        "closing_cta",
+    }
     assert len(detail_strategy["panel_plan"]) == 8
+    assert all("narrative_section" in item for item in detail_strategy["panel_plan"])
+    assert all("panel_goal" in item for item in detail_strategy["panel_plan"])
+    assert all("copy_focus" in item for item in detail_strategy["panel_plan"])
+    assert all("product_reference_ids" in item for item in detail_strategy["panel_plan"])
+    assert all("style_reference_ids" in item for item in detail_strategy["panel_plan"])
 
     prompt_preview = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/prompts/preview",
@@ -412,8 +455,12 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
     assert data["aspect_ratio"] == "21:9"
     assert data["panel_count"] == 8
     assert data["image_size"] == "1792x768"
+    assert "detail_story_brief" in data
     assert len(data["prompts"]) == 8
     assert data["prompts"][0]["blocks"]["instruction"] == "整体更干净"
+    assert "narrative_section" in data["prompts"][0]
+    assert "panel_goal" in data["prompts"][0]
+    assert "copy_focus" in data["prompts"][0]
     assert data["prompts"][0]["product_reference_images_used"][0]["slot_type"] == "front"
     assert data["prompts"][0]["style_reference_images_used"] == []
     assert data["latest_assets"] == []
@@ -437,6 +484,9 @@ def test_detail_page_panel_preferences_and_result_metadata(client):
     slot_02 = next(item for item in panel_plan if item["slot_id"] == "detail_slot_02")
     assert slot_02["panel_type"] == "parameter_explainer"
     assert slot_02["display_order"] == 2
+    assert slot_02["narrative_section"]
+    assert slot_02["panel_goal"] is not None
+    assert slot_02["copy_focus"] is not None
     assert "candidate_panel_types" in slot_02
     assert detail_strategy["detail_rule_pack_key"] == "ecommerce_detail_v2"
 
@@ -444,6 +494,9 @@ def test_detail_page_panel_preferences_and_result_metadata(client):
     detail_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results").json()["data"]
     assert all(item["slot_id"] for item in detail_results["panels"])
     assert all(item["panel_type"] for item in detail_results["panels"])
+    assert all("narrative_section" in item for item in detail_results["panels"])
+    assert all("panel_goal" in item for item in detail_results["panels"])
+    assert all("copy_focus" in item for item in detail_results["panels"])
 
 
 def test_detail_page_full_pipeline_keeps_main_gallery_untouched(client):

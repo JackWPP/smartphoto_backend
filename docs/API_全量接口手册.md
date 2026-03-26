@@ -168,8 +168,8 @@
 
 | 接口 | 作用 | 鉴权 | 请求重点 | 响应重点 |
 | --- | --- | --- | --- | --- |
-| `POST /sessions/{session_id}/analysis` | 触发分析 job | 用户 / Guest | 可带 `Idempotency-Key` | `job_id/status/auth_mode` |
-| `GET /sessions/{session_id}/analysis` | 读取分析快照 | 用户 / Guest | 无 | `analysis_snapshot/reference_summary` |
+| `POST /sessions/{session_id}/analysis` | 显式触发分析 job | 用户 / Guest | 可带 `Idempotency-Key` | `job_id/status/auth_mode` |
+| `GET /sessions/{session_id}/analysis` | 读取分析快照 | 用户 / Guest | 无 | `analysis_snapshot/reference_summary/category_candidates/scene_tags/detected_view_slots/supplement_image_recommendations` |
 
 #### 2.5.4 平台选择
 
@@ -204,7 +204,7 @@
 | `GET /sessions/{session_id}/strategy-reference-images` | 读取策略参考图 | 用户 / Guest | 无 | 参考图列表 |
 | `POST /sessions/{session_id}/strategy-reference-images` | 添加策略参考图 | 用户 / Guest | 文件或 `object_key` | 参考图记录 |
 | `DELETE /sessions/{session_id}/strategy-reference-images/{image_id}` | 删除策略参考图 | 用户 / Guest | 无 | 删除结果 |
-| `POST /sessions/{session_id}/strategy/preview` | 构建主图策略预览 | 用户 / Guest | `planner_instruction/slot_preferences` | `strategy_preview/asset_plan/prompt_plan` |
+| `POST /sessions/{session_id}/strategy/preview` | 构建主图策略预览 | 用户 / Guest | `planner_instruction/slot_preferences` | `strategy_preview/asset_plan/prompt_plan/input_hash` |
 | `GET /sessions/{session_id}/strategy/overrides` | 读取主图 override | 用户 / Guest | 无 | override 列表 |
 | `PUT /sessions/{session_id}/strategy/overrides` | 保存主图 override | 用户 / Guest | `overrides` | 更新后的 override |
 | `POST /sessions/{session_id}/prompts/preview` | 预览主图 prompt | 用户 / Guest | `instruction/include_latest_assets` | prompt 列表、reference 使用情况 |
@@ -226,12 +226,12 @@
 | `GET /sessions/{session_id}/detail-pages/style-images` | 读取详情页风格图 | 用户 / Guest | 无 | 风格图列表 |
 | `POST /sessions/{session_id}/detail-pages/style-images` | 添加详情页风格图 | 用户 / Guest | 文件或 `object_key` | 风格图记录 |
 | `DELETE /sessions/{session_id}/detail-pages/style-images/{image_id}` | 删除详情页风格图 | 用户 / Guest | 无 | 删除结果 |
-| `POST /sessions/{session_id}/detail-pages/strategy/preview` | 构建详情页策略预览 | 用户 / Guest | `panel_preferences/planner_instruction` | `panel_plan` |
+| `POST /sessions/{session_id}/detail-pages/strategy/preview` | 构建详情页策略预览 | 用户 / Guest | `panel_preferences/planner_instruction` | `detail_story_brief/panel_plan/input_hash` |
 | `GET /sessions/{session_id}/detail-pages/strategy/overrides` | 读取详情页 override | 用户 / Guest | 无 | override 列表 |
 | `PUT /sessions/{session_id}/detail-pages/strategy/overrides` | 保存详情页 override | 用户 / Guest | `overrides` | 更新后的 override |
-| `POST /sessions/{session_id}/detail-pages/prompts/preview` | 预览详情页 prompt | 用户 / Guest | `instruction/include_latest_assets` | panel prompt 列表 |
+| `POST /sessions/{session_id}/detail-pages/prompts/preview` | 预览详情页 prompt | 用户 / Guest | `instruction/include_latest_assets` | `detail_story_brief` + panel prompt 列表 |
 | `POST /sessions/{session_id}/detail-pages/generations` | 触发详情页生成 | 用户 / Guest | `instruction` | 用户返回 `job_id/charged_credits/...`；Guest 不扣钱包，兼容字段 `guest_trial/guest_quota_remaining/login_required_after_result` 固定为 `false/null/false` |
-| `GET /sessions/{session_id}/detail-pages/results` | 读取详情页结果 | 用户 / Guest | `version` | panel 列表、stitched 结果、版本列表 |
+| `GET /sessions/{session_id}/detail-pages/results` | 读取详情页结果 | 用户 / Guest | `version` | panel 列表、stitched 结果、版本列表；panel 含 `narrative_section/panel_goal/copy_focus/panel_type` |
 | `GET /sessions/{session_id}/detail-pages/download` | 下载详情页 ZIP | 用户 | `version` | ZIP 文件流 |
 
 ### 2.6 Job 与 Asset
