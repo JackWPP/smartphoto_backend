@@ -51,11 +51,19 @@ source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-### 2. 启动中间件基础设施 (Docker Compose)
+### 2. 启动中间件基础设施（可选）
 如果本地未安装 Postgres 或 Redis，可以通过 docker 一键启动。
 ```bash
 ./scripts/dev-up.sh
 ```
+
+如果你**不想用 Docker**，推荐两种本地模式：
+
+- 轻量调试模式：`SQLite + TASKS_EAGER=true`
+  - 只启动 API，不启动 Celery Worker
+  - 适合本地改接口、看页面流转、调 analysis/planner 返回结构
+- 接近真实链路模式：`PostgreSQL + Redis + Celery Worker`
+  - 更适合调 job、事件流、并发锁和真实异步行为
 
 ### 3. 配置核心环境变量
 通过 `.env` 对接真实的 LLM 和 Image Generation 上游接口。
@@ -64,8 +72,12 @@ cp .env.example .env
 # [必须修改] 配置真实的 API KEY，例如: 
 # WHATAI_API_KEY=sk-xxxxxx
 # WHATAI_API_BASE=https://api.whatai.cc
-# WHATAI_ANALYSIS_MODEL=gpt-4.1-mini
-# WHATAI_PLANNER_MODEL=gpt-4.1-mini
+# LLM_PROVIDER=openrouter
+# OPENROUTER_API_BASE=https://openrouter.ai/api/v1
+# OPENROUTER_API_KEY=sk-or-xxxxxx
+# LLM_ANALYSIS_MODEL=moonshotai/kimi-k2.5
+# LLM_MAIN_PLANNER_MODEL=xiaomi/mimo-v2-pro
+# LLM_DETAIL_PLANNER_MODEL=minimax/minimax-m2.7
 # WHATAI_REQUEST_TIMEOUT_SECONDS=180
 # [上线推荐] 切到对象存储：
 # STORAGE_BACKEND=s3
@@ -101,6 +113,33 @@ cd /home/wppjkw/smartphoto_backend
 ./scripts/dev-worker.sh
 ```
 
+本地无 Docker 推荐：
+
+```bash
+cp .env.example .env
+```
+
+轻量调试模式 `.env` 最小建议：
+
+```env
+DATABASE_URL=sqlite:///./storage/app.sqlite3
+ADMIN_DATABASE_URL=sqlite:///./storage/admin.sqlite3
+TASKS_EAGER=true
+REDIS_URL=redis://localhost:6379/0
+STORAGE_BACKEND=local
+PUBLIC_BASE_URL=http://127.0.0.1:8000
+CORS_ALLOW_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
+```
+
+说明：
+
+- `TASKS_EAGER=true` 时，job 会在 API 进程内直接执行，本地可以不启动 Worker
+- `./scripts/dev-api.sh` 现在会：
+  - 启动前自动执行 `alembic upgrade head`
+  - 只监控 `app/ scripts/ alembic/`，不再扫描 `runtime/`，避免 Docker 残留的 `runtime/postgres` 权限报错
+  - 若 `8000` 已被占用，会自动顺延到下一个空闲端口，并在终端打印实际端口
+- 若你要调真实异步链路，把 `TASKS_EAGER=false` 并启动本机 Redis + `./scripts/dev-worker.sh`
+
 ## 生产部署（单机 Docker Compose）
 
 适用于“单机 Linux 服务器 + Docker Compose + Git tag 发布”的首发方案。
@@ -116,18 +155,21 @@ cp .env.prod.example .env.prod
 - `ALLOW_DEV_AUTH_BYPASS=false`
 - `USER_JWT_SECRET` / `ADMIN_JWT_SECRET`
 - `WHATAI_API_KEY`
-- `WHATAI_CHAT_MODEL` / `WHATAI_ANALYSIS_MODEL` / `WHATAI_PLANNER_MODEL` / `WHATAI_IMAGE_MODEL` / `WHATAI_PARAMETER_MODEL`
+- `WHATAI_IMAGE_MODEL` / `WHATAI_REQUEST_TIMEOUT_SECONDS`
+- `LLM_PROVIDER`
+- `OPENROUTER_API_KEY` / `OPENROUTER_API_BASE`
+- `LLM_ANALYSIS_MODEL` / `LLM_MAIN_PLANNER_MODEL` / `LLM_DETAIL_PLANNER_MODEL` / `LLM_PARAMETER_MODEL` / `LLM_FALLBACK_MODEL`
 - 全部 `S3_*`
 - `POSTGRES_PASSWORD`
 - `DATABASE_URL`
-- `PIP_INDEX_URL`（国内环境默认已指向清华镜像，可按需改）
-- `PIP_TRUSTED_HOST`（若继续用 HTTP 镜像地址，需保留为 `mirrors.tuna.tsinghua.edu.cn`）
 
 说明：
 - 生产默认推荐 `STORAGE_BACKEND=s3`
 - `ADMIN_DATABASE_URL` 默认继续使用 `sqlite:///./storage/admin.sqlite3`，但会随 `./runtime/storage` 持久化
-- 生产示例文件不再替你预填 WhatAI 模型，直接复用你当前已验证过的模型配置
+- 当前推荐把文本/规划链路切到 `OpenRouter`，而 WhatAI 继续负责图片生成链路
+- 生产示例文件不再替你预填 WhatAI / OpenRouter 模型，直接复用你当前已验证过的配置
 - 生产不要继续使用开发态默认 secret
+- `.env.prod` 里的 `PIP_INDEX_URL/PIP_TRUSTED_HOST` 不会自动影响 `docker build`；若构建阶段卡在 `npm/apt/pip`，直接按 `docs/生产上线SOP.md` 的“构建网络慢时的完整替代命令”处理
 
 ### 2. 首次启动
 ```bash
@@ -174,7 +216,7 @@ export COMPOSE_PROJECT_NAME=smartphoto_backend
 - 新旧目录必须复用同一个 `COMPOSE_PROJECT_NAME`，这样才会继续使用原有 `postgres/redis/storage` 卷
 - `deploy-prod.sh` 会做：本机 `docker build` -> 可选 `migrate` -> 热更新 `api/worker`
 - `rollback-prod.sh` 只替换 `api/worker`，不会动 `postgres/redis/storage` 卷
-- 若这次只是恢复到正确代码线，且预检确认 DB 仍在用户版迁移链，优先使用 `--skip-migrate`
+- 只有在代码包不包含新 Alembic revision，且生产库已处于当前代码要求的 schema 时，才可使用 `--skip-migrate`
 - 详细生产上线顺序、备份命令、冒烟检查与常见坑位，以 `docs/生产上线SOP.md` 为准
 
 ## API 联调与排障手册索引

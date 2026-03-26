@@ -26,6 +26,70 @@ DETAIL_PAGE_USE_CASE = "amazon_detail"
 DETAIL_PAGE_ASPECT_RATIO = "21:9"
 DETAIL_PAGE_IMAGE_SIZE = "1792x768"
 DETAIL_PAGE_PANEL_COUNT = 8
+DETAIL_STORY_SECTIONS = (
+    "trust_overview",
+    "mechanism",
+    "feature_a",
+    "feature_b",
+    "usage_scene",
+    "parameter_proof",
+    "differentiator",
+    "closing_cta",
+)
+
+
+def _empty_detail_story_brief() -> dict[str, str]:
+    return {key: "" for key in DETAIL_STORY_SECTIONS}
+
+
+def _normalize_detail_story_brief(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return _empty_detail_story_brief()
+    return {key: str(value.get(key) or "").strip() for key in DETAIL_STORY_SECTIONS}
+
+
+def detail_strategy_preview_input_hash(
+    confirmed_copy: dict[str, Any],
+    *,
+    product_manifest: list[dict[str, Any]],
+    style_manifest: list[dict[str, Any]],
+    planner_instruction: str | None,
+    panel_preferences: dict[str, dict[str, Any]],
+    active_platform_id: str | None,
+) -> str:
+    normalized_copy = normalize_copy_payload(confirmed_copy)
+    return _stable_hash(
+        {
+            "panel_preferences": panel_preferences,
+            "planner_instruction": planner_instruction or "",
+            "platform_id": active_platform_id or "amazon",
+            "product_reference_manifest": [
+                {
+                    "image_id": item["image_id"],
+                    "slot_type": item["slot_type"],
+                    "display_order": item["display_order"],
+                }
+                for item in product_manifest
+            ],
+            "style_reference_manifest": [
+                {
+                    "image_id": item["image_id"],
+                    "display_order": item["display_order"],
+                }
+                for item in style_manifest
+            ],
+            "confirmed_copy": {
+                "product_name": normalized_copy.get("product_name", ""),
+                "category": normalized_copy.get("category", ""),
+                "hero_scene": normalized_copy.get("hero_scene", ""),
+                "core_selling_points": normalized_copy.get("core_selling_points", []),
+                "key_parameters": normalized_copy.get("key_parameters", []),
+                "product_advantages": normalized_copy.get("product_advantages", []),
+                "style_preset_id": normalized_copy.get("style_preset_id"),
+                "style_custom": normalized_copy.get("style_custom", ""),
+            },
+        }
+    )
 
 
 def build_detail_strategy_preview(
@@ -69,27 +133,20 @@ def build_detail_strategy_preview(
             "style_reference_manifest": [],
             "style_summary": _style_summary(normalized_copy, style_loaded),
             "style_source": "style_images" if style_loaded else "copy_fields",
+            "detail_story_brief": _empty_detail_story_brief(),
             "detail_rule_pack": rule_pack.id if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
             "detail_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
             "detail_rule_pack_version": version.version_no if version is not None else 1,
             "panel_preferences": list(resolved_panel_preferences.values()),
             "strategy_overrides": list(resolved_prompt_overrides.values()),
             "panel_plan": [],
-            "input_hash": _stable_hash(
-                {
-                    "panel_preferences": resolved_panel_preferences,
-                    "planner_instruction": planner_instruction or "",
-                    "confirmed_copy": {
-                        "product_name": normalized_copy.get("product_name", ""),
-                        "category": normalized_copy.get("category", ""),
-                        "hero_scene": normalized_copy.get("hero_scene", ""),
-                        "core_selling_points": normalized_copy.get("core_selling_points", []),
-                        "key_parameters": normalized_copy.get("key_parameters", []),
-                        "product_advantages": normalized_copy.get("product_advantages", []),
-                        "style_preset_id": normalized_copy.get("style_preset_id"),
-                        "style_custom": normalized_copy.get("style_custom", ""),
-                    },
-                }
+            "input_hash": detail_strategy_preview_input_hash(
+                normalized_copy,
+                product_manifest=[],
+                style_manifest=[],
+                planner_instruction=planner_instruction,
+                panel_preferences=resolved_panel_preferences,
+                active_platform_id=active_platform_id,
             ),
         }
 
@@ -110,7 +167,7 @@ def build_detail_strategy_preview(
 
     client = WhataiClient()
     product_grid, style_grid = build_detail_reference_grids(product_loaded, style_loaded)
-    llm_plan = client.plan_detail_page_panels(
+    llm_result = client.plan_detail_page_narrative(
         confirmed_copy=normalized_copy,
         product_manifest=product_manifest,
         style_manifest=style_manifest,
@@ -120,7 +177,7 @@ def build_detail_strategy_preview(
         analysis_snapshot=analysis_snapshot or {},
     )
 
-    merged_plan = _merge_panel_plan(fallback_plan, llm_plan)
+    merged_plan = _merge_panel_plan(fallback_plan, llm_result.get("panel_plan") or [])
     return {
         "use_case": DETAIL_PAGE_USE_CASE,
         "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
@@ -136,43 +193,20 @@ def build_detail_strategy_preview(
         "style_reference_manifest": style_manifest,
         "style_summary": _style_summary(normalized_copy, style_loaded),
         "style_source": "style_images" if style_loaded else "copy_fields",
+        "detail_story_brief": _normalize_detail_story_brief(llm_result.get("detail_story_brief")),
         "detail_rule_pack": rule_pack.id if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
         "detail_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
         "detail_rule_pack_version": version.version_no if version is not None else 1,
         "panel_preferences": list(resolved_panel_preferences.values()),
         "strategy_overrides": list(resolved_prompt_overrides.values()),
         "panel_plan": merged_plan,
-        "input_hash": _stable_hash(
-            {
-                "panel_preferences": resolved_panel_preferences,
-                "planner_instruction": planner_instruction or "",
-                "platform_id": active_platform_id or "amazon",
-                "product_reference_manifest": [
-                    {
-                        "image_id": item["image_id"],
-                        "slot_type": item["slot_type"],
-                        "display_order": item["display_order"],
-                    }
-                    for item in product_manifest
-                ],
-                "style_reference_manifest": [
-                    {
-                        "image_id": item["image_id"],
-                        "display_order": item["display_order"],
-                    }
-                    for item in style_manifest
-                ],
-                "confirmed_copy": {
-                    "product_name": normalized_copy.get("product_name", ""),
-                    "category": normalized_copy.get("category", ""),
-                    "hero_scene": normalized_copy.get("hero_scene", ""),
-                    "core_selling_points": normalized_copy.get("core_selling_points", []),
-                    "key_parameters": normalized_copy.get("key_parameters", []),
-                    "product_advantages": normalized_copy.get("product_advantages", []),
-                    "style_preset_id": normalized_copy.get("style_preset_id"),
-                    "style_custom": normalized_copy.get("style_custom", ""),
-                },
-            }
+        "input_hash": detail_strategy_preview_input_hash(
+            normalized_copy,
+            product_manifest=product_manifest,
+            style_manifest=style_manifest,
+            planner_instruction=planner_instruction,
+            panel_preferences=resolved_panel_preferences,
+            active_platform_id=active_platform_id,
         ),
     }
 
@@ -191,6 +225,7 @@ def normalize_detail_strategy_preview(
     if (
         isinstance(strategy_preview, dict)
         and strategy_preview.get("panel_plan")
+        and isinstance(strategy_preview.get("detail_story_brief"), dict)
         and _manifest_count(strategy_preview.get("product_reference_manifest")) == len(product_images)
         and _manifest_count(strategy_preview.get("style_reference_manifest")) == len(style_images or [])
     ):
@@ -284,7 +319,7 @@ def compose_detail_panel_prompt(
         f"Create one ecommerce detail page panel for {product_name} with clear hierarchy and strong product fidelity.",
     )
     reference_rule = (
-        "Use the uploaded product multi-angle grid as the primary fidelity reference. "
+        "Use the panel-selected product references as the primary fidelity reference. "
         "If style/font reference images exist, follow their color and typography direction."
     )
     panel_type = str(plan.get("panel_type") or "feature_benefit")
@@ -326,6 +361,9 @@ def compose_detail_panel_prompt(
         "panel_id": panel_id,
         "slot_id": str(plan.get("slot_id") or ""),
         "panel_label": str(plan.get("panel_label") or panel_id),
+        "narrative_section": str(plan.get("narrative_section") or ""),
+        "panel_goal": str(plan.get("panel_goal") or ""),
+        "copy_focus": str(plan.get("copy_focus") or ""),
         "display_order": int(plan.get("display_order") or 0),
         "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
         "use_case": DETAIL_PAGE_USE_CASE,
@@ -365,6 +403,9 @@ def find_detail_panel_plan_item(strategy_preview: dict[str, Any], panel_id: str,
         "slot_id": (spec or {}).get("slot_id", panel_id),
         "panel_label": (spec or {}).get("panel_label", panel_id),
         "display_order": 0,
+        "narrative_section": "",
+        "panel_goal": "",
+        "copy_focus": "",
         "panel_type": panel_type,
         "panel_type_label": meta["panel_type_label"],
         "layout_template": meta["layout_template"],
@@ -443,12 +484,16 @@ def _build_default_panel_plan(
             **dict(override.get("copy_blocks_override") or {}),
         }
         extra_instruction = f" Extra planner instruction: {planner_instruction}." if planner_instruction else ""
+        narrative_section = DETAIL_STORY_SECTIONS[min(default_order - 1, len(DETAIL_STORY_SECTIONS) - 1)]
         panel_plan.append(
             {
                 "slot_id": spec["slot_id"],
                 "panel_id": spec["panel_id"],
                 "panel_label": spec["panel_label"],
                 "display_order": display_order,
+                "narrative_section": narrative_section,
+                "panel_goal": copy_lines[0] if copy_lines else product_name,
+                "copy_focus": copy_lines[0] if copy_lines else product_name,
                 "panel_type": panel_type,
                 "panel_type_label": panel_meta["panel_type_label"],
                 "panel_type_reason": panel_type_reason,
@@ -491,7 +536,7 @@ def _merge_panel_plan(
             merged.append(item)
             continue
         merged_item = {**item}
-        for key in ("panel_label", "planner_prompt_base", "layout_notes"):
+        for key in ("panel_label", "planner_prompt_base", "layout_notes", "narrative_section", "panel_goal", "copy_focus", "panel_type", "layout_template"):
             value = str(llm_item.get(key) or "").strip()
             if value:
                 merged_item[key] = value
@@ -501,6 +546,12 @@ def _merge_panel_plan(
                 cleaned = [str(entry).strip() for entry in value if str(entry).strip()]
                 if cleaned:
                     merged_item[key] = cleaned
+        if merged_item.get("panel_type") and merged_item.get("panel_type") != item.get("panel_type"):
+            panel_meta = panel_type_metadata(str(merged_item["panel_type"]))
+            merged_item["panel_type_label"] = panel_meta["panel_type_label"]
+            merged_item["copy_policy"] = panel_meta["copy_policy"]
+            if not str(llm_item.get("layout_template") or "").strip():
+                merged_item["layout_template"] = panel_meta["layout_template"]
         merged_item["planner_source"] = "llm"
         merged.append(merged_item)
     return merged

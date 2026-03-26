@@ -53,6 +53,8 @@
 - 改 `.env.prod` 后禁止只用 `docker compose restart`；必须 `up -d --force-recreate`
 - 有 Alembic migration 的发布必须先做 PostgreSQL 备份，再执行不带 `--skip-migrate` 的发布
 - 无 migration 的纯应用层发布必须优先使用 `./scripts/deploy-prod.sh --skip-migrate`
+- 但只要代码包包含新的 Alembic revision，或线上日志已出现 `UndefinedTable/UndefinedColumn`，就禁止继续使用 `--skip-migrate`
+- 运维/上线指导默认提供完整、可直接复制执行的命令块，不提供省略版片段
 - 发布后最少执行：
   - `curl http://127.0.0.1:8000/healthz`
   - `curl http://127.0.0.1:8000/api/admin/v1/auth/health`
@@ -240,3 +242,25 @@
   - 新增 `docs/生产上线SOP.md`，固化单机 Docker Compose 生产发包、备份、预检、发布、冒烟、回滚和常见坑位
   - `AGENTS.md` 新增生产上线固定约束，后续 session 默认按 `COMPOSE_PROJECT_NAME=smartphoto_backend + 新 release 目录` 路径执行
   - `Readme.md` 与 `scripts/package-prod.sh` 同步挂入上线 SOP 文档入口，确保部署包内也包含该文档
+- 2026-03-26 Ops Lessons:
+  - 生产上线 SOP 与运行排障手册补充“`--skip-migrate` 前必须核对 alembic_version”和“误跳过 migration 后的补救命令”
+  - 新增构建阶段网络慢时的完整替代命令：临时 Dockerfile 同时切换 `npm/apt/pip` 到国内镜像源
+  - 新增 CORS `Disallowed CORS origin`、`guest_identities does not exist`、`POSTGRES_USER unbound variable`、`FileNotFoundError: Dockerfile` 的标准排障命令
+  - Readme 明确 `.env.prod` 中的 `PIP_*` 不会自动影响 `docker build`，默认引导到 `docs/生产上线SOP.md` 的完整命令块
+- 2026-03-26 Upload Reliability:
+  - 前端 `uploadWithPresign` 新增 `10MB` 本地预校验，超过上限直接返回 `40007 file_too_large`，避免用户在边缘层长时间等待后才看到 `524/504`
+  - 本地 `PUT /api/v2/uploads/direct/{upload_id}` 改为流式写盘，不再 `await request.body()` 一次性读完整文件，降低 local storage 部署下的大图上传超时与内存峰值风险
+  - 本地上传完成后的图片探测改为优先按文件路径读取，减少 `complete_upload` 阶段对本地大文件的额外全量读内存
+  - 运行排障手册补充“上传 `524/504` 时如何区分旧前端 multipart、local 伪直传与真实 S3/OSS 直传”的标准排查命令
+- 2026-03-26 M16:
+  - 新增 `LLMRouter` 与 `LLM_PROVIDER/OPENROUTER_API_*/LLM_*` 配置，analysis / 主图 planner / 详情页 planner / 参数提取支持按任务切 OpenRouter 模型；WhatAI 继续负责图片生成链路
+  - Step 2 `analysis_snapshot` 扩展 `analysis_source/category_candidates/scene_tags/detected_view_slots/supplement_image_recommendations/reanalysis_required`，fallback 默认类目改为 `其他`，不再把 `家居用品` 当成默认结论
+  - 商品图 upload/delete 与 `/api/v2/uploads/complete` 改为“只失效不自动分析”：仅置 `analysis_snapshot.reanalysis_required=true` 并清空 `strategy_preview/detail_strategy_preview`，分析改为必须显式调用 `POST /api/v2/sessions/{session_id}/analysis`
+  - 主图策略预览新增共享 reference load 的 `input_hash` 复用；详情页策略预览新增 `detail_story_brief`、`panel_plan.narrative_section/panel_goal/copy_focus/product_reference_ids/style_reference_ids` 与 `input_hash` 缓存复用
+  - 详情页执行链路改为优先消费 panel 级参考图，`assets.generation_snapshot` 记录 `effective_reference_image_ids`，grid 只作为辅助 fallback
+  - 参数提取与分析链路增加受控尺寸图片加载，上传完成对非本地存储优先走 object metadata/head，减少重复读图和远端整文件回读
+  - 同步更新 `.env.example`、`.env.prod.example`、`Readme.md`、`docs/API_联调指南.md`、`docs/API_全量接口手册.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、`docs/OSS_对接与上线指南.md`、`docs/生产上线SOP.md`、OpenAPI 导出与相关集成测试
+- 2026-03-27 Dev DX:
+  - `scripts/dev-api.sh` 改为本地开发稳态入口：启动前自动迁移、热更新仅监控 `app/scripts/alembic`、默认排除 `runtime/storage/.git`
+  - `scripts/dev-api.sh` 新增端口自检与自动顺延逻辑；当 `8000` 被 Docker 或其他本地服务占用时，会自动回退到后续空闲端口并打印实际监听地址
+  - `Readme.md` 与 `docs/运行与排障手册.md` 补充“无 Docker 本地开发”指南，明确 `SQLite + TASKS_EAGER=true` 轻量模式与 `PostgreSQL + Redis + Worker` 真实异步模式

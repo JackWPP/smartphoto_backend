@@ -306,7 +306,7 @@ def run_analysis_job(db: Session, job_id: str) -> None:
         raise AppError("missing_required_images", http_status=400)
 
     load_started_at = time.perf_counter()
-    loaded_images = load_reference_images(images)
+    loaded_images = load_reference_images(images, max_edge=1280)
     load_ms = int((time.perf_counter() - load_started_at) * 1000)
     logger.info(
         "analysis_job loaded reference images: job_id=%s session_id=%s image_count=%s load_ms=%s",
@@ -375,9 +375,11 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
     image_attachments = [attachment for attachment in attachments if attachment.mime_type.startswith("image/")]
-    loaded_images = load_reference_images(image_attachments, storage=storage) if image_attachments else []
+    loaded_images = load_reference_images(image_attachments, storage=storage, max_edge=1280) if image_attachments else []
     file_attachments = []
     for attachment in attachments:
+        if attachment.mime_type.startswith("image/"):
+            continue
         content = storage.read_bytes(attachment.source_url)
         file_attachments.append(
             {
@@ -1233,7 +1235,6 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
         loaded_product_images = load_reference_images(session_images, storage=storage)
         loaded_style_images = load_reference_images(style_images, storage=storage) if style_images else []
         product_grid, style_grid = build_detail_reference_grids(loaded_product_images, loaded_style_images)
-        reference_grids = [product_grid, *([style_grid] if style_grid is not None else [])]
 
         last_version = session.detail_latest_result_version
         version_no = last_version + 1
@@ -1272,7 +1273,10 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             strategy_preview=effective_strategy_preview,
             plan=plan,
             instruction=payload.get("instruction"),
-            reference_grids=reference_grids,
+            loaded_product_images=loaded_product_images,
+            loaded_style_images=loaded_style_images,
+            product_grid=product_grid,
+            style_grid=style_grid,
         )
 
         total_assets = max(len(rendered_panels) + len(carry_forward_sources) + 1, 1)
@@ -1616,7 +1620,10 @@ def _render_detail_panels_concurrently(
     strategy_preview: dict[str, object],
     plan: list[dict[str, object]],
     instruction: str | None,
-    reference_grids: list,
+    loaded_product_images: list,
+    loaded_style_images: list,
+    product_grid,
+    style_grid,
 ) -> list[dict[str, object]]:
     if not plan:
         return []
@@ -1630,7 +1637,10 @@ def _render_detail_panels_concurrently(
             strategy_preview=strategy_preview,
             plan_item=plan_item,
             instruction=instruction,
-            reference_grids=reference_grids,
+            loaded_product_images=loaded_product_images,
+            loaded_style_images=loaded_style_images,
+            product_grid=product_grid,
+            style_grid=style_grid,
         )
         for plan_item in plan
     ]
@@ -1664,7 +1674,10 @@ def _prepare_detail_render_spec(
     strategy_preview: dict[str, object],
     plan_item: dict[str, object],
     instruction: str | None,
-    reference_grids: list,
+    loaded_product_images: list,
+    loaded_style_images: list,
+    product_grid,
+    style_grid,
 ) -> dict[str, Any]:
     panel_id = str(plan_item["panel_id"])
     slot_id = str(plan_item.get("slot_id") or panel_id)
@@ -1678,6 +1691,13 @@ def _prepare_detail_render_spec(
         panel_plan_item=plan_item,
         db=db,
     )
+    reference_images = _resolve_detail_reference_images(
+        plan_item=plan_item,
+        loaded_product_images=loaded_product_images,
+        loaded_style_images=loaded_style_images,
+        product_grid=product_grid,
+        style_grid=style_grid,
+    )
     return {
         "submission_id": f"detail:{slot_id}:{display_order}",
         "role": panel_id,
@@ -1689,7 +1709,7 @@ def _prepare_detail_render_spec(
         "confirmed_copy": confirmed_copy,
         "plan_item": plan_item,
         "prompt_payload": prompt_payload,
-        "reference_images": reference_grids,
+        "reference_images": reference_images,
         "planner_instruction": str(strategy_preview.get("planner_instruction") or "") or None,
     }
 
@@ -1719,7 +1739,8 @@ def _finalize_detail_rendered_panel(
         "style_custom": confirmed_copy.get("style_custom"),
         "product_reference_image_ids": [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)],
         "style_reference_image_ids": [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)],
-        "reference_grid_ids": [grid.image_id for grid in render_spec["reference_images"]],
+        "reference_grid_ids": [image.image_id for image in render_spec["reference_images"] if str(image.image_id).startswith("detail_")],
+        "effective_reference_image_ids": [image.image_id for image in render_spec["reference_images"]],
         "upstream_endpoint": render_spec["submission"].get("upstream_endpoint"),
         "planner_instruction": render_spec["planner_instruction"],
         "planner_source": prompt_payload.get("planner_source"),
@@ -1740,6 +1761,44 @@ def _finalize_detail_rendered_panel(
         "prompt_payload": prompt_payload,
         "generation_snapshot": generation_snapshot,
     }
+
+
+def _resolve_detail_reference_images(
+    *,
+    plan_item: dict[str, Any],
+    loaded_product_images: list,
+    loaded_style_images: list,
+    product_grid,
+    style_grid,
+) -> list:
+    product_by_id = {image.image_id: image for image in loaded_product_images}
+    style_by_id = {image.image_id: image for image in loaded_style_images}
+    selected: list = []
+    seen: set[str] = set()
+
+    for image_id in [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)]:
+        image = product_by_id.get(image_id)
+        if image is None or image.image_id in seen:
+            continue
+        selected.append(image)
+        seen.add(image.image_id)
+        if len(selected) >= 2:
+            return selected
+
+    for image_id in [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)]:
+        image = style_by_id.get(image_id)
+        if image is None or image.image_id in seen:
+            continue
+        selected.append(image)
+        seen.add(image.image_id)
+        if len(selected) >= 2:
+            return selected
+
+    if not selected:
+        selected.append(product_grid)
+    if style_grid is not None and len(selected) < 2:
+        selected.append(style_grid)
+    return selected[:2]
 
 
 def _render_single_detail_panel(

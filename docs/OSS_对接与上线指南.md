@@ -50,7 +50,8 @@ Backend -> Frontend: 业务资源摘要
 说明：
 - 当前 `upload_id` 是带签名和过期时间的一次性票据，不额外落库。
 - `complete` 会校验对象存在、大小和 MIME，再写业务表。
-- Step 1 商品图在 `complete` 后仍会保留当前自动 reanalysis 语义。
+- 首次商品图上传会把 session 推进到 `images_uploaded`。
+- 已进入后续步骤的 session 在商品图 upload/delete 后不会自动重触发 `analysis`；只会把 `analysis_snapshot.reanalysis_required=true` 并清空 `strategy_preview/detail_strategy_preview`，需要前端显式再次调用 `POST /api/v2/sessions/{session_id}/analysis`。
 
 ## 5. 接口清单
 
@@ -88,6 +89,7 @@ Backend -> Frontend: 业务资源摘要
 
 ## 6. 读链路语义
 - DB 中持久化的是稳定 `object_key`，不是可过期 URL。
+- 非本地存储场景下，`complete` 优先通过对象 metadata/head 做校验，不再整文件回读探测尺寸；拿不到尺寸时允许 `width/height=0` 延后补齐。
 - 用户侧接口返回的 `url/image_url/thumbnail_url` 都是临时签名读 URL。
 - ZIP 下载仍由后端完成对象读取和打包，不做预生成 ZIP 回写 OSS。
 

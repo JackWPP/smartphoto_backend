@@ -125,6 +125,11 @@
   - 单图大小：<= 10MB
   - 单 session 最多 6 张
 - 成功后：session 从 `created` 进入 `images_uploaded`
+- 已进入后续步骤的 session 在商品图 upload/delete 后：
+  - 不再自动触发 `analysis` job
+  - 只会把 `analysis_snapshot.reanalysis_required=true`
+  - 同时清空 `strategy_preview/detail_strategy_preview`
+  - 需要前端显式再次调用 `POST /sessions/{session_id}/analysis`
 - 常见错误：`40005` `40006` `40007`
 - 并发/幂等：无 Idempotency-Key
 - 兼容说明：
@@ -142,6 +147,14 @@
   - 若历史脏数据导致 session 仍停留在 `created`，当前实现会在触发分析时自动补正为 `images_uploaded -> analyzing`，避免 worker 侧再报 `cannot transition created -> analyzing`
   - 自动写入 `analysis_snapshot`
   - 当前实现会把 session 上传图片以内联图像内容的方式发给上游分析模型，不再只传文本
+  - 当前文本/规划链路可通过 `LLM_PROVIDER=openrouter` 切到 OpenRouter；图片生成仍走 WhatAI
+  - `analysis_snapshot` 额外包含：
+    - `analysis_source`
+    - `category_candidates[{category,confidence,reason}]`
+    - `scene_tags`
+    - `detected_view_slots`
+    - `supplement_image_recommendations[{slot_type,label,reason,priority}]`
+    - `reanalysis_required`
   - `analysis_snapshot` 额外包含 `reference_summary`：
     - `shape`
     - `colors`
@@ -242,7 +255,10 @@
 - 当前实现行为：
   - 立即同步生成预览并落库
   - 创建 `build_strategy` job 记录，但不进队列
+  - 对同一份输入再次调用时，会按 `input_hash` 直接复用已持久化的 `strategy_preview`
   - Step 5 当前会结合 `confirmed_copy + active_platform_id + session 图片 + analysis.reference_summary` 做一轮槽位级 prompt planner
+  - `strategy_preview.input_hash` 与正式构建共享同一批已加载 reference images，避免重复读图
+  - planner 当前允许由 LLM 主导输出 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包只负责 guardrail 和 fallback
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”：
     - 默认平台仍输出 5 张：`hero` `white_bg` `selling_point` `scene` `detail`
     - 阿里系（`1688` / `taobao` / `alibaba_intl`）输出 5 个阿里槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
@@ -459,10 +475,13 @@
     - `planner_instruction: string | null`
     - `panel_preferences: [{slot_id, panel_type, display_order, locked}]`
   - 同步落库到 `session.detail_strategy_preview`
+  - 对同一份输入再次调用时，会按 `input_hash` 直接复用已持久化的 `detail_strategy_preview`
   - 固定返回：
     - `use_case = amazon_detail`
     - `aspect_ratio = 21:9`
     - `panel_count = 8`
+    - `input_hash`
+    - `detail_story_brief`
     - `detail_rule_pack`
     - `product_reference_manifest`
     - `style_reference_manifest`
@@ -472,6 +491,9 @@
     - `panel_id`
     - `panel_label`
     - `display_order`
+    - `narrative_section`
+    - `panel_goal`
+    - `copy_focus`
     - `panel_type`
     - `panel_type_label`
     - `panel_type_reason`
@@ -509,6 +531,9 @@
     - `slot_id`
     - `panel_label`
     - `display_order`
+    - `narrative_section`
+    - `panel_goal`
+    - `copy_focus`
     - `blocks`
     - `copy_blocks`
     - `raw_prompt_override`
@@ -535,6 +560,12 @@
   - 固定产出：
     - 8 张 `panel`
     - 1 张竖向拼接长图 `stitched`
+  - 结果里的每个 panel 当前会额外回传：
+    - `narrative_section`
+    - `panel_goal`
+    - `copy_focus`
+    - `panel_type`
+  - 详情页执行阶段当前优先消费 panel 级 `product_reference_ids/style_reference_ids`；grid 只作为辅助 fallback，不再作为所有 panel 的唯一参考
   - 独立版本字段：
     - `detail_generation_round`
     - `detail_latest_result_version`
@@ -802,6 +833,8 @@ data: {"event":"job_succeeded","job_id":"..."}
 8. `adminfront/` 已升级为可运营、可排障、可配置的后台控制台；当前仍未做 RBAC、多级审批流、运行时敏感配置在线编辑和任务强制取消。
 9. 当前已实现浏览器直传对象存储、`GET /account/pricing`、生成扣费与失败退款；仍未接真实支付、邮箱验证、找回密码和设备会话管理。
 10. 当前 CORS 为显式 allowlist 模式，不支持 `*`；跨域联调前必须先在后端配置实际前端 Origin。
+11. 当前实现已改为“商品图变更只置 `analysis_snapshot.reanalysis_required=true`，不再自动重触发 `analysis`”；若旧 SPEC 仍描述自动 reanalysis，以当前实现为准。
+12. 当前实现已把 analysis / 主图 planner / 详情页 planner 的文本链路接入 `LLM_PROVIDER=openrouter` + `LLM_*` 模型选择；若旧 SPEC 仍写死 WhatAI planner，以当前实现为准。
 
 ## 5. 联调最短路径
 1. `POST /sessions`

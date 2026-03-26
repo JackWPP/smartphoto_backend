@@ -10,6 +10,7 @@
 |---|---|---|
 | Session Orchestrator | 接收请求、做前置状态校验、创建 job、分发任务 | `app/api/v2/sessions.py`, `app/api/v2/assets.py` |
 | Guest Identity Agent | 维护 guest cookie、24h 有效期与显式认领当前 session | `app/core/deps.py`, `app/services/guest_identities.py` |
+| LLM Router Agent | 按任务类型选择文本模型，统一屏蔽 OpenRouter / WhatAI 文本调用差异 | `app/services/llm_router.py` |
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
 | Parameter Extract Agent | 读取参数附件，产出 `parameter_snapshot` | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
@@ -62,8 +63,18 @@
   - 上游异常转 `50201`
 - 重试策略：上游网络级异常会先做单请求重试；若仍失败，Celery 任务最多再重试 3 次（`max_retries=3`）
 - 当前实现补充：
+  - 文本分析/规划链路可通过 `LLM_PROVIDER=openrouter` 切到 OpenRouter，按 `LLM_ANALYSIS_MODEL/LLM_MAIN_PLANNER_MODEL/LLM_DETAIL_PLANNER_MODEL/LLM_PARAMETER_MODEL/LLM_FALLBACK_MODEL` 分任务选模型
   - 上传商品图会以内联图像内容的方式发给上游，不再依赖 `localhost` URL
+  - 分析输入当前会优先走受控尺寸图片（`max_edge` 缩边），避免大图全量进内存
   - `analysis_snapshot` 包含 `reference_summary`，至少提炼主体形态、颜色、材质、结构与不可漂移点
+  - `analysis_snapshot` 额外包含：
+    - `analysis_source`
+    - `category_candidates[{category,confidence,reason}]`
+    - `scene_tags`
+    - `detected_view_slots`
+    - `supplement_image_recommendations[{slot_type,label,reason,priority}]`
+    - `reanalysis_required`
+  - fallback 不再把 `家居用品` 当成默认结论；推不出时返回 `其他` + 弱候选列表
 
 ### 3.3 Copy Regen Agent
 - 输入：`targets` + `instruction` + 当前 copy
@@ -89,12 +100,15 @@
 - 失败处理：copy 或平台缺失返回 `40002/40003`
 - 重试策略：当前为同步接口流程，不走 Worker
 - 额外约束：
+  - 同一份输入会按 `input_hash` 直接复用已持久化 `strategy_preview`
+  - `input_hash` 与正式构建共享同一批已加载 reference images，避免重复读图
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”
   - 默认平台固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
   - 阿里系平台固定输出 5 个槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
   - 每个 `asset_plan` 项都带 `slot_id/slot_family/expression_mode/copy_blocks/layout_policy/proof_policy/requires_white_bg_validation/platform_rule_pack`
   - 每个 `prompt_plan` 项都带 `reference_image_ids/must_keep/must_avoid/background_rule/composition_rule/lighting_rule/fidelity_rule/final_prompt_base/rule_modules_used/resolved_constraints`
   - 当前支持在 Step 5 通过 `planner_instruction` 对整组策略做一轮额外优化
+  - 当前优先让 planner 决定 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包退化为 guardrail + fallback
 
 ### 3.5 Prompt Composer + Image Generation Agent
 - 输入：copy、strategy、slot/role、可选 instruction、参考图
@@ -169,9 +183,12 @@
   - `use_case` 固定为 `amazon_detail`
   - `aspect_ratio` 固定为 `21:9`
   - `panel_count` 固定为 `8`
-  - `panel_plan` 当前带 `slot_id/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used`
+  - 同一份输入会按 `input_hash` 直接复用已持久化 `detail_strategy_preview`
+  - `detail_strategy_preview` 当前额外带 `detail_story_brief`
+  - `panel_plan` 当前带 `slot_id/narrative_section/panel_goal/copy_focus/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used/product_reference_ids/style_reference_ids`
   - 未上传风格图时，优先使用 `style_preset_id` 解析出的风格摘要，再拼接 `style_custom`；仅兼容回退 `style_choice`
   - 生图默认使用 1 张商品 grid；有风格图时追加 1 张 style/font grid
+  - 详情页执行阶段优先消费 panel 级参考图，grid 只作为 fallback/辅助参考，不再让所有 panel 共用同一组主参考输入
 - Job / 事件语义：
   - `job_type = generate_detail_page`
   - 事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_succeeded|job_failed`

@@ -73,11 +73,13 @@ from app.services.detail_pages import (
     DETAIL_PAGE_PANEL_COUNT,
     DETAIL_PAGE_USE_CASE,
     build_detail_prompt_previews,
+    detail_strategy_preview_input_hash,
     build_detail_strategy_preview,
     normalize_detail_strategy_preview,
 )
 from app.services.dispatcher import dispatch_job
 from app.services.download import build_zip_for_assets
+from app.services.detail_panel_library import resolve_panel_preferences
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
 from app.services.jobs import append_job_event, create_job, update_job_status
@@ -91,6 +93,7 @@ from app.services.platforms import get_platform_or_none
 from app.services.pricing import get_pricing_rule
 from app.services.prompts import build_prompt_previews
 from app.services.prompt_repo import list_prompt_presets
+from app.services.reference_images import build_reference_manifest, load_reference_images
 from app.services.repo import (
     get_prompt_preset_or_404,
     get_prompt_preset_or_none,
@@ -339,11 +342,9 @@ def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
 
 def _invalidate_strategy_inputs(session: SessionModel) -> None:
     if isinstance(session.analysis_snapshot, dict):
-        session.analysis_snapshot = {
-            **session.analysis_snapshot,
-            "reanalysis_required": True,
-        }
-    session.parameter_snapshot = None
+        session.analysis_snapshot = {**session.analysis_snapshot, "reanalysis_required": True}
+    else:
+        session.analysis_snapshot = {"reanalysis_required": True}
     session.strategy_preview = None
     session.detail_strategy_preview = None
 
@@ -466,11 +467,7 @@ async def upload_session_image(
     else:
         _invalidate_strategy_inputs(session)
 
-    reanalysis_job_id = _auto_trigger_reanalysis(db, session, actor.user_id, actor.guest_id)
-
     db.commit()
-    if reanalysis_job_id:
-        dispatch_job(reanalysis_job_id, queue="q.analysis")
     images = list_active_session_images(db, session_id)
     return success_response(
         {
@@ -516,10 +513,7 @@ def delete_session_image(
     image.is_deleted = True
     session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
     _invalidate_strategy_inputs(session)
-    reanalysis_job_id = _auto_trigger_reanalysis(db, session, actor.user_id, actor.guest_id)
     db.commit()
-    if reanalysis_job_id:
-        dispatch_job(reanalysis_job_id, queue="q.analysis")
     return success_response({"image_id": image_id, "deleted": True})
 
 
@@ -1285,6 +1279,10 @@ def build_strategy(
     payload = req.model_dump() if req is not None else {"planner_instruction": None}
     images = list_active_session_images(db, session.id)
     strategy_reference_images = list_active_strategy_reference_images(db, session.id)
+    loaded_reference_images = load_reference_images(images) if images else []
+    loaded_strategy_reference_images = load_reference_images(strategy_reference_images) if strategy_reference_images else []
+    reference_manifest = build_reference_manifest(loaded_reference_images)
+    strategy_reference_manifest = build_reference_manifest(loaded_strategy_reference_images)
     resolved_copy = _resolved_copy_for_session(session, db)
     input_hash = strategy_preview_input_hash(
         resolved_copy,
@@ -1297,6 +1295,10 @@ def build_strategy(
         slot_preferences=payload.get("slot_preferences") or [],
         prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id or ""),
         strategy_reference_images=strategy_reference_images,
+        loaded_reference_images=loaded_reference_images,
+        loaded_strategy_reference_images=loaded_strategy_reference_images,
+        reference_manifest=reference_manifest,
+        strategy_reference_manifest=strategy_reference_manifest,
     )
     existing_preview = session.strategy_preview if isinstance(session.strategy_preview, dict) else None
     if existing_preview and existing_preview.get("input_hash") == input_hash:
@@ -1337,6 +1339,10 @@ def build_strategy(
         slot_preferences=payload.get("slot_preferences") or [],
         prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id or ""),
         strategy_reference_images=strategy_reference_images,
+        loaded_reference_images=loaded_reference_images,
+        loaded_strategy_reference_images=loaded_strategy_reference_images,
+        reference_manifest=reference_manifest,
+        strategy_reference_manifest=strategy_reference_manifest,
     )
     session.strategy_preview = preview
     session.latest_strategy_job_id = job.id
@@ -1382,16 +1388,45 @@ def build_detail_strategy(
         raise AppError("missing_required_images", http_status=400)
     style_images = list_active_detail_style_images(db, session.id)
 
+    resolved_copy = _resolved_copy_for_session(session, db)
+    resolved_panel_preferences = payload.get("panel_preferences") or []
+    prompt_overrides = _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id)
+    input_hash = detail_strategy_preview_input_hash(
+        resolved_copy,
+        product_manifest=[
+            {
+                "image_id": item.id,
+                "slot_type": item.slot_type,
+                "display_order": item.display_order,
+            }
+            for item in product_images
+        ],
+        style_manifest=[
+            {
+                "image_id": item.id,
+                "display_order": item.display_order,
+            }
+            for item in style_images
+        ],
+        planner_instruction=payload.get("planner_instruction"),
+        panel_preferences=resolve_panel_preferences(resolved_panel_preferences, db=db),
+        active_platform_id=session.active_platform_id,
+    )
+    existing_preview = session.detail_strategy_preview if isinstance(session.detail_strategy_preview, dict) else None
+    if existing_preview and existing_preview.get("input_hash") == input_hash:
+        db.commit()
+        return success_response({"session_id": session.id, "detail_strategy_preview": existing_preview})
+
     preview = build_detail_strategy_preview(
-        _resolved_copy_for_session(session, db),
+        resolved_copy,
         db=db,
         product_images=product_images,
         style_images=style_images,
         analysis_snapshot=session.analysis_snapshot or {},
         planner_instruction=payload.get("planner_instruction"),
-        panel_preferences=payload.get("panel_preferences") or [],
+        panel_preferences=resolved_panel_preferences,
         active_platform_id=session.active_platform_id,
-        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id),
+        prompt_overrides=prompt_overrides,
     )
     session.detail_strategy_preview = preview
     db.commit()
@@ -1716,6 +1751,7 @@ def preview_detail_prompts(
             "image_size": DETAIL_PAGE_IMAGE_SIZE,
             "product_reference_manifest": detail_strategy_preview.get("product_reference_manifest", []),
             "style_reference_manifest": detail_strategy_preview.get("style_reference_manifest", []),
+            "detail_story_brief": detail_strategy_preview.get("detail_story_brief", {}),
             "prompts": prompts,
             "latest_assets": latest_assets,
         }
@@ -2019,6 +2055,9 @@ def get_detail_page_results(
                     "panel_id": asset.asset_role,
                     "slot_id": asset.slot_id,
                     "panel_label": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("panel_label"),
+                    "narrative_section": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("narrative_section"),
+                    "panel_goal": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("panel_goal"),
+                    "copy_focus": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("copy_focus"),
                     "panel_type": (asset.generation_snapshot or {}).get("panel_type"),
                     "render_total_ms": (asset.generation_snapshot or {}).get("timing", {}).get("render_total_ms"),
                     "status": asset.status,

@@ -1,8 +1,11 @@
 import base64
+import io
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from app.services.storage import StorageAdapter, get_storage_adapter, public_url_for
 
@@ -77,24 +80,29 @@ def load_reference_images(
     images: list[Any],
     *,
     storage: StorageAdapter | None = None,
+    max_edge: int | None = None,
 ) -> list[LoadedReferenceImage]:
     adapter = storage or get_storage_adapter()
     loaded: list[LoadedReferenceImage] = []
     for image in images:
         object_key = adapter.normalize_object_key(image.source_url)
         content = adapter.read_bytes(object_key)
+        width = int(getattr(image, "width"))
+        height = int(getattr(image, "height"))
+        mime_type = image.mime_type or mimetypes.guess_type(Path(object_key).name)[0] or "image/jpeg"
+        if max_edge and max(width, height) > max_edge:
+            content, width, height, mime_type = _shrink_image_bytes(content, mime_type, max_edge)
         file_name = Path(object_key).name
-        mime_type = image.mime_type or mimetypes.guess_type(file_name)[0] or "image/jpeg"
         loaded.append(
             LoadedReferenceImage(
                 image_id=str(getattr(image, "id")),
                 slot_type=str(getattr(image, "slot_type", "style")),
                 display_order=int(getattr(image, "display_order", 0)),
                 source_url=str(getattr(image, "source_url")),
-                width=int(getattr(image, "width")),
-                height=int(getattr(image, "height")),
+                width=width,
+                height=height,
                 mime_type=mime_type,
-                file_size=int(getattr(image, "file_size")),
+                file_size=len(content),
                 file_name=file_name,
                 path=None,
                 content=content,
@@ -173,3 +181,16 @@ def _manifest_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
 
 def _sort_key(slot_type: str, display_order: int) -> tuple[int, int, str]:
     return (SLOT_PRIORITY.get(slot_type, 99), display_order, slot_type)
+
+
+def _shrink_image_bytes(content: bytes, mime_type: str, max_edge: int) -> tuple[bytes, int, int, str]:
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            converted = image.convert("RGB")
+            converted.thumbnail((max_edge, max_edge))
+            buffer = io.BytesIO()
+            converted.save(buffer, format="JPEG", quality=85)
+            resized = buffer.getvalue()
+            return resized, converted.width, converted.height, "image/jpeg"
+    except Exception:  # pragma: no cover
+        return content, 0, 0, mime_type
