@@ -38,3 +38,12 @@ class RequestActor:
     @property
     def can_continue_editing(self) -> bool:
         return True
+
+
+@dataclass(frozen=True)
+class ServicePrincipal:
+    app_id: str
+
+    @property
+    def owner_label(self) -> str:
+        return self.app_id

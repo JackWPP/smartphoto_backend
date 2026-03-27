@@ -39,6 +39,8 @@ class Settings(BaseSettings):
 
     test_user_id: str = "00000000-0000-0000-0000-000000000001"
     tasks_eager: bool = False
+    image_saas_default_app_id: str = "default"
+    image_saas_app_keys: str = '["default:local-dev-app-key"]'
     allow_dev_auth_bypass: bool = True
     user_jwt_secret: str = "smartphoto-user-dev-secret"
     guest_cookie_name: str = "smartphoto_guest"
@@ -61,19 +63,29 @@ class Settings(BaseSettings):
     whatai_api_base: str = "https://api.whatai.cc"
     whatai_api_key: str = ""
     whatai_chat_model: str = "gpt-4.1-mini"
-    whatai_analysis_model: str = "gpt-4.1-mini"
-    whatai_planner_model: str = "gpt-4.1-mini"
+    whatai_analysis_model: str = "gemini-3-pro-preview-thinking-high"
+    whatai_planner_model: str = "gemini-3-pro-preview-thinking-high"
     whatai_image_model: str = "gpt-image-1"
     whatai_parameter_model: str = "gemini-3.1-flash-lite-preview"
     whatai_request_timeout_seconds: int = Field(default=180, ge=30, le=1800)
     llm_provider: str = "whatai"
     openrouter_api_base: str = "https://openrouter.ai/api/v1"
     openrouter_api_key: str = ""
+    llm_route_analysis: str = "whatai_gemini"
+    llm_route_main_planner: str = "whatai_gemini"
+    llm_route_detail_planner: str = "whatai_gemini"
+    llm_route_parameter_visual: str = "whatai_gemini"
+    llm_route_form_rewrite: str = "openrouter_text"
+    llm_route_text_review: str = "openrouter_text"
+    llm_route_text_presentation: str = "openrouter_text"
     llm_analysis_model: str = "moonshotai/kimi-k2.5"
     llm_main_planner_model: str = "xiaomi/mimo-v2-pro"
     llm_detail_planner_model: str = "minimax/minimax-m2.7"
     llm_parameter_model: str = "moonshotai/kimi-k2.5"
     llm_fallback_model: str = "xiaomi/mimo-v2-pro"
+    openrouter_form_rewrite_model: str = "moonshotai/kimi-k2.5"
+    openrouter_text_review_model: str = "xiaomi/mimo-v2-pro"
+    openrouter_text_presentation_model: str = "minimax/minimax-m2.7"
 
     generation_lock_ttl_seconds: int = Field(default=600, ge=30)
     main_generation_concurrency: int = Field(default=4, ge=1, le=12)
@@ -142,6 +154,32 @@ class Settings(BaseSettings):
             seen.add(item)
         return normalized
 
+    def parsed_image_saas_app_keys(self) -> dict[str, str]:
+        raw_value = (self.image_saas_app_keys or "").strip()
+        if not raw_value:
+            return {}
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            value = None
+        normalized: dict[str, str] = {}
+        if isinstance(value, dict):
+            candidates = [f"{key}:{secret}" for key, secret in value.items()]
+        elif isinstance(value, list):
+            candidates = [str(item).strip() for item in value]
+        else:
+            candidates = [item.strip() for item in raw_value.split(",")]
+        for item in candidates:
+            if not item or ":" not in item:
+                continue
+            app_id, app_key = item.split(":", 1)
+            app_id = app_id.strip()
+            app_key = app_key.strip()
+            if not app_id or not app_key:
+                continue
+            normalized[app_id] = app_key
+        return normalized
+
 
 def _module_exists(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
@@ -200,4 +238,11 @@ def get_settings() -> Settings:
     settings.database_url = resolve_database_url(settings.database_url)
     settings.storage_backend = (settings.storage_backend or "local").strip().lower()
     settings.llm_provider = (settings.llm_provider or "whatai").strip().lower()
+    settings.llm_route_analysis = (settings.llm_route_analysis or "whatai_gemini").strip().lower()
+    settings.llm_route_main_planner = (settings.llm_route_main_planner or "whatai_gemini").strip().lower()
+    settings.llm_route_detail_planner = (settings.llm_route_detail_planner or "whatai_gemini").strip().lower()
+    settings.llm_route_parameter_visual = (settings.llm_route_parameter_visual or "whatai_gemini").strip().lower()
+    settings.llm_route_form_rewrite = (settings.llm_route_form_rewrite or "openrouter_text").strip().lower()
+    settings.llm_route_text_review = (settings.llm_route_text_review or "openrouter_text").strip().lower()
+    settings.llm_route_text_presentation = (settings.llm_route_text_presentation or "openrouter_text").strip().lower()
     return settings

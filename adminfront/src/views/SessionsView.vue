@@ -7,7 +7,7 @@
       </div>
       <div class="toolbar-actions">
         <input v-model="filters.session_id" class="compact-input" placeholder="session_id" />
-        <input v-model="filters.user_id" class="compact-input" placeholder="user_id" />
+        <input v-model="filters.service_id" class="compact-input" placeholder="service_id" />
         <button class="ghost-button" @click="loadSessions">刷新</button>
       </div>
     </div>
@@ -30,7 +30,7 @@
               <tr v-for="item in sessions.items || []" :key="item.session_id" :class="{ active: selectedSessionId === item.session_id }" @click="openSession(item.session_id)">
                 <td>
                   <strong>{{ item.session_id }}</strong>
-                  <small>{{ item.user_id }}</small>
+                  <small>{{ item.service_id }}</small>
                 </td>
                 <td>{{ item.active_platform_id || '-' }}</td>
                 <td><span class="status-chip">{{ item.status }}</span></td>
@@ -225,7 +225,7 @@ import JsonEditor from '../components/JsonEditor.vue'
 import { csvToList, listToMultiline, multilineToList, parseJsonInput, prettyJson } from '../lib/format'
 import { useConfirmAction } from '../lib/useConfirmAction'
 
-const filters = reactive({ session_id: '', user_id: '' })
+const filters = reactive({ session_id: '', service_id: '' })
 const sessions = ref({ items: [] })
 const detail = ref({})
 const selectedSessionId = ref('')

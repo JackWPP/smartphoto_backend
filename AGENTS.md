@@ -12,6 +12,12 @@
 - 状态真相：`jobs` 与 `sessions` 由数据库持久化；禁止仅依赖进程内内存状态。
 - 存储：通过 `StorageAdapter` 访问，本地实现为默认，后续可切 S3 兼容。
 
+## LLM 与 Prompt 固定原则
+- 视觉主链（`analysis` / 主图 planner / 详情页 planner / 视觉参数提取）默认保持 `WhatAI + Gemini`，不得因为引入 OpenRouter 就无说明替换稳定链路。
+- OpenRouter 的默认职责是文本辅助 Agent、多模型横向试配与 reviewer/rewrite，不是视觉主链替代者。
+- 对 LLM 输出优先做 `prompt 围墙 + schema validator + 同模型 repair 1 次 + fallback`，不要优先用 regex、业务硬编码或 normalize 偷改语义。
+- Step 2 品类识别优先消费后台“全局品类库”；客户新增品类时先配品类库，不要回到 analysis fallback 里硬编码。
+
 ## 代码分层约定
 - `app/api`: HTTP 路由层，仅处理请求解析与响应封装。
 - `app/services`: 业务服务层，含状态机、策略构建、幂等、锁、任务分发。
@@ -260,7 +266,21 @@
   - 详情页执行链路改为优先消费 panel 级参考图，`assets.generation_snapshot` 记录 `effective_reference_image_ids`，grid 只作为辅助 fallback
   - 参数提取与分析链路增加受控尺寸图片加载，上传完成对非本地存储优先走 object metadata/head，减少重复读图和远端整文件回读
   - 同步更新 `.env.example`、`.env.prod.example`、`Readme.md`、`docs/API_联调指南.md`、`docs/API_全量接口手册.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、`docs/OSS_对接与上线指南.md`、`docs/生产上线SOP.md`、OpenAPI 导出与相关集成测试
+- 2026-03-27 M17:
+  - 系统定位收口为纯图片 SaaS：图片主链路统一通过 `X-App-Key` 鉴权，新增 `ServicePrincipal(app_id)`，`sessions/jobs/idempotency_records` 持久化 `service_id`
+  - `/api/v2/auth/*`、`/api/v2/account/*`、`/api/v2/guest/*` 下线为 `410 feature_removed`；图片接口继续保留在 `/api/v2`
+  - `sessions/jobs/uploads/assets/prompt-presets` 主链路全部按 `service_id + session_id` 做隔离，移除 user/guest owner 依赖；上传票据、幂等和下载全部改成服务端调用语义
+  - 主图与详情页统一复用同一个 `session_id`；详情页链路不再要求重复上传商品图
+  - 后台裁剪为图片运维台：移除 admin users、business/pricing 视角，Overview 改为 `runtime_cards/ops_cards/config_cards`，列表与序列化统一返回 `service_id`
+  - 新增 `20260327_0012_image_saas_decouple` 迁移，补齐 `service_id/session_id` 字段并移除 owner-xor 约束
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、`docs/生产上线SOP.md`、SPEC、OpenAPI 导出、后台前端测试与图片 SaaS 相关回归测试
 - 2026-03-27 Dev DX:
   - `scripts/dev-api.sh` 改为本地开发稳态入口：启动前自动迁移、热更新仅监控 `app/scripts/alembic`、默认排除 `runtime/storage/.git`
   - `scripts/dev-api.sh` 新增端口自检与自动顺延逻辑；当 `8000` 被 Docker 或其他本地服务占用时，会自动回退到后续空闲端口并打印实际监听地址
   - `Readme.md` 与 `docs/运行与排障手册.md` 补充“无 Docker 本地开发”指南，明确 `SQLite + TASKS_EAGER=true` 轻量模式与 `PostgreSQL + Redis + Worker` 真实异步模式
+- 2026-03-27 M18:
+  - LLM 路由改为按任务显式选择：视觉主链默认 `WhatAI + Gemini`，OpenRouter 只保留给文本辅助任务
+  - `WhataiClient` 的 `analysis / 主图 planner / 详情页 planner / 参数提取` 新增 prompt-first validator+repair 流程：先 schema 校验，再同模型重问 1 次，仍失败才 fallback
+  - `analysis_snapshot / strategy_preview / detail_strategy_preview / parameter_snapshot` 补充 `provider/model/prompt_version/repair_round/source` 调试元数据
+  - 新增全局品类库 `category_catalogs`、后台管理接口 `/api/admin/v1/category-catalog*` 与后台页面，Step 2 analysis prompt 改为显式消费启用品类库
+  - fallback 默认类目继续保持 `其他`，不再把 `家居用品` 当成弱默认兜底；analysis 输出非法 `priority/slot_type/category` 时优先 repair，不再直接打挂 worker

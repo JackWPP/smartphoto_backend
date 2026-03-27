@@ -21,17 +21,17 @@ def _as_utc(dt: datetime) -> datetime:
 def create_job(
     db: Session,
     session_id: str,
-    user_id: str | None,
     job_type: str,
     input_payload: dict | None = None,
     idempotency_key: str | None = None,
+    service_id: str | None = None,
+    user_id: str | None = None,
     guest_id: str | None = None,
 ) -> JobModel:
-    if (user_id is None and guest_id is None) or (user_id is not None and guest_id is not None):
-        raise ValueError("job owner must be exactly one of user_id or guest_id")
     queued_at = now_utc()
     job = JobModel(
         session_id=session_id,
+        service_id=service_id or "default",
         user_id=user_id,
         guest_id=guest_id,
         job_type=job_type,

@@ -178,7 +178,8 @@ chmod +x scripts/docker-*.sh
 - `ADMIN_DATABASE_URL`
 - `STORAGE_BACKEND`
 - `alembic_version`
-- `users/user_refresh_tokens/credit_wallets`
+- `IMAGE_SAAS_APP_KEYS`
+- `sessions/jobs/idempotency_records.service_id`
 - `rule_packs/rule_pack_versions`
 - `.release/current_image` / `.release/previous_image`
 
@@ -227,7 +228,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T postgres 
 判断规则：
 
 - 若代码包里的最新 revision 高于生产库当前 `alembic_version`，不要再用 `--skip-migrate`
-- 例如代码已包含 `20260324_0011_guest_identities.py`，但生产库未到 `20260324_0011`，则必须走迁移发布
+- 例如代码已包含 `20260327_0012_image_saas_decouple.py`，但生产库未到 `20260327_0012`，则必须走迁移发布
 
 ### 9.3 构建网络慢时的完整替代命令
 
@@ -343,7 +344,7 @@ export IMAGE_TAG=<release-tag>
 
 若镜像已更新成功，但业务接口报：
 
-- `relation "guest_identities" does not exist`
+- `column "service_id" does not exist`
 - `column "...\" does not exist`
 - `UndefinedTable`
 - `UndefinedColumn`
@@ -414,10 +415,10 @@ curl -i http://127.0.0.1:8000/api/admin/v1/auth/health
 ### 12.2 CORS 检查
 
 ```bash
-curl -i -X OPTIONS http://127.0.0.1:8000/api/v2/auth/login \
+curl -i -X OPTIONS http://127.0.0.1:8000/api/v2/sessions \
   -H 'Origin: https://smartphoto.vip' \
   -H 'Access-Control-Request-Method: POST' \
-  -H 'Access-Control-Request-Headers: content-type'
+  -H 'Access-Control-Request-Headers: content-type,x-app-key'
 
 curl -i -X OPTIONS http://127.0.0.1:8000/api/admin/v1/auth/login \
   -H 'Origin: https://api.wppjkw.online' \
@@ -458,8 +459,7 @@ curl -s -X POST http://127.0.0.1:8000/api/admin/v1/auth/login \
 
 建议至少抽样验证：
 
-- 一个 `/api/v2/auth/login`
-- 一个 `/api/v2/sessions` 创建
+- 一个 `/api/v2/sessions` 创建（带 `X-App-Key`）
 - 一个上传链路
 - 一个分析任务
 - 一个后台页面加载
@@ -607,12 +607,12 @@ ls -l Dockerfile docker-compose.prod.yml .env.prod
 
 只有确认 `Dockerfile` 在当前目录存在后，再继续构建。
 
-### 14.9 Guest 接口 500 且提示 `relation "guest_identities" does not exist`
+### 14.9 图片主链路 401 或 schema 缺 `service_id`
 
 原因：
 
-- 镜像已升级到 guest 代码线
-- 但生产库没有执行 `20260324_0011_guest_identities` 迁移
+- 镜像已升级到纯图片 SaaS 代码线
+- 但生产库没有执行 `20260327_0012_image_saas_decouple` 迁移
 - 常见触发方式是误用了 `--skip-migrate`
 
 处理：

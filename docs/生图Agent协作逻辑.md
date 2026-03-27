@@ -9,7 +9,7 @@
 | 逻辑 Agent | 职责 | 主要代码映射 |
 |---|---|---|
 | Session Orchestrator | 接收请求、做前置状态校验、创建 job、分发任务 | `app/api/v2/sessions.py`, `app/api/v2/assets.py` |
-| Guest Identity Agent | 维护 guest cookie、24h 有效期与显式认领当前 session | `app/core/deps.py`, `app/services/guest_identities.py` |
+| Service Principal Agent | 校验 `X-App-Key`、解析 `service_id`、隔离接入方数据访问 | `app/core/deps.py`, `app/core/actors.py` |
 | LLM Router Agent | 按任务类型选择文本模型，统一屏蔽 OpenRouter / WhatAI 文本调用差异 | `app/services/llm_router.py` |
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
 | Parameter Extract Agent | 读取参数附件，产出 `parameter_snapshot` | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
@@ -29,7 +29,7 @@
 - 输入：HTTP 请求（含 session_id、asset_id、instruction、Idempotency-Key）
 - 输出：`job_id` 或同步业务数据
 - 状态责任：
-  - 识别 `RequestActor(user|guest)`，资源 owner 改为 `user_id` 或 `guest_id` 二选一
+  - 识别 `ServicePrincipal(app_id)`，资源归属统一为 `service_id`
   - 校验 session 状态与前置条件
   - 创建 `jobs` 记录（`queued`）
   - 分发到 `q.analysis` / `q.copy` / `q.generation.main` / `q.generation.detail`
@@ -38,21 +38,15 @@
 - 详情页补充：
   - `POST /sessions/{id}/detail-pages/generations` 创建 `generate_detail_page`
   - 与主图 generation 共用同一套并发锁与冲突码 `40901/40902`
-- Guest 补充：
-  - guest 允许跑完整 Step1~Step6 的真实链路，并可继续主图/详情页生成、全局修改、整组重生成、单图重生成
-  - guest 不允许下载，也没有 `History` / 账户资产列表
-  - 登录/注册成功后不会自动认领；若前端要把当前创作纳入账号，需显式调用 `POST /guest/sessions/{id}/claim`
-
-### 3.1.1 Guest Identity Agent
-- 输入：浏览器 Cookie、登录/注册事件、显式 claim 当前 session
-- 输出：`RequestActor(kind=guest|user)`、guest cookie、claim 结果
+### 3.1.1 Service Principal Agent
+- 输入：HTTP Header `X-App-Key`
+- 输出：`ServicePrincipal(app_id)`
 - 状态责任：
-  - 创建 `guest_identities`
-  - 通过 `first_seen_at + GUEST_COOKIE_TTL_DAYS` 控制 guest 24h 软失效窗口
-  - 显式 claim 时只把目标 session 及其关联 jobs / idempotency_records 迁移给当前用户
-  - 支持显式 claim 时按 session + guest cookie 做二次校验
+  - 校验接入方静态密钥
+  - 将主链路资源统一绑定到 `service_id`
+  - 拦截跨接入方读取他人 session/job/upload/download
 - 失败处理：
-  - 下载动作需要登录时返回 `40102 login_required`
+  - 缺失或错误的 `X-App-Key` 返回 `40101 unauthorized`
 
 ### 3.2 Analysis Agent
 - 输入：session 可用图片 + active_platform（可空）
@@ -63,9 +57,10 @@
   - 上游异常转 `50201`
 - 重试策略：上游网络级异常会先做单请求重试；若仍失败，Celery 任务最多再重试 3 次（`max_retries=3`）
 - 当前实现补充：
-  - 文本分析/规划链路可通过 `LLM_PROVIDER=openrouter` 切到 OpenRouter，按 `LLM_ANALYSIS_MODEL/LLM_MAIN_PLANNER_MODEL/LLM_DETAIL_PLANNER_MODEL/LLM_PARAMETER_MODEL/LLM_FALLBACK_MODEL` 分任务选模型
+  - LLM Router 已改为按任务显式路由：`analysis / main planner / detail planner / visual parameter extraction` 默认保持 `WhatAI + Gemini`，OpenRouter 只保留给文本辅助任务
   - 上传商品图会以内联图像内容的方式发给上游，不再依赖 `localhost` URL
   - 分析输入当前会优先走受控尺寸图片（`max_edge` 缩边），避免大图全量进内存
+  - analysis / planner / parameter extraction 现在统一走 `validator -> 同模型 repair 1 次 -> fallback`，worker 不再因为轻微格式漂移直接崩溃
   - `analysis_snapshot` 包含 `reference_summary`，至少提炼主体形态、颜色、材质、结构与不可漂移点
   - `analysis_snapshot` 额外包含：
     - `analysis_source`
@@ -74,6 +69,8 @@
     - `detected_view_slots`
     - `supplement_image_recommendations[{slot_type,label,reason,priority}]`
     - `reanalysis_required`
+    - `provider/model/prompt_version/repair_round/source`
+  - Step 2 品类识别会优先消费后台启用的“全局品类库”，而不是开放式自由猜类目
   - fallback 不再把 `家居用品` 当成默认结论；推不出时返回 `其他` + 弱候选列表
 
 ### 3.3 Copy Regen Agent
@@ -132,10 +129,6 @@
   - 详情页默认并发 `detail_generation_concurrency=6`
   - 上游任务提交默认并发 `generation_submit_concurrency=6`
   - 即使内部并发执行，Asset 最终持久化顺序仍按 `display_order`
-- Guest 生成补充：
-  - `generate_gallery` 与 `generate_detail_page` 都允许 guest 持续触发，不区分首轮与后续
-  - guest 生成不调用钱包扣费
-  - 响应保留 `guest_trial/guest_quota_remaining/login_required_after_result` 兼容字段，但固定返回 `false/null/false`
 - Prompt 结构：
   - `blocks.goal`
   - `blocks.subject`
@@ -213,7 +206,6 @@
 - 事件：`job_queued/job_started/job_progress/asset_ready/job_succeeded/job_failed`
 - 并发规则：
   - 同 session 同时最多 1 个生图任务
-  - 同 user 或同 guest 同时最多 1 个生图任务
   - Redis 不可用时降级到 DB 检查
   - 详情页 generation 也参与同一套互斥，不允许和主图 generation 并行
 

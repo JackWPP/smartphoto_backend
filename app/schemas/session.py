@@ -527,12 +527,6 @@ class GenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
     generation_round: int = Field(description="触发后预期进入的轮次。")
-    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
-    balance_after: int = Field(default=0, description="扣费后的余额。")
-    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
-    guest_trial: bool = Field(default=False, description="兼容字段，当前固定返回 false。")
-    guest_quota_remaining: int | None = Field(default=None, description="兼容字段，当前固定返回 null。")
-    login_required_after_result: bool = Field(default=False, description="兼容字段，当前固定返回 false。")
 
 
 class DetailGenerationJobData(BaseModel):
@@ -541,24 +535,12 @@ class DetailGenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
     detail_generation_round: int = Field(description="触发后预期进入的详情页轮次。")
-    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
-    balance_after: int = Field(default=0, description="扣费后的余额。")
-    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
-    guest_trial: bool = Field(default=False, description="兼容字段，当前固定返回 false。")
-    guest_quota_remaining: int | None = Field(default=None, description="兼容字段，当前固定返回 null。")
-    login_required_after_result: bool = Field(default=False, description="兼容字段，当前固定返回 false。")
 
 
 class GenericGenerationJobData(BaseModel):
     job_id: str = Field(description="任务 ID。")
     job_type: str = Field(description="任务类型。")
     status: str = Field(description="任务状态。")
-    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
-    balance_after: int = Field(default=0, description="扣费后的余额。")
-    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
-    guest_trial: bool = Field(default=False, description="兼容字段，当前固定返回 false。")
-    guest_quota_remaining: int | None = Field(default=None, description="兼容字段，当前固定返回 null。")
-    login_required_after_result: bool = Field(default=False, description="兼容字段，当前固定返回 false。")
 
 
 class GalleryRegenerateRequest(BaseModel):
@@ -582,7 +564,6 @@ class AnalysisTriggerData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     job_type: str = Field(description="任务类型。", examples=["analysis"])
     status: str = Field(description="任务状态。", examples=["queued"])
-    auth_mode: str = Field(default="user", description="当前请求身份模式：user 或 guest。")
 
 
 class AnalysisData(BaseModel):
@@ -609,8 +590,3 @@ class SessionSnapshotData(BaseModel):
     latest_result_version: int = Field(description="最近一版结果版本号。")
     detail_generation_round: int = Field(description="当前详情页生成轮次。")
     detail_latest_result_version: int = Field(description="最近一版详情页结果版本号。")
-    auth_mode: str = Field(default="user", description="当前请求身份模式：user 或 guest。")
-    guest_quota_remaining: int | None = Field(default=None, description="兼容字段，当前固定返回 null。")
-    login_required_actions: list[str] = Field(default_factory=list, description="当前仍要求登录的动作列表。")
-    can_download: bool = Field(default=True, description="当前身份是否可直接下载结果。")
-    can_continue_editing: bool = Field(default=True, description="当前身份是否仍可继续当前 session 的创作/编辑流程。")

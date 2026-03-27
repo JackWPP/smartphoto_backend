@@ -20,6 +20,7 @@ ERRORS = {
     "login_required": ErrorDef(40102, "login_required"),
     "forbidden": ErrorDef(40301, "forbidden"),
     "guest_trial_exhausted": ErrorDef(40302, "guest_trial_exhausted"),
+    "feature_removed": ErrorDef(41001, "feature_removed"),
     "session_not_found": ErrorDef(40401, "session_not_found"),
     "job_not_found": ErrorDef(40402, "job_not_found"),
     "asset_not_found": ErrorDef(40403, "asset_not_found"),

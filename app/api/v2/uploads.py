@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, Request
 from PIL import Image
 from sqlalchemy.orm import Session
 
-from app.core.actors import RequestActor
-from app.core.deps import get_request_actor
+from app.core.actors import ServicePrincipal
+from app.core.deps import get_service_principal
 from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
@@ -77,9 +77,9 @@ def _inspect_uploaded_object(storage, object_key: str, content_type: str) -> tup
 def presign_upload(
     req: UploadPresignRequest,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, req.session_id, user_id=actor.user_id, guest_id=actor.guest_id)
+    session = get_session_or_404(db, req.session_id, service_id=principal.app_id)
     if req.size_bytes > MAX_IMAGE_BYTES:
         raise AppError("file_too_large", http_status=400)
     if req.upload_kind == "session_image":
@@ -110,8 +110,7 @@ def presign_upload(
     object_key = build_upload_object_key(session.id, req.upload_kind, req.original_name)
     upload_id = create_upload_token(
         session_id=session.id,
-        user_id=actor.user_id,
-        guest_id=actor.guest_id,
+        service_id=principal.app_id,
         upload_kind=req.upload_kind,
         object_key=object_key,
         original_name=req.original_name,
@@ -123,7 +122,7 @@ def presign_upload(
     target = get_storage_adapter().create_upload_target(
         upload_id=upload_id,
         session_id=session.id,
-        user_id=actor.owner_id,
+        service_id=principal.app_id,
         upload_kind=req.upload_kind,
         object_key=object_key,
         original_name=req.original_name,
@@ -188,16 +187,12 @@ async def direct_upload_local(upload_id: str, request: Request):
 def complete_upload(
     req: UploadCompleteRequest,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     token = decode_upload_token(req.upload_id)
-    if token.actor_kind != actor.kind:
+    if token.service_id != principal.app_id:
         raise AppError("forbidden", http_status=403)
-    if actor.kind == "user" and token.user_id != actor.user_id:
-        raise AppError("forbidden", http_status=403)
-    if actor.kind == "guest" and token.guest_id != actor.guest_id:
-        raise AppError("forbidden", http_status=403)
-    session = get_session_or_404(db, token.session_id, user_id=actor.user_id, guest_id=actor.guest_id)
+    session = get_session_or_404(db, token.session_id, service_id=principal.app_id)
     storage = get_storage_adapter()
     stat = storage.stat_object(token.object_key)
     if stat.size_bytes != token.size_bytes:

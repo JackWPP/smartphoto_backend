@@ -1,57 +1,39 @@
-from __future__ import annotations
+from fastapi import APIRouter
 
-from fastapi import APIRouter, Depends, Request
-from sqlalchemy.orm import Session
-
-from app.api.v2.sessions import _session_snapshot_payload
-from app.core.actors import RequestActor
-from app.core.config import get_settings
-from app.core.deps import get_current_user
 from app.core.errors import AppError
-from app.core.response import success_response
-from app.db.session import get_db
-from app.models.session import SessionModel
-from app.models.user import UserModel
-from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
-from app.schemas.session import SessionSnapshotData
-from app.services.guest_identities import (
-    claim_guest_session,
-    decode_guest_cookie_token,
-    get_active_guest_identity_by_id,
-)
+from app.schemas.common import OPENAPI_ERROR_RESPONSES
 
 router = APIRouter(prefix="/guest", tags=["sessions"])
 
 
-@router.post(
-    "/sessions/{session_id}/claim",
-    response_model=APIResponse[SessionSnapshotData],
-    summary="认领匿名会话",
-    description="登录成功后显式认领当前浏览器 guest 关联的 session，并继续复用原 session_id。",
-    operation_id="claimGuestSession",
-    responses={**OPENAPI_ERROR_RESPONSES},
-)
-def claim_session(
-    session_id: str,
-    request: Request,
-    db: Session = Depends(get_db),
-    current_user: UserModel = Depends(get_current_user),
-) -> dict:
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).one_or_none()
-    if session is None:
-        raise AppError("session_not_found", http_status=404)
+def _feature_removed() -> None:
+    raise AppError("feature_removed", "guest surfaces moved out of smartphoto image saas", 410)
 
-    actor = RequestActor(kind="user", user_id=current_user.id)
-    if session.user_id == current_user.id and session.guest_id is None:
-        return success_response(_session_snapshot_payload(db, session, actor))
 
-    guest_id = decode_guest_cookie_token(request.cookies.get(get_settings().guest_cookie_name))
-    guest = get_active_guest_identity_by_id(db, guest_id)
-    if guest is None:
-        raise AppError("invalid_request", "active guest identity required for claim", 400)
-    if not claim_guest_session(db, session_id=session_id, guest_id=guest.id, user_id=current_user.id):
-        raise AppError("session_not_found", http_status=404)
+def _removed_guest_surface(path: str) -> None:
+    _feature_removed()
 
-    db.commit()
-    claimed_session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
-    return success_response(_session_snapshot_payload(db, claimed_session, actor))
+
+@router.get("/{path:path}", operation_id="removedGuestGet", responses={**OPENAPI_ERROR_RESPONSES})
+def removed_guest_get(path: str) -> None:
+    _removed_guest_surface(path)
+
+
+@router.post("/{path:path}", operation_id="removedGuestPost", responses={**OPENAPI_ERROR_RESPONSES})
+def removed_guest_post(path: str) -> None:
+    _removed_guest_surface(path)
+
+
+@router.put("/{path:path}", operation_id="removedGuestPut", responses={**OPENAPI_ERROR_RESPONSES})
+def removed_guest_put(path: str) -> None:
+    _removed_guest_surface(path)
+
+
+@router.patch("/{path:path}", operation_id="removedGuestPatch", responses={**OPENAPI_ERROR_RESPONSES})
+def removed_guest_patch(path: str) -> None:
+    _removed_guest_surface(path)
+
+
+@router.delete("/{path:path}", operation_id="removedGuestDelete", responses={**OPENAPI_ERROR_RESPONSES})
+def removed_guest_delete(path: str) -> None:
+    _removed_guest_surface(path)

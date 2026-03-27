@@ -5,7 +5,7 @@
 
 const API_BASE = import.meta.env.VITE_API_BASE || '/api/v2'
 const ACCESS_TOKEN_KEY = 'smartphoto_access_token'
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 let accessToken = localStorage.getItem(ACCESS_TOKEN_KEY) || ''
 let refreshPromise = null
@@ -159,7 +159,7 @@ async function uploadWithPresign(sessionId, file, uploadKind, extra = {}) {
     throw {
       status: 400,
       code: 40007,
-      message: `文件过大，当前仅支持 10MB 以内图片/附件。请压缩后重试。`,
+      message: `文件过大，当前仅支持 20MB 以内图片/附件。请压缩后重试。`,
     }
   }
   const normalizedDisplayOrder = Math.max(1, Number(extra.display_order) || 1)

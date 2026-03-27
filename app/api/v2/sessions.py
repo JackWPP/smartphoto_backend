@@ -3,9 +3,9 @@ from fastapi.responses import FileResponse
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
-from app.core.actors import RequestActor
+from app.core.actors import ServicePrincipal
 from app.core.config import get_settings
-from app.core.deps import get_current_user_id, get_request_actor
+from app.core.deps import get_service_principal
 from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
@@ -90,7 +90,6 @@ from app.services.parameter_snapshot import (
     parameter_snapshot_to_copy_fields,
 )
 from app.services.platforms import get_platform_or_none
-from app.services.pricing import get_pricing_rule
 from app.services.prompts import build_prompt_previews
 from app.services.prompt_repo import list_prompt_presets
 from app.services.reference_images import build_reference_manifest, load_reference_images
@@ -111,14 +110,14 @@ from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter, public_url_for
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview, strategy_preview_input_hash
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
-from app.services.user_accounts import charge_wallet_for_action, refresh_session_search_cache
+from app.services.user_accounts import refresh_session_search_cache
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
 ALLOWED_PARAMETER_MIME = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
 ALLOWED_SLOT = {"front", "angle45", "side", "extra"}
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_SESSION_IMAGES = 6
 MAX_DETAIL_STYLE_IMAGES = 4
 
@@ -132,43 +131,21 @@ def _generation_response_data(
     job_id: str,
     job_type: str,
     status: str,
-    charged_credits: int,
-    balance_after: int,
-    pricing_rule_id: str | None,
-    guest_trial: bool = False,
-    guest_quota_remaining: int | None = None,
-    login_required_after_result: bool = False,
     **extra: int | str,
 ) -> dict:
     return {
         "job_id": job_id,
         "job_type": job_type,
         "status": status,
-        "charged_credits": charged_credits,
-        "balance_after": balance_after,
-        "pricing_rule_id": pricing_rule_id,
-        "guest_trial": guest_trial,
-        "guest_quota_remaining": guest_quota_remaining,
-        "login_required_after_result": login_required_after_result,
         **extra,
     }
 
 
-def _can_continue_editing(actor: RequestActor, session: SessionModel) -> bool:
-    return True
+def _session_scope_kwargs(principal: ServicePrincipal) -> dict[str, str]:
+    return {"service_id": principal.app_id}
 
 
-def _login_required_actions(actor: RequestActor, session: SessionModel) -> list[str]:
-    if actor.kind == "user":
-        return []
-    return ["download", "save_history"]
-
-
-def _session_owner_kwargs(actor: RequestActor) -> dict[str, str | None]:
-    return {"user_id": actor.user_id, "guest_id": actor.guest_id}
-
-
-def _session_snapshot_payload(db: Session, session: SessionModel, actor: RequestActor) -> dict:
+def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:
     return {
         "session_id": session.id,
         "status": session.status,
@@ -187,11 +164,6 @@ def _session_snapshot_payload(db: Session, session: SessionModel, actor: Request
         "latest_result_version": session.latest_result_version,
         "detail_generation_round": session.detail_generation_round,
         "detail_latest_result_version": session.detail_latest_result_version,
-        "auth_mode": actor.auth_mode,
-        "guest_quota_remaining": None,
-        "login_required_actions": _login_required_actions(actor, session),
-        "can_download": actor.can_download,
-        "can_continue_editing": _can_continue_editing(actor, session),
     }
 
 
@@ -205,7 +177,7 @@ def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
         _resolved_copy_for_session(session, db),
         session.active_platform_id,
         db=db,
-        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id or ""),
+        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
         parameter_snapshot=session.parameter_snapshot or {},
     )
 
@@ -224,7 +196,7 @@ def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> di
         style_images=list_active_detail_style_images(db, session.id),
         analysis_snapshot=session.analysis_snapshot or {},
         active_platform_id=session.active_platform_id,
-        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.user_id or ""),
+        prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.service_id),
     )
 
 
@@ -331,7 +303,7 @@ def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
     copy_data = normalize_copy_payload(session.confirmed_copy)
     if session.parameter_snapshot:
         copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
-    preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"), session.user_id or "")
+    preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"), session.service_id)
     if preset is not None:
         copy_data["style_preset_id"] = preset.id
         copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
@@ -349,7 +321,7 @@ def _invalidate_strategy_inputs(session: SessionModel) -> None:
     session.detail_strategy_preview = None
 
 
-def _auto_trigger_reanalysis(db: Session, session: SessionModel, user_id: str | None, guest_id: str | None = None) -> str | None:
+def _auto_trigger_reanalysis(db: Session, session: SessionModel, service_id: str) -> str | None:
     if not session.active_platform_id:
         return None
     if session.status not in {"analyzed", "platform_selected", "copy_ready", "strategy_ready", "completed", "failed"}:
@@ -357,11 +329,10 @@ def _auto_trigger_reanalysis(db: Session, session: SessionModel, user_id: str | 
     job = create_job(
         db,
         session_id=session.id,
-        user_id=user_id,
-        guest_id=guest_id,
         job_type="analysis",
         input_payload={"reason": "images_changed"},
         idempotency_key=None,
+        service_id=service_id,
     )
     session.latest_analysis_job_id = job.id
     session.status = "analyzing"
@@ -377,10 +348,9 @@ def _auto_trigger_reanalysis(db: Session, session: SessionModel, user_id: str | 
     operation_id="createSession",
     responses={**OPENAPI_ERROR_RESPONSES},
 )
-def create_session(db: Session = Depends(get_db), actor: RequestActor = Depends(get_request_actor)) -> dict:
+def create_session(db: Session = Depends(get_db), principal: ServicePrincipal = Depends(get_service_principal)) -> dict:
     model = SessionModel(
-        user_id=actor.user_id,
-        guest_id=actor.guest_id,
+        service_id=principal.app_id,
         status="created",
         current_step=1,
         selected_platform_ids=[],
@@ -404,9 +374,9 @@ def create_session(db: Session = Depends(get_db), actor: RequestActor = Depends(
     operation_id="getSessionSnapshot",
     responses={**OPENAPI_ERROR_RESPONSES},
 )
-def get_session_snapshot(session_id: str, db: Session = Depends(get_db), actor: RequestActor = Depends(get_request_actor)) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
-    return success_response(_session_snapshot_payload(db, session, actor))
+def get_session_snapshot(session_id: str, db: Session = Depends(get_db), principal: ServicePrincipal = Depends(get_service_principal)) -> dict:
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    return success_response(_session_snapshot_payload(db, session))
 
 
 @router.post(
@@ -423,9 +393,9 @@ async def upload_session_image(
     slot_type: str = Form(..., description="图片槽位，允许 front/angle45/side/extra。"),
     display_order: int = Form(..., description="显示顺序。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if slot_type not in ALLOWED_SLOT:
         raise AppError("invalid_request", "invalid slot_type", 400)
 
@@ -499,9 +469,9 @@ def delete_session_image(
     session_id: str,
     image_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     image = (
         db.query(SessionImageModel)
         .filter(SessionImageModel.id == image_id, SessionImageModel.session_id == session_id)
@@ -511,7 +481,7 @@ def delete_session_image(
         raise AppError("invalid_request", "image not found", 404)
 
     image.is_deleted = True
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     _invalidate_strategy_inputs(session)
     db.commit()
     return success_response({"image_id": image_id, "deleted": True})
@@ -528,10 +498,10 @@ def delete_session_image(
 def list_session_images(
     session_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     """获取 Session 的所有图片列表"""
-    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     images = list_active_session_images(db, session_id)
     return success_response({
         "images": [
@@ -563,9 +533,9 @@ async def upload_detail_style_image(
     file: UploadFile = File(..., description="要上传的风格参考图文件。"),
     display_order: int = Form(..., description="显示顺序。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     current_images = list_active_detail_style_images(db, session_id)
     if len(current_images) >= MAX_DETAIL_STYLE_IMAGES:
         raise AppError("too_many_images", http_status=400)
@@ -623,9 +593,9 @@ async def upload_detail_style_image(
 def list_detail_style_images(
     session_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     images = list_active_detail_style_images(db, session_id)
     return success_response(
         {
@@ -657,9 +627,9 @@ async def upload_parameter_attachment(
     file: UploadFile = File(..., description="参数图、说明书图片或 PDF。"),
     display_order: int = Form(..., description="显示顺序。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     attachments = list_active_parameter_attachments(db, session_id)
     if len(attachments) >= MAX_DETAIL_STYLE_IMAGES:
         raise AppError("too_many_images", http_status=400)
@@ -721,9 +691,9 @@ async def upload_parameter_attachment(
 def list_parameter_attachments(
     session_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     attachments = list_active_parameter_attachments(db, session_id)
     return success_response(
         {
@@ -755,9 +725,9 @@ def delete_parameter_attachment(
     session_id: str,
     attachment_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     attachment = (
         db.query(ParameterAttachmentModel)
         .filter(ParameterAttachmentModel.id == attachment_id, ParameterAttachmentModel.session_id == session_id)
@@ -782,9 +752,9 @@ async def upload_strategy_reference_image(
     file: UploadFile = File(..., description="策略参考图。"),
     display_order: int = Form(..., description="显示顺序。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     images = list_active_strategy_reference_images(db, session_id)
     if len(images) >= MAX_DETAIL_STYLE_IMAGES:
         raise AppError("too_many_images", http_status=400)
@@ -843,9 +813,9 @@ async def upload_strategy_reference_image(
 def list_strategy_reference_images(
     session_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     images = list_active_strategy_reference_images(db, session_id)
     return success_response(
         {
@@ -876,9 +846,9 @@ def delete_strategy_reference_image(
     session_id: str,
     image_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     image = (
         db.query(StrategyReferenceImageModel)
         .filter(StrategyReferenceImageModel.id == image_id, StrategyReferenceImageModel.session_id == session_id)
@@ -903,9 +873,9 @@ def delete_detail_style_image(
     session_id: str,
     image_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     image = (
         db.query(DetailStyleImageModel)
         .filter(DetailStyleImageModel.id == image_id, DetailStyleImageModel.session_id == session_id)
@@ -930,9 +900,9 @@ def trigger_analysis(
     session_id: str,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     images = list_active_session_images(db, session.id)
     if not images:
         raise AppError("missing_required_images", http_status=400)
@@ -949,11 +919,11 @@ def trigger_analysis(
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            actor.user_id,
+            session.id,
             f"POST /sessions/{session_id}/analysis",
             idempotency_key,
             payload,
-            guest_id=actor.guest_id,
+            service_id=principal.app_id,
         )
         if hit:
             return success_response(cached)
@@ -961,11 +931,10 @@ def trigger_analysis(
     job = create_job(
         db,
         session_id=session.id,
-        user_id=actor.user_id,
-        guest_id=actor.guest_id,
         job_type="analysis",
         input_payload=payload,
         idempotency_key=idempotency_key,
+        service_id=principal.app_id,
     )
     session.latest_analysis_job_id = job.id
     response_data = {
@@ -973,7 +942,6 @@ def trigger_analysis(
         "session_id": session.id,
         "job_type": job.job_type,
         "status": job.status,
-        "auth_mode": actor.auth_mode,
     }
     if idem_record is not None:
         idem_record.response_payload = response_data
@@ -991,8 +959,8 @@ def trigger_analysis(
     operation_id="getAnalysis",
     responses={**OPENAPI_ERROR_RESPONSES},
 )
-def get_analysis(session_id: str, db: Session = Depends(get_db), actor: RequestActor = Depends(get_request_actor)) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+def get_analysis(session_id: str, db: Session = Depends(get_db), principal: ServicePrincipal = Depends(get_service_principal)) -> dict:
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     return success_response({"status": session.status, "analysis_snapshot": session.analysis_snapshot or {}})
 
 
@@ -1006,19 +974,18 @@ def get_analysis(session_id: str, db: Session = Depends(get_db), actor: RequestA
 def extract_parameters(
     session_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if not list_active_parameter_attachments(db, session.id):
         raise AppError("invalid_request", "parameter attachments missing", 400)
 
     job = create_job(
         db,
         session_id=session.id,
-        user_id=actor.user_id,
-        guest_id=actor.guest_id,
         job_type="extract_parameters",
         input_payload={},
+        service_id=principal.app_id,
     )
     session.latest_parameter_job_id = job.id
     db.commit()
@@ -1050,9 +1017,9 @@ def extract_parameters(
 def get_parameters(
     session_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     return success_response(
         {
             "session_id": session.id,
@@ -1074,9 +1041,9 @@ def put_parameters(
     session_id: str,
     payload: dict,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     session.parameter_snapshot = payload or {}
     session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
     refresh_session_search_cache(session)
@@ -1105,9 +1072,9 @@ def put_platform_selection(
     session_id: str,
     req: PlatformSelectionRequest,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
 
     if req.active_platform_id not in req.selected_platform_ids:
         raise AppError("invalid_platform", "active_platform_id must exist in selected list", 400)
@@ -1140,8 +1107,8 @@ def put_platform_selection(
     operation_id="getCopyForm",
     responses={**OPENAPI_ERROR_RESPONSES},
 )
-def get_copy_form(session_id: str, db: Session = Depends(get_db), actor: RequestActor = Depends(get_request_actor)) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+def get_copy_form(session_id: str, db: Session = Depends(get_db), principal: ServicePrincipal = Depends(get_service_principal)) -> dict:
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     return success_response(_copy_response_payload(session, db))
 
 
@@ -1157,11 +1124,11 @@ def put_copy_form(
     session_id: str,
     req: CopyFormSchema,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     payload = normalize_copy_payload(req.model_dump())
-    preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"), actor.prompt_owner_id)
+    preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"), principal.app_id)
     if payload.get("style_preset_id") and preset is None:
         raise AppError("invalid_request", "style preset not found", 404)
     payload["resolved_style_preset"] = serialize_prompt_preset(preset) if preset is not None else None
@@ -1191,20 +1158,20 @@ def regenerate_copy(
     req: CopyRegenerateRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     payload = req.model_dump()
 
     idem_record = None
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            actor.user_id,
+            session.id,
             f"POST /sessions/{session_id}/copy/regenerate",
             idempotency_key,
             payload,
-            guest_id=actor.guest_id,
+            service_id=principal.app_id,
         )
         if hit:
             return success_response(cached)
@@ -1212,11 +1179,10 @@ def regenerate_copy(
     job = create_job(
         db,
         session_id=session.id,
-        user_id=actor.user_id,
-        guest_id=actor.guest_id,
         job_type="regenerate_copy",
         input_payload=payload,
         idempotency_key=idempotency_key,
+        service_id=principal.app_id,
     )
     session.latest_copy_job_id = job.id
 
@@ -1241,10 +1207,10 @@ def get_copy_regenerate_result(
     session_id: str,
     job_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
-    job = get_job_for_actor_or_404(db, job_id, user_id=actor.user_id, guest_id=actor.guest_id)
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    job = get_job_for_actor_or_404(db, job_id, service_id=principal.app_id)
     if job.session_id != session.id or job.job_type != "regenerate_copy":
         raise AppError("job_not_found", http_status=404)
 
@@ -1269,9 +1235,9 @@ def build_strategy(
     session_id: str,
     req: StrategyPreviewRequest | None = None,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if not session.confirmed_copy:
         raise AppError("invalid_session_status", "copy not ready", 400)
     if not session.active_platform_id:
@@ -1293,7 +1259,7 @@ def build_strategy(
         parameter_snapshot=session.parameter_snapshot or {},
         planner_instruction=payload.get("planner_instruction"),
         slot_preferences=payload.get("slot_preferences") or [],
-        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id or ""),
+        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
         strategy_reference_images=strategy_reference_images,
         loaded_reference_images=loaded_reference_images,
         loaded_strategy_reference_images=loaded_strategy_reference_images,
@@ -1316,14 +1282,13 @@ def build_strategy(
     job = create_job(
         db,
         session_id=session.id,
-        user_id=actor.user_id,
-        guest_id=actor.guest_id,
         job_type="build_strategy",
         input_payload={
             "active_platform_id": session.active_platform_id,
             "confirmed_copy": session.confirmed_copy,
             **payload,
         },
+        service_id=principal.app_id,
     )
     update_job_status(db, job, status="running", progress=20, stage="composing")
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
@@ -1337,7 +1302,7 @@ def build_strategy(
         parameter_snapshot=session.parameter_snapshot or {},
         planner_instruction=payload.get("planner_instruction"),
         slot_preferences=payload.get("slot_preferences") or [],
-        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id or ""),
+        prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
         strategy_reference_images=strategy_reference_images,
         loaded_reference_images=loaded_reference_images,
         loaded_strategy_reference_images=loaded_strategy_reference_images,
@@ -1374,9 +1339,9 @@ def build_detail_strategy(
     session_id: str,
     req: DetailStrategyPreviewRequest | None = None,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if not session.confirmed_copy:
         raise AppError("invalid_session_status", "copy not ready", 400)
     if not session.active_platform_id:
@@ -1390,7 +1355,7 @@ def build_detail_strategy(
 
     resolved_copy = _resolved_copy_for_session(session, db)
     resolved_panel_preferences = payload.get("panel_preferences") or []
-    prompt_overrides = _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id)
+    prompt_overrides = _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=principal.app_id)
     input_hash = detail_strategy_preview_input_hash(
         resolved_copy,
         product_manifest=[
@@ -1443,10 +1408,10 @@ def build_detail_strategy(
 def get_strategy_overrides(
     session_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
-    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id, user_id=session.user_id or "")})
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id, user_id=session.service_id)})
 
 
 @router.put(
@@ -1460,9 +1425,9 @@ def put_strategy_overrides(
     session_id: str,
     req: StrategyOverridesRequest,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     strategy_preview = _effective_strategy_preview(session, db) if session.confirmed_copy and session.active_platform_id else {}
     valid_slot_ids = {
         str(item.get("slot_id") or item.get("role") or "").strip()
@@ -1486,7 +1451,7 @@ def put_strategy_overrides(
             )
             db.add(record)
         if override.applied_preset_id:
-            get_prompt_preset_or_404(db, override.applied_preset_id, session.user_id or "")
+            get_prompt_preset_or_404(db, override.applied_preset_id, session.service_id)
         record.copy_blocks_override = override.copy_blocks_override or {}
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
@@ -1508,13 +1473,13 @@ def put_strategy_overrides(
             parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=(session.strategy_preview or {}).get("planner_instruction"),
             slot_preferences=(session.strategy_preview or {}).get("slot_preferences") or [],
-            prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id or ""),
+            prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
         )
         session.strategy_preview = preview
 
     db.commit()
-    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id, user_id=session.user_id or "")})
+    return success_response({"session_id": session.id, "overrides": _serialized_session_overrides(db, session.id, user_id=session.service_id)})
 
 
 @router.get(
@@ -1527,13 +1492,13 @@ def put_strategy_overrides(
 def get_detail_strategy_overrides(
     session_id: str,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     return success_response(
         {
             "session_id": session.id,
-            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id),
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=principal.app_id),
         }
     )
 
@@ -1549,9 +1514,9 @@ def put_detail_strategy_overrides(
     session_id: str,
     req: StrategyOverridesRequest,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     detail_preview = _effective_detail_strategy_preview(session, db) if session.confirmed_copy else {}
     valid_slot_ids = {
         str(item.get("slot_id") or item.get("panel_id") or "").strip()
@@ -1575,7 +1540,7 @@ def put_detail_strategy_overrides(
             )
             db.add(record)
         if override.applied_preset_id:
-            get_prompt_preset_or_404(db, override.applied_preset_id, actor.prompt_owner_id)
+            get_prompt_preset_or_404(db, override.applied_preset_id, principal.app_id)
         record.copy_blocks_override = override.copy_blocks_override or {}
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
@@ -1597,7 +1562,7 @@ def put_detail_strategy_overrides(
             planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
             panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
             active_platform_id=session.active_platform_id,
-            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id),
+            prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=principal.app_id),
         )
         session.detail_strategy_preview = preview
 
@@ -1605,7 +1570,7 @@ def put_detail_strategy_overrides(
     return success_response(
         {
             "session_id": session.id,
-            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=actor.prompt_owner_id),
+            "overrides": _serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=principal.app_id),
         }
     )
 
@@ -1622,9 +1587,9 @@ def preview_prompts(
     session_id: str,
     req: PromptPreviewRequest,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     resolved_copy = _resolved_copy_for_session(session, db)
     strategy_preview = _effective_strategy_preview(session, db)
     if not strategy_preview.get("reference_manifest"):
@@ -1637,7 +1602,7 @@ def preview_prompts(
             parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=strategy_preview.get("planner_instruction"),
             slot_preferences=strategy_preview.get("slot_preferences") or [],
-            prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.user_id or ""),
+            prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
         )
     prompts = build_prompt_previews(
@@ -1702,9 +1667,9 @@ def preview_detail_prompts(
     session_id: str,
     req: PromptPreviewRequest,
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     resolved_copy = _resolved_copy_for_session(session, db)
     detail_strategy_preview = _effective_detail_strategy_preview(session, db)
     prompts = build_detail_prompt_previews(
@@ -1771,9 +1736,9 @@ def generate_gallery(
     req: GenerateGalleryRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if session.status not in {"strategy_ready", "completed"}:
         raise AppError("invalid_session_status", "strategy not ready", 400)
     if req.slot_ids:
@@ -1787,73 +1752,43 @@ def generate_gallery(
         if invalid_slot_ids:
             raise AppError("invalid_request", f"invalid slot_ids: {invalid_slot_ids}", 400)
 
-    ensure_no_running_generation_jobs(db, session.id, user_id=actor.user_id, guest_id=actor.guest_id)
-    pricing_rule = get_pricing_rule("generate_gallery")
+    ensure_no_running_generation_jobs(db, session.id)
     payload = req.model_dump()
-    payload["pricing"] = {
-        "action": pricing_rule.action,
-        "pricing_rule_id": pricing_rule.rule_id,
-        "charged_credits": pricing_rule.credits,
-        "wallet_transaction_id": None,
-    }
 
     idem_record = None
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            actor.user_id,
+            session.id,
             f"POST /sessions/{session_id}/generations",
             idempotency_key,
             payload,
-            guest_id=actor.guest_id,
+            service_id=principal.app_id,
         )
         if hit:
             return success_response(cached)
 
-    is_guest = actor.kind == "guest"
-    if is_guest:
-        payload["pricing"]["charged_credits"] = 0
-        payload["pricing"]["pricing_rule_id"] = None
-        payload["pricing"]["wallet_transaction_id"] = None
-        wallet = None
-        transaction = None
-    else:
-        wallet, transaction, pricing_rule = charge_wallet_for_action(
-            db,
-            user_id=str(actor.user_id),
-            action="generate_gallery",
-            session_id=session.id,
-            payload={"slot_ids": req.slot_ids},
-        )
-        payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-    lock_keys = acquire_generation_locks(session.id, user_id=actor.user_id, guest_id=actor.guest_id)
+    lock_keys = acquire_generation_locks(session.id)
     payload["lock_keys"] = lock_keys
     try:
         job = create_job(
             db,
             session_id=session.id,
-            user_id=actor.user_id,
-            guest_id=actor.guest_id,
             job_type="generate_gallery",
             input_payload=payload,
             idempotency_key=idempotency_key,
+            service_id=principal.app_id,
         )
     except Exception:
         release_locks(lock_keys)
         raise
     session.latest_generate_job_id = job.id
-    if transaction is not None:
-        payload["pricing"]["job_id"] = job.id
-        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
     response_data = _generation_response_data(
         job_id=job.id,
         job_type=job.job_type,
         status=job.status,
         session_id=session.id,
         generation_round=session.generation_round + 1,
-        charged_credits=0 if is_guest else pricing_rule.credits,
-        balance_after=0 if is_guest else int(wallet.balance),
-        pricing_rule_id=None if is_guest else pricing_rule.rule_id,
     )
     if idem_record is not None:
         idem_record.response_payload = response_data
@@ -1876,76 +1811,52 @@ def generate_detail_page(
     req: GenerateGalleryRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if not session.confirmed_copy:
         raise AppError("invalid_session_status", "copy not ready", 400)
     if not session.active_platform_id:
         raise AppError("invalid_platform", "active platform required", 400)
     if not list_active_session_images(db, session.id):
         raise AppError("missing_required_images", http_status=400)
-    pricing_rule = get_pricing_rule("generate_detail_page")
     payload = req.model_dump()
 
     idem_record = None
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            actor.user_id,
+            session.id,
             f"POST /sessions/{session_id}/detail-pages/generations",
             idempotency_key,
             payload,
-            guest_id=actor.guest_id,
+            service_id=principal.app_id,
         )
         if hit:
             return success_response(cached)
 
-    ensure_no_running_generation_jobs(db, session.id, user_id=actor.user_id, guest_id=actor.guest_id)
-    is_guest = actor.kind == "guest"
-    if is_guest:
-        wallet = None
-        transaction = None
-    else:
-        wallet, transaction, pricing_rule = charge_wallet_for_action(
-            db,
-            user_id=str(actor.user_id),
-            action="generate_detail_page",
-            session_id=session.id,
-        )
-    lock_keys = acquire_generation_locks(session.id, user_id=actor.user_id, guest_id=actor.guest_id)
+    ensure_no_running_generation_jobs(db, session.id)
+    lock_keys = acquire_generation_locks(session.id)
     payload["lock_keys"] = lock_keys
-    payload["pricing"] = {
-        "action": pricing_rule.action,
-        "pricing_rule_id": None if is_guest else pricing_rule.rule_id,
-        "charged_credits": 0 if is_guest else pricing_rule.credits,
-        "wallet_transaction_id": transaction.id if transaction else None,
-    }
     try:
         job = create_job(
             db,
             session_id=session.id,
-            user_id=actor.user_id,
-            guest_id=actor.guest_id,
             job_type="generate_detail_page",
             input_payload=payload,
             idempotency_key=idempotency_key,
+            service_id=principal.app_id,
         )
     except Exception:
         release_locks(lock_keys)
         raise
     session.latest_detail_generate_job_id = job.id
-    if transaction is not None:
-        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
     response_data = _generation_response_data(
         job_id=job.id,
         job_type=job.job_type,
         status=job.status,
         session_id=session.id,
         detail_generation_round=session.detail_generation_round + 1,
-        charged_credits=0 if is_guest else pricing_rule.credits,
-        balance_after=0 if is_guest else int(wallet.balance),
-        pricing_rule_id=None if is_guest else pricing_rule.rule_id,
     )
     if idem_record is not None:
         idem_record.response_payload = response_data
@@ -1967,9 +1878,9 @@ def get_results(
     session_id: str,
     version: int | None = Query(default=None, description="可选结果版本号。为空时返回最近一版。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     target_version = version or session.latest_result_version
     available_versions = _available_versions(db, session.id, asset_family="main_gallery")
     version_summaries = _version_summaries(db, session.id, asset_family="main_gallery")
@@ -2018,9 +1929,9 @@ def get_detail_page_results(
     session_id: str,
     version: int | None = Query(default=None, description="可选详情页结果版本号。为空时返回最近一版。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     target_version = version or session.detail_latest_result_version
     available_versions = _available_versions(db, session.id, asset_family="detail_page")
     version_summaries = _version_summaries(db, session.id, asset_family="detail_page")
@@ -2101,77 +2012,48 @@ def global_edit(
     req: GlobalEditRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if session.latest_result_version <= 0:
         raise AppError("invalid_session_status", "results not ready", 400)
-    ensure_no_running_generation_jobs(db, session.id, user_id=actor.user_id, guest_id=actor.guest_id)
+    ensure_no_running_generation_jobs(db, session.id)
 
     if req.scope == "selected" and not req.asset_ids:
         raise AppError("invalid_request", "asset_ids required when scope is selected", 400)
-    pricing_rule = get_pricing_rule("global_edit")
     payload = req.model_dump()
-    payload["pricing"] = {
-        "action": pricing_rule.action,
-        "pricing_rule_id": pricing_rule.rule_id,
-        "charged_credits": pricing_rule.credits,
-        "wallet_transaction_id": None,
-    }
 
     idem_record = None
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            actor.user_id,
+            session.id,
             f"POST /sessions/{session_id}/results/global-edit",
             idempotency_key,
             payload,
-            guest_id=actor.guest_id,
+            service_id=principal.app_id,
         )
         if hit:
             return success_response(cached)
 
-    is_guest = actor.kind == "guest"
-    if is_guest:
-        payload["pricing"]["charged_credits"] = 0
-        payload["pricing"]["pricing_rule_id"] = None
-        payload["pricing"]["wallet_transaction_id"] = None
-        wallet = None
-        transaction = None
-    else:
-        wallet, transaction, pricing_rule = charge_wallet_for_action(
-            db,
-            user_id=str(actor.user_id),
-            action="global_edit",
-            session_id=session.id,
-            payload={"scope": req.scope, "asset_ids": req.asset_ids},
-        )
-        payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-    lock_keys = acquire_generation_locks(session.id, user_id=actor.user_id, guest_id=actor.guest_id)
+    lock_keys = acquire_generation_locks(session.id)
     payload["lock_keys"] = lock_keys
     try:
         job = create_job(
             db,
             session_id=session.id,
-            user_id=actor.user_id,
-            guest_id=actor.guest_id,
             job_type="global_edit",
             input_payload=payload,
             idempotency_key=idempotency_key,
+            service_id=principal.app_id,
         )
     except Exception:
         release_locks(lock_keys)
         raise
-    if transaction is not None:
-        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
     response_data = _generation_response_data(
         job_id=job.id,
         job_type=job.job_type,
         status=job.status,
-        charged_credits=0 if is_guest else pricing_rule.credits,
-        balance_after=0 if is_guest else int(wallet.balance),
-        pricing_rule_id=None if is_guest else pricing_rule.rule_id,
     )
     if idem_record is not None:
         idem_record.response_payload = response_data
@@ -2194,73 +2076,45 @@ def regenerate_gallery(
     req: GalleryRegenerateRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
     db: Session = Depends(get_db),
-    actor: RequestActor = Depends(get_request_actor),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
-    session = get_session_or_404(db, session_id, **_session_owner_kwargs(actor))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if session.latest_result_version <= 0:
         raise AppError("invalid_session_status", "results not ready", 400)
-    ensure_no_running_generation_jobs(db, session.id, user_id=actor.user_id, guest_id=actor.guest_id)
-    pricing_rule = get_pricing_rule("regenerate_gallery")
+    ensure_no_running_generation_jobs(db, session.id)
     payload = req.model_dump()
-    payload["pricing"] = {
-        "action": pricing_rule.action,
-        "pricing_rule_id": pricing_rule.rule_id,
-        "charged_credits": pricing_rule.credits,
-        "wallet_transaction_id": None,
-    }
 
     idem_record = None
     if idempotency_key:
         hit, cached, idem_record = check_or_create_idempotency(
             db,
-            actor.user_id,
+            session.id,
             f"POST /sessions/{session_id}/results/regenerate",
             idempotency_key,
             payload,
-            guest_id=actor.guest_id,
+            service_id=principal.app_id,
         )
         if hit:
             return success_response(cached)
 
-    is_guest = actor.kind == "guest"
-    if is_guest:
-        payload["pricing"]["charged_credits"] = 0
-        payload["pricing"]["pricing_rule_id"] = None
-        payload["pricing"]["wallet_transaction_id"] = None
-        wallet = None
-        transaction = None
-    else:
-        wallet, transaction, pricing_rule = charge_wallet_for_action(
-            db,
-            user_id=str(actor.user_id),
-            action="regenerate_gallery",
-            session_id=session.id,
-        )
-        payload["pricing"]["wallet_transaction_id"] = transaction.id if transaction else None
-    lock_keys = acquire_generation_locks(session.id, user_id=actor.user_id, guest_id=actor.guest_id)
+    lock_keys = acquire_generation_locks(session.id)
     payload["lock_keys"] = lock_keys
     try:
         job = create_job(
             db,
             session_id=session.id,
-            user_id=actor.user_id,
-            guest_id=actor.guest_id,
             job_type="regenerate_gallery",
             input_payload=payload,
             idempotency_key=idempotency_key,
+            service_id=principal.app_id,
         )
     except Exception:
         release_locks(lock_keys)
         raise
-    if transaction is not None:
-        transaction.payload = {**(transaction.payload or {}), "job_id": job.id}
     response_data = _generation_response_data(
         job_id=job.id,
         job_type=job.job_type,
         status=job.status,
-        charged_credits=0 if is_guest else pricing_rule.credits,
-        balance_after=0 if is_guest else int(wallet.balance),
-        pricing_rule_id=None if is_guest else pricing_rule.rule_id,
     )
     if idem_record is not None:
         idem_record.response_payload = response_data
@@ -2284,9 +2138,9 @@ def download_results(
     session_id: str,
     version: int | None = Query(default=None, description="可选结果版本号。为空时下载最近一版。"),
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ):
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     target_version = version or session.latest_result_version
     assets = _main_gallery_assets_query(db, session.id, target_version).all()
     zip_path = build_zip_for_assets(session.id, target_version, [{"image_url": a.image_url} for a in assets])
@@ -2311,9 +2165,9 @@ def download_detail_page_results(
     session_id: str,
     version: int | None = Query(default=None, description="可选详情页结果版本号。为空时下载最近一版。"),
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    principal: ServicePrincipal = Depends(get_service_principal),
 ):
-    session = get_session_or_404(db, session_id, str(user_id))
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     target_version = version or session.detail_latest_result_version
     assets = _detail_page_assets_query(db, session.id, target_version).all()
     zip_path = build_zip_for_assets(

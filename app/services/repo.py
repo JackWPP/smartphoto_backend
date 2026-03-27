@@ -17,11 +17,14 @@ from app.models.strategy_reference_image import StrategyReferenceImageModel
 def get_session_or_404(
     db: Session,
     session_id: str,
+    service_id: str | None = None,
     user_id: str | None = None,
     guest_id: str | None = None,
 ) -> SessionModel:
     query = db.query(SessionModel).filter(SessionModel.id == session_id)
-    if user_id is not None:
+    if service_id is not None:
+        query = query.filter(SessionModel.service_id == service_id)
+    elif user_id is not None:
         query = query.filter(SessionModel.user_id == user_id)
     elif guest_id is not None:
         query = query.filter(SessionModel.guest_id == guest_id)
@@ -45,9 +48,18 @@ def get_job_for_user_or_404(db: Session, job_id: str, user_id: str) -> JobModel:
     return job
 
 
-def get_job_for_actor_or_404(db: Session, job_id: str, *, user_id: str | None = None, guest_id: str | None = None) -> JobModel:
+def get_job_for_actor_or_404(
+    db: Session,
+    job_id: str,
+    *,
+    service_id: str | None = None,
+    user_id: str | None = None,
+    guest_id: str | None = None,
+) -> JobModel:
     query = db.query(JobModel).filter(JobModel.id == job_id)
-    if user_id is not None:
+    if service_id is not None:
+        query = query.filter(JobModel.service_id == service_id)
+    elif user_id is not None:
         query = query.filter(JobModel.user_id == user_id)
     elif guest_id is not None:
         query = query.filter(JobModel.guest_id == guest_id)
