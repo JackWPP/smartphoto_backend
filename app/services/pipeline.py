@@ -317,7 +317,7 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     )
 
     analyze_started_at = time.perf_counter()
-    snapshot = client.analyze_images(loaded_images, session.active_platform_id)
+    snapshot = client.analyze_images(loaded_images, session.active_platform_id, db=db)
     analyze_ms = int((time.perf_counter() - analyze_started_at) * 1000)
     logger.info(
         "analysis_job upstream analysis completed: job_id=%s session_id=%s analyze_ms=%s",

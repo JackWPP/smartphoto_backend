@@ -7,18 +7,12 @@
   - `POST /uploads/presign`
   - 直传对象存储
   - `POST /uploads/complete`
-- Session 主链路现在支持匿名 guest：
-  - 未登录也可以 `POST /sessions` 并完成真实上传、分析、参数、文案、主图生成、详情页生成与结果查看
-  - guest 在当前 session 内可继续主图/详情页生成、全局修改、整组重生成与单图重生成
-  - 登录/注册本身不再自动认领 guest session；前端若要把当前创作纳入账号，需显式调用 `POST /guest/sessions/{session_id}/claim`
-  - 只有下载与账户历史仍要求登录
+- 当前实现已收口为纯图片 SaaS：
+  - 所有图片主链路都要求 `X-App-Key`
+  - 后端只认 `service_id + session_id`
+  - `/auth/*`、`/account/*`、`/guest/*` 已下线并返回 `410 feature_removed`
+  - 主图与详情页必须复用同一个 `session_id`
 - 业务表中持久化的是稳定 `object_key`，接口返回的 `url/image_url/thumbnail_url` 已改为临时可访问 URL
-- 账户中心新增 `GET /account/pricing`
-- 生成类接口响应新增：
-  - `charged_credits`
-  - `balance_after`
-  - `pricing_rule_id`
-- 余额不足时，生成类接口返回 `40201 insufficient_credits`
 - 主图与详情页结果接口都已支持：
   - `requested_version`
   - `available_versions`
@@ -35,6 +29,8 @@
 - 健康检查：`GET /healthz`
 - OpenAPI：`GET /openapi.json`
 - Apifox 导入文件：`docs/openapi/smartphoto_backend_openapi.json`
+- 图片主链路统一请求头：
+  - `X-App-Key: <server-app-key>`
 - 若前端与后端跨域部署，后端必须显式配置 `CORS_ALLOW_ORIGINS`，且前端请求需启用 credentials
 
 ### 1.1.1 OpenAPI 导出
@@ -83,13 +79,13 @@
 - `40006` `unsupported_file_type`
 - `40007` `file_too_large`
 - `40008` `missing_required_images`
-- `40201` `insufficient_credits`
+- `40101` `unauthorized`
+- `41001` `feature_removed`
 - `40401` `session_not_found`
 - `40402` `job_not_found`
 - `40403` `asset_not_found`
 - `40901` `job_already_running`
 - `40902` `duplicate_idempotency_key`
-- `40102` `login_required`
 - `50201` `upstream_llm_error`
 - `50202` `upstream_image_error`
 
@@ -103,15 +99,13 @@
   - `POST /uploads/complete`
   - `POST /sessions/{session_id}/images`
   - `DELETE /sessions/{session_id}/images/{image_id}`
+- 鉴权：
+  - 所有以上接口都要求 `X-App-Key`
+  - 同一 `session_id` 只能被同一个 `service_id` 访问
 - 推荐生产模式：
   - 前端先调用 `POST /uploads/presign`
   - 再直传 OSS / S3 兼容对象存储
   - 最后调用 `POST /uploads/complete`
-- 匿名语义：
-  - `POST /sessions`、商品图上传/删除/列表、参数附件、策略参考图、详情页风格图和 Step2~Step5 都允许 guest actor
-  - 未带 Bearer 且未命中 dev bypass 时，后端会自动签发 HttpOnly guest cookie
-  - 同一浏览器后续请求会复用该 guest 身份，直到 guest 24h 软失效
-  - 登录后需要前端显式调用 `POST /guest/sessions/{session_id}/claim`；若该 session 已被当前用户认领，则该接口幂等返回成功
 - `upload_kind`：
   - `session_image`
   - `detail_style_image`
@@ -147,7 +141,7 @@
   - 若历史脏数据导致 session 仍停留在 `created`，当前实现会在触发分析时自动补正为 `images_uploaded -> analyzing`，避免 worker 侧再报 `cannot transition created -> analyzing`
   - 自动写入 `analysis_snapshot`
   - 当前实现会把 session 上传图片以内联图像内容的方式发给上游分析模型，不再只传文本
-  - 当前文本/规划链路可通过 `LLM_PROVIDER=openrouter` 切到 OpenRouter；图片生成仍走 WhatAI
+  - 当前默认路由为：`analysis / 主图 planner / 详情页 planner / 参数提取 = WhatAI + Gemini`；OpenRouter 只保留给文本辅助任务或显式试模型
   - `analysis_snapshot` 额外包含：
     - `analysis_source`
     - `category_candidates[{category,confidence,reason}]`
@@ -155,6 +149,12 @@
     - `detected_view_slots`
     - `supplement_image_recommendations[{slot_type,label,reason,priority}]`
     - `reanalysis_required`
+    - `provider`
+    - `model`
+    - `prompt_version`
+    - `repair_round`
+    - `source`
+  - `category_candidates` 现在优先从后台启用的“全局品类库”中选择；仅在确实无法归类时回退 `其他`
   - `analysis_snapshot` 额外包含 `reference_summary`：
     - `shape`
     - `colors`
@@ -576,10 +576,9 @@
   - 幂等：
     - `POST /detail-pages/generations` 支持 `Idempotency-Key`
     - 相同 key + 相同 payload 命中幂等；不同 payload 返回 `40902`
-  - 匿名补充：
-    - guest 允许调用详情页 `style-images/strategy/overrides/prompts/generations/results`
-    - guest 的详情页生成响应仍保留 `guest_trial/guest_quota_remaining/login_required_after_result` 三个兼容字段，但当前固定为 `false/null/false`
-    - `GET /sessions/{session_id}/detail-pages/download` 仍要求登录
+  - 服务端调用补充：
+    - 详情页 `style-images/strategy/overrides/prompts/generations/results/download` 全部统一要求 `X-App-Key`
+    - 详情页与主图必须复用同一个 `session_id`，不要重复上传商品图
 
 ### Step 6 生成/结果/重生成/下载
 - 前置状态：
@@ -597,24 +596,9 @@
   - `slot_ids: string[]`
     - 为空时生成整组
     - 传入时只生成指定槽位，适合单张调试
-- 匿名生成语义：
-  - guest 可继续主图整组生成，也可使用 `slot_ids` 做局部调试
-  - guest 可继续详情页整组生成
-  - 当前不再对 guest 做产品级生成次数限制，也不会返回 `40302 guest_trial_exhausted`
-  - guest 的主图/详情页生成响应仍保留兼容字段：
-    - `guest_trial=false`
-    - `guest_quota_remaining=null`
-    - `login_required_after_result=false`
-  - 结果页可直接查看主图与详情页结果，且 guest 也可继续：
-    - `POST /sessions/{session_id}/results/global-edit`
-    - `POST /sessions/{session_id}/results/regenerate`
-    - `POST /assets/{asset_id}/regenerate`
-  - 仍要求登录的只有：
-    - `GET /sessions/{session_id}/download`
-    - `GET /sessions/{session_id}/detail-pages/download`
-  - `GET /sessions/{session_id}` 中：
-    - `can_continue_editing=true`
-    - `login_required_actions=["download","save_history"]`
+- 服务端生成语义：
+  - 主图整组生成、详情页整组生成、全局修改、整组重生成、单图重生成和下载全部统一使用 `X-App-Key`
+  - 不再区分 user/guest，也不再返回 guest 兼容字段
 - 结果集字段补充：
   - `requested_version`
   - `available_versions`
@@ -627,12 +611,6 @@
   - `assets[].display_order`
   - `assets[].version_no`
   - `assets[].render_total_ms`
-- `GET /sessions/{session_id}` 现在会额外返回：
-  - `auth_mode: guest | user`
-  - `guest_quota_remaining`（兼容字段，当前固定为 `null`）
-  - `login_required_actions`
-  - `can_download`
-  - `can_continue_editing`
 - 版本规则：
   - `generate_gallery` / `global_edit` / `regenerate_gallery`：`round_no + 1` 且 `version_no + 1`
   - `regenerate_asset`：`version_no + 1`，`round_no` 保持当前轮次，且写 `parent_asset_id`
@@ -654,7 +632,7 @@
   - 白底校验改为能力标记驱动：仅 `requires_white_bg_validation=true` 的槽位会触发白底校验与单槽位补提
   - 实际提交给上游的快照会落到 `assets.generation_snapshot`
 - 并发保护：
-  - 同 session 或同 user 同时只允许 1 个运行中生图任务
+  - 同 session 同时只允许 1 个运行中生图任务
   - 冲突返回 `40901`
 - 幂等：上述 4 个 POST 都支持 `Idempotency-Key`
 
@@ -697,49 +675,25 @@ data: {"event":"job_succeeded","job_id":"..."}
   - Job 轮询兜底（SSE 中断或网络抖动）
   - Prompt Debug 面板单独调 `POST /sessions/{id}/prompts/preview`，避免结果接口变重
 
-### 3.4 前台用户鉴权与账户中心
-- 鉴权前缀：`/api/v2/auth`
-- 登录注册接口：
-  - `POST /auth/register`
-  - `POST /auth/login`
-  - `POST /auth/refresh`
-  - `POST /auth/logout`
-  - `GET /auth/me`
-- 鉴权规则：
-  - 业务接口默认走 `Authorization: Bearer <access_token>`
-  - 刷新令牌使用 `HttpOnly` Cookie：`user_refresh_token`
-  - 用户注册成功后，系统会自动给该用户钱包入账 `100` 点额度；线上 PostgreSQL 通过 DB trigger 保证，SQLite/测试环境走应用层回退逻辑保持相同行为
-  - `dev` 环境默认允许 `ALLOW_DEV_AUTH_BYPASS=true`，未带 token 时回落到固定开发用户；联调前建议关闭
-  - `/platforms`、`/healthz`、`/openapi.json` 保持公开
-  - `POST /sessions`、`GET /sessions/{id}`、商品图/参数附件/策略参考图、详情页风格图、Step2~Step5、`POST /sessions/{id}/generations`、`POST /sessions/{id}/detail-pages/generations`、`POST /sessions/{id}/results/global-edit`、`POST /sessions/{id}/results/regenerate`、`POST /assets/{id}/regenerate` 都允许 guest actor
-  - 登录或注册成功后，后端不会自动认领 guest session
-  - 若前端需要把当前创作纳入账号，可在登录后显式调用 `POST /guest/sessions/{id}/claim`
-  - 若前后端跨域，后端需将前端 Origin 加入 `CORS_ALLOW_ORIGINS`，且浏览器请求需携带 `credentials: "include"`
-- 账户中心接口：
-  - `GET /account/overview`
-  - `GET|PUT /account/profile`
-  - `GET /account/assets`
-  - `GET /account/pricing`
-  - `GET /account/notifications`
-  - `POST /account/notifications/{id}/read`
-  - `POST /account/notifications/read-all`
-  - `POST /account/security/change-password`
-  - `GET|PUT /account/settings`
-  - `GET /account/purchases`
-  - `GET /account/wallet`
-  - `GET /account/wallet/transactions`
-- 资产历史接口说明：
-  - 返回按 `session` 聚合的卡片，不按单 asset 平铺
-  - 支持筛选参数：`q` `platform_id` `image_type` `style_tag` `brand_name` `page` `page_size`
-  - `image_type` 当前支持：`original` `main` `detail` `white_bg`
-- 用户商业化闭环说明：
-  - 当前已实现额度价格规则、生成前余额校验、消费流水和失败自动退款
-  - `20260323_0010` 迁移会对迁移前已存在用户一次性补发 `1000` 点额度，并写入 `credit_transactions`
-  - 价格以 `GET /account/pricing` 为准，不建议前端硬编码
-  - 退款条件：任务最终 `failed` 且未产出任何 ready asset
-- 安全收口说明：
-  - `GET /jobs/{job_id}` 与 `GET /jobs/{job_id}/events` 已按当前登录用户做归属校验
-  - `prompt-presets` 当前只返回“系统模板 + 当前用户模板”；系统模板对用户侧只读
+### 3.4 纯图片 SaaS 服务鉴权
+- 图片主链路统一要求：
+  - 请求头带 `X-App-Key: <server-app-key>`
+  - 后端据此解析 `service_id`
+  - session/job/upload/download 全部按 `service_id` 隔离
+- 公开接口：
+  - `/platforms`
+  - `/healthz`
+  - `/openapi.json`
+- 已下线接口：
+  - `GET|POST|PUT|PATCH|DELETE /auth/*`
+  - `GET|POST|PUT|PATCH|DELETE /account/*`
+  - `GET|POST|PUT|PATCH|DELETE /guest/*`
+- 下线接口统一返回：
+  - HTTP `410`
+  - 业务码 `41001 feature_removed`
+- Prompt Preset：
+  - 用户模板语义已收口为接入方模板
+  - `created_by` 与可见性过滤当前使用 `service_id`
 
 ### 3.5 后台管理接口
 - 管理前缀：`/api/admin/v1`
@@ -755,27 +709,17 @@ data: {"event":"job_succeeded","job_id":"..."}
 - 后台列表接口统一约定：
   - 支持 `page/page_size/sort_by/sort_order`
   - 响应统一返回分页元数据：`items/page/page_size/total/total_pages/has_next/has_prev`
-  - 当前已覆盖：`users/sessions/jobs/assets/audit-logs/prompt-presets/rule-packs`
+  - 当前已覆盖：`sessions/jobs/assets/audit-logs/prompt-presets/category-catalog/rule-packs`
 - 后台高风险写接口统一约定：
   - 请求体支持 `operator_note`
   - 审计日志会记录 `module/risk_level/operator_note/before_after_snapshot`
-  - 当前已覆盖：额度调整、手工补单、Prompt/Rule Pack 变更、Session copy/parameters/overrides 干预、Session 重跑、资产归档/恢复/重生成、Job 重试
+  - 当前已覆盖：Prompt/Rule Pack 变更、Session copy/parameters/overrides 干预、Session 重跑、资产归档/恢复/重生成、Job 重试
 - 后台管理对象：
   - Dashboard：
-    - `GET /dashboard/summary`
     - `GET /dashboard/overview`
     - `GET /dashboard/trends`
-    - `GET /dashboard/business`
   - System：
     - `GET /system/runtime`
-    - `GET /system/pricing`
-  - Users：
-    - `GET /users`
-    - `GET /users/{id}`
-    - `GET /users/{id}/orders`
-    - `GET /users/{id}/notifications`
-    - `POST /users/{id}/orders`
-    - `POST /users/{id}/wallet/adjust`
   - Sessions：
     - `GET /sessions`
     - `GET /sessions/{id}`
@@ -807,6 +751,11 @@ data: {"event":"job_succeeded","job_id":"..."}
     - `GET|PUT /prompt-presets/{id}`
     - `POST /prompt-presets/{id}/archive`
     - `POST /prompt-presets/{id}/clone`
+  - Category Catalog：
+    - `GET|POST /category-catalog`
+    - `GET|PUT /category-catalog/{id}`
+    - `POST /category-catalog/{id}/archive`
+    - `POST /category-catalog/{id}/restore`
   - Rule Packs：
     - `GET|POST /rule-packs`
     - `GET|PUT /rule-packs/{id}`
@@ -816,10 +765,10 @@ data: {"event":"job_succeeded","job_id":"..."}
   - Audit：
     - `GET /audit-logs`
 - 资产归档语义：
-  - 用户侧 `/api/v2/sessions/{id}/results|download` 默认隐藏 `visibility_status=archived` 资产
+  - 图片 SaaS 侧 `/api/v2/sessions/{id}/results|download` 默认隐藏 `visibility_status=archived` 资产
   - 后台侧可按 `visibility_status` 查看全部资产
 - 后台前端当前信息架构：
-  - `Overview / Users / Sessions / Jobs / Assets / Prompts / Rule Packs / Audit / System`
+  - `Overview / Sessions / Jobs / Assets / Prompts / Rule Packs / Audit / System`
   - 统一采用“列表 + 右侧详情工作台/抽屉”的操作模型，不再停留在 JSON dump 原型页
 
 ## 4. 实现 vs SPEC 差距清单（集中维护）
@@ -831,12 +780,16 @@ data: {"event":"job_succeeded","job_id":"..."}
 6. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
 7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
 8. `adminfront/` 已升级为可运营、可排障、可配置的后台控制台；当前仍未做 RBAC、多级审批流、运行时敏感配置在线编辑和任务强制取消。
-9. 当前已实现浏览器直传对象存储、`GET /account/pricing`、生成扣费与失败退款；仍未接真实支付、邮箱验证、找回密码和设备会话管理。
-10. 当前 CORS 为显式 allowlist 模式，不支持 `*`；跨域联调前必须先在后端配置实际前端 Origin。
+9. 当前实现已从“用户产品后端”收口为“纯图片 SaaS 后端”：`/api/v2/auth/*`、`/api/v2/account/*`、`/api/v2/guest/*` 已下线并返回 `41001 feature_removed`。
+10. 当前图片主链路统一使用 `X-App-Key` 鉴权，并按 `service_id` 隔离 session/job/upload/download；旧 SPEC 中的 `user_id/guest_id/claim` 语义已失效。
 11. 当前实现已改为“商品图变更只置 `analysis_snapshot.reanalysis_required=true`，不再自动重触发 `analysis`”；若旧 SPEC 仍描述自动 reanalysis，以当前实现为准。
-12. 当前实现已把 analysis / 主图 planner / 详情页 planner 的文本链路接入 `LLM_PROVIDER=openrouter` + `LLM_*` 模型选择；若旧 SPEC 仍写死 WhatAI planner，以当前实现为准。
+12. 当前实现已收口为“任务级 LLM 路由 + prompt-first repair”：视觉主链默认 `WhatAI + Gemini`，OpenRouter 主要承担文本辅助任务；若旧 SPEC 仍写死全局 `LLM_PROVIDER` 切换，以当前实现为准。
+13. 生成、分析和 Session 快照响应已移除 `auth_mode/guest_quota_remaining/login_required_actions/can_download/charged_credits/balance_after/pricing_rule_id` 等用户版字段。
+14. 后台管理台已裁剪为图片运维台；旧文档中 `Users/Wallet/Pricing/Business` 相关描述不再适用。
 
 ## 5. 联调最短路径
+前置：所有请求统一带 `X-App-Key`。
+
 1. `POST /sessions`
 2. `POST /sessions/{id}/images`
 3. `POST /sessions/{id}/analysis`

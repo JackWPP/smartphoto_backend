@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, Header, Request, Response
 from sqlalchemy.orm import Session
 
-from app.core.actors import RequestActor
+from app.core.actors import RequestActor, ServicePrincipal
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.user_auth import decode_access_token
@@ -74,3 +74,16 @@ def get_request_actor(
         return RequestActor(kind="user", user_id=dev_user.id)
 
     return get_or_create_guest_actor(db, request, response)
+
+
+def get_service_principal(
+    x_app_key: str | None = Header(default=None, alias="X-App-Key"),
+) -> ServicePrincipal:
+    settings = get_settings()
+    configured = settings.parsed_image_saas_app_keys()
+    if not x_app_key:
+        raise AppError("unauthorized", "X-App-Key required", 401)
+    for app_id, app_key in configured.items():
+        if x_app_key == app_key:
+            return ServicePrincipal(app_id=app_id)
+    raise AppError("unauthorized", "X-App-Key invalid", 401)

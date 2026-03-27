@@ -1,4 +1,5 @@
 from app.models.asset import AssetModel
+from app.models.category_catalog import CategoryCatalogModel
 from app.models.credit_transaction import CreditTransactionModel
 from app.models.credit_wallet import CreditWalletModel
 from app.models.detail_style_image import DetailStyleImageModel
@@ -28,6 +29,7 @@ __all__ = [
     "JobModel",
     "JobEventModel",
     "AssetModel",
+    "CategoryCatalogModel",
     "PromptPresetModel",
     "SessionPromptOverrideModel",
     "IdempotencyRecordModel",

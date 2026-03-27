@@ -6,9 +6,8 @@ from fastapi import APIRouter, Depends
 from app.core.admin_deps import get_current_admin_user
 from app.core.config import get_settings
 from app.core.response import success_response
-from app.schemas.admin import AdminSystemPricingData, AdminSystemRuntimeData
+from app.schemas.admin import AdminSystemRuntimeData
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
-from app.services.pricing import list_pricing_rules
 
 router = APIRouter(prefix="/system", tags=["admin-system"])
 
@@ -51,16 +50,3 @@ def get_runtime(_admin_user=Depends(get_current_admin_user)) -> dict:
         }
     )
 
-
-@router.get("/pricing", response_model=APIResponse[AdminSystemPricingData], operation_id="adminGetSystemPricing", responses={**OPENAPI_ERROR_RESPONSES})
-def get_pricing(_admin_user=Depends(get_current_admin_user)) -> dict:
-    items = [
-        {
-            "pricing_rule_id": item.rule_id,
-            "action": item.action,
-            "credits": item.credits,
-            "description": item.description,
-        }
-        for item in list_pricing_rules()
-    ]
-    return success_response({"items": items, "total": len(items)})

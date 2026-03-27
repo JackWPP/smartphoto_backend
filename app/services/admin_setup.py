@@ -3,8 +3,8 @@ from __future__ import annotations
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
+from app.admin_db import session as admin_db_session
 from app.admin_db.base import AdminBase
-from app.admin_db.session import admin_engine
 from app.admin_models.admin_audit_log import AdminAuditLogModel
 from app.admin_models.admin_refresh_token import AdminRefreshTokenModel
 from app.admin_models.admin_user import AdminUserModel
@@ -14,12 +14,12 @@ from app.core.config import get_settings
 
 def init_admin_schema() -> None:
     _ = (AdminAuditLogModel, AdminRefreshTokenModel, AdminUserModel)
-    AdminBase.metadata.create_all(bind=admin_engine)
+    AdminBase.metadata.create_all(bind=admin_db_session.admin_engine, checkfirst=True)
     _reconcile_admin_audit_schema()
 
 
 def _reconcile_admin_audit_schema() -> None:
-    inspector = inspect(admin_engine)
+    inspector = inspect(admin_db_session.admin_engine)
     if "admin_audit_logs" not in inspector.get_table_names():
         return
     existing = {column["name"] for column in inspector.get_columns("admin_audit_logs")}
@@ -32,7 +32,7 @@ def _reconcile_admin_audit_schema() -> None:
         statements.append("ALTER TABLE admin_audit_logs ADD COLUMN operator_note VARCHAR(500)")
     if not statements:
         return
-    with admin_engine.begin() as conn:
+    with admin_db_session.admin_engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
 

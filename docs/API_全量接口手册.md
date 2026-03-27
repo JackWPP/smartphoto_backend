@@ -1,8 +1,10 @@
 # API 全量接口手册（当前实现）
 
+> 更新说明（2026-03-27）：当前实现已切到“纯图片 SaaS + `X-App-Key`”模式，用户/guest/钱包类描述如果仍出现在本文后续历史段落中，以 `docs/API_联调指南.md` 与 `docs/openapi/smartphoto_backend_openapi.json` 为准。
+
 本文档是面向研发、联调、测试和运营的“人类可读版”接口手册，覆盖当前代码实现中的两套接口：
 
-- 用户侧：`/api/v2`
+- 图片 SaaS 侧：`/api/v2`
 - 管理侧：`/api/admin/v1`
 
 说明：

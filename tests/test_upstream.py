@@ -648,13 +648,41 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
     client = WhataiClient()
     monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
     monkeypatch.setattr(client.settings, "whatai_analysis_model", "analysis-fast-model")
+    monkeypatch.setattr(client.settings, "llm_route_analysis", "whatai_gemini")
     captured: dict[str, object] = {}
 
-    def fake_post_chat_json(payload, _error_key):
-        captured["payload"] = payload
-        return {"choices": [{"message": {"content": "{}"}}]}
+    def fake_complete_json(*, task, messages, error_key, temperature=0.2, model=None):
+        captured["task"] = task
+        captured["messages"] = messages
+        captured["model"] = model
+        return {
+            "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "image_type": "实物图", "confidence": 91},
+            "image_assessment": {"quality_score": 0.9, "summary": "清晰"},
+            "missing_views": ["angle45", "side"],
+            "suggestions": [],
+            "copy_draft": {"headline": "空气净化器"},
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "suggested_styles": ["现代简约"],
+            "reference_summary": {"shape": "圆柱形", "colors": "白色", "materials": "塑料", "structures": "进风格栅", "must_keep": "外形不能变"},
+            "category_candidates": [
+                {"category": "空气净化器", "confidence": 91, "reason": "主体是空气净化器"},
+                {"category": "加湿器", "confidence": 25, "reason": "外形近似但无明显喷雾证据"},
+                {"category": "其他", "confidence": 10, "reason": "保底候选"},
+            ],
+            "scene_tags": ["白底产品"],
+            "supplement_image_recommendations": [{"slot_type": "angle45", "label": "45 度角图", "reason": "补充结构信息", "priority": 1}],
+            "detected_view_slots": ["front"],
+        }
 
-    monkeypatch.setattr(client, "_post_chat_json", fake_post_chat_json)
+    monkeypatch.setattr(client.llm_router, "complete_json", fake_complete_json)
+    monkeypatch.setattr(client.llm_router, "is_available", lambda task: True)
+    monkeypatch.setattr(
+        "app.services.upstream.list_active_category_catalog",
+        lambda db=None: [
+            {"name": "空气净化器", "aliases": ["净化器"], "sample_keywords": ["CADR"], "notes": "", "is_featured": True},
+            {"name": "加湿器", "aliases": ["加湿"], "sample_keywords": ["喷雾"], "notes": "", "is_featured": True},
+        ],
+    )
 
     image = LoadedReferenceImage(
         "img-front",
@@ -671,8 +699,8 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
     )
     client.analyze_images([image], "temu")
 
-    assert captured["payload"]["model"] == "analysis-fast-model"
-    message_content = captured["payload"]["messages"][0]["content"]
+    assert captured["model"] == "analysis-fast-model"
+    message_content = captured["messages"][0]["content"]
     assert any(part.get("type") == "image_url" for part in message_content)
     assert any("data:image/jpeg;base64," in part.get("image_url", {}).get("url", "") for part in message_content)
 
@@ -718,14 +746,126 @@ def test_merge_analysis_result_normalizes_scalar_sections():
             "suggested_styles": "现代简约,清爽明亮",
             "key_parameters": ["300ml", "Type-C 充电"],
         },
+        category_catalog=[
+            {"name": "空气净化器"},
+            {"name": "加湿器"},
+        ],
     )
 
     assert merged["recognized_product"]["product_name"] == "便携榨汁杯"
     assert merged["copy_draft"]["headline"] == "鲜榨更方便"
     assert merged["reference_summary"]["must_keep"] == "保持杯体颜色和把手结构一致"
-    assert merged["missing_views"] == ["side", "detail"]
+    assert merged["missing_views"] == ["side"]
     assert merged["suggested_styles"] == ["现代简约", "清爽明亮"]
     assert merged["key_parameters"][0]["label"] == "300ml"
+
+
+def test_analyze_images_repairs_invalid_priority_before_fallback(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    monkeypatch.setattr(client.settings, "llm_route_analysis", "whatai_gemini")
+    catalog = [
+        {"name": "空气净化器", "aliases": ["净化器"], "sample_keywords": ["CADR"], "notes": "", "is_featured": True},
+        {"name": "加湿器", "aliases": ["加湿"], "sample_keywords": ["喷雾"], "notes": "", "is_featured": True},
+    ]
+    monkeypatch.setattr("app.services.upstream.list_active_category_catalog", lambda db=None: catalog)
+    monkeypatch.setattr(client.llm_router, "is_available", lambda task: True)
+
+    responses = iter(
+        [
+            {
+                "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "image_type": "实物图", "confidence": 88},
+                "image_assessment": {"quality_score": 0.9, "summary": "清晰"},
+                "missing_views": ["angle45", "side"],
+                "suggestions": [],
+                "copy_draft": {"headline": "空气净化器"},
+                "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+                "suggested_styles": ["现代简约"],
+                "reference_summary": {"shape": "圆柱形", "colors": "白色", "materials": "塑料", "structures": "进风格栅", "must_keep": "外形不能变"},
+                "category_candidates": [
+                    {"category": "空气净化器", "confidence": 88, "reason": "主体明确"},
+                    {"category": "加湿器", "confidence": 18, "reason": "外形相近"},
+                    {"category": "其他", "confidence": 8, "reason": "保底"},
+                ],
+                "scene_tags": ["白底产品"],
+                "supplement_image_recommendations": [{"slot_type": "angle45", "label": "45 度角图", "reason": "补充结构", "priority": "high"}],
+                "detected_view_slots": ["front"],
+            },
+            {
+                "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "image_type": "实物图", "confidence": 88},
+                "image_assessment": {"quality_score": 0.9, "summary": "清晰"},
+                "missing_views": ["angle45", "side"],
+                "suggestions": [],
+                "copy_draft": {"headline": "空气净化器"},
+                "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+                "suggested_styles": ["现代简约"],
+                "reference_summary": {"shape": "圆柱形", "colors": "白色", "materials": "塑料", "structures": "进风格栅", "must_keep": "外形不能变"},
+                "category_candidates": [
+                    {"category": "空气净化器", "confidence": 88, "reason": "主体明确"},
+                    {"category": "加湿器", "confidence": 18, "reason": "外形相近"},
+                    {"category": "其他", "confidence": 8, "reason": "保底"},
+                ],
+                "scene_tags": ["白底产品"],
+                "supplement_image_recommendations": [{"slot_type": "angle45", "label": "45 度角图", "reason": "补充结构", "priority": 1}],
+                "detected_view_slots": ["front"],
+            },
+        ]
+    )
+
+    def fake_complete_json(**_kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(client.llm_router, "complete_json", fake_complete_json)
+
+    image = LoadedReferenceImage(
+        "img-front",
+        "front",
+        1,
+        "/storage/front.jpg",
+        100,
+        100,
+        "image/jpeg",
+        100,
+        "front.jpg",
+        Path("front.jpg"),
+        b"front-image",
+    )
+    snapshot = client.analyze_images([image], "temu")
+
+    assert snapshot["supplement_image_recommendations"][0]["priority"] == 1
+    assert snapshot["repair_round"] == 1
+    assert snapshot["source"] == "repair"
+
+
+def test_merge_analysis_result_filters_categories_outside_active_catalog():
+    client = WhataiClient()
+    fallback = client._fake_analysis(
+        "temu",
+        category_catalog=[
+            {"name": "空气净化器"},
+            {"name": "加湿器"},
+        ],
+    )
+
+    merged = client._merge_analysis_result(
+        fallback,
+        {
+            "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "confidence": 92},
+            "category_candidates": [
+                {"category": "家居用品", "confidence": 99, "reason": "错误泛化"},
+                {"category": "空气净化器", "confidence": 92, "reason": "主体明确"},
+                {"category": "加湿器", "confidence": 18, "reason": "外形相近"},
+                {"category": "其他", "confidence": 10, "reason": "保底"},
+            ],
+        },
+        category_catalog=[
+            {"name": "空气净化器"},
+            {"name": "加湿器"},
+        ],
+    )
+
+    assert merged["category_candidates"][0]["category"] == "空气净化器"
+    assert all(item["category"] != "家居用品" for item in merged["category_candidates"])
 
 
 def test_normalize_key_parameters_splits_label_value_and_unit():

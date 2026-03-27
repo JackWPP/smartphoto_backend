@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.db import session as db_session
+from app.models.category_catalog import CategoryCatalogModel
+
+
+def _seed(
+    *,
+    name: str,
+    slug: str,
+    sort_order: int,
+    aliases: list[str],
+    sample_keywords: list[str],
+    notes: str = "",
+    is_featured: bool = False,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "slug": slug,
+        "sort_order": sort_order,
+        "aliases": aliases,
+        "sample_keywords": sample_keywords,
+        "notes": notes,
+        "is_featured": is_featured,
+    }
+
+
+SYSTEM_CATEGORY_CATALOGS: list[dict[str, Any]] = [
+    _seed(name="空气净化器", slug="air_purifier", sort_order=10, aliases=["净化器", "空气清新机", "空气消毒机"], sample_keywords=["HEPA", "CADR", "除甲醛", "滤网", "圆柱空气净化器"], notes="空气治理类核心品类", is_featured=True),
+    _seed(name="加湿器", slug="humidifier", sort_order=20, aliases=["空气加湿器", "喷雾加湿器"], sample_keywords=["雾化", "水箱", "恒湿", "桌面加湿"], is_featured=True),
+    _seed(name="除湿机", slug="dehumidifier", sort_order=30, aliases=["抽湿机"], sample_keywords=["抽湿", "除湿", "水箱", "地下室除湿"], is_featured=True),
+    _seed(name="净水器", slug="water_purifier", sort_order=40, aliases=["净水机", "滤水器"], sample_keywords=["RO", "滤芯", "净饮", "家用净水"], is_featured=True),
+    _seed(name="饮水机", slug="water_dispenser", sort_order=50, aliases=["即热饮水机", "饮水设备"], sample_keywords=["即热", "烧水", "冷热双温", "台式饮水"], is_featured=True),
+    _seed(name="小风扇", slug="mini_fan", sort_order=60, aliases=["便携风扇", "桌面风扇"], sample_keywords=["usb 风扇", "手持风扇", "静音风扇"], is_featured=True),
+    _seed(name="取暖器", slug="heater", sort_order=70, aliases=["暖风机", "电暖器"], sample_keywords=["暖风", "电热", "冬季取暖"], is_featured=True),
+    _seed(name="扫地机", slug="robot_vacuum", sort_order=80, aliases=["扫地机器人", "扫拖机器人"], sample_keywords=["扫拖", "激光导航", "自动回充"], is_featured=True),
+    _seed(name="洗地机", slug="floor_washer", sort_order=90, aliases=["洗拖机"], sample_keywords=["自清洁", "滚刷", "地面清洁"], is_featured=True),
+    _seed(name="吸尘器", slug="vacuum_cleaner", sort_order=100, aliases=["无线吸尘器"], sample_keywords=["除螨", "大吸力", "手持吸尘"], is_featured=True),
+    _seed(name="咖啡机", slug="coffee_machine", sort_order=110, aliases=["咖啡壶", "意式咖啡机"], sample_keywords=["萃取", "胶囊", "奶泡", "咖啡"], is_featured=True),
+    _seed(name="空气炸锅", slug="air_fryer", sort_order=120, aliases=["炸锅"], sample_keywords=["无油", "烘烤", "炸篮"], is_featured=True),
+    _seed(name="电饭煲", slug="rice_cooker", sort_order=130, aliases=["电饭锅"], sample_keywords=["煮饭", "IH", "预约"], is_featured=True),
+    _seed(name="破壁机", slug="blender_breaker", sort_order=140, aliases=["破壁料理机"], sample_keywords=["豆浆", "冷热双打", "高速搅打"], is_featured=True),
+    _seed(name="料理机", slug="food_processor", sort_order=150, aliases=["多功能料理机"], sample_keywords=["切碎", "搅拌", "辅食"], is_featured=True),
+    _seed(name="榨汁机", slug="juicer", sort_order=160, aliases=["原汁机"], sample_keywords=["果汁", "慢榨", "便携榨汁"], is_featured=True),
+    _seed(name="电磁炉", slug="induction_cooker", sort_order=170, aliases=["电陶炉"], sample_keywords=["火力", "加热", "烹饪"], is_featured=True),
+    _seed(name="微波炉", slug="microwave", sort_order=180, aliases=["微波加热器"], sample_keywords=["解冻", "加热", "厨房电器"], is_featured=True),
+    _seed(name="烤箱", slug="oven", sort_order=190, aliases=["电烤箱"], sample_keywords=["烘焙", "烤盘", "发酵"], is_featured=True),
+    _seed(name="冰箱", slug="refrigerator", sort_order=200, aliases=["冷藏柜"], sample_keywords=["冷藏", "冷冻", "双开门"], is_featured=True),
+    _seed(name="洗衣机", slug="washing_machine", sort_order=210, aliases=["洗烘一体机"], sample_keywords=["滚筒", "波轮", "除菌洗"], is_featured=True),
+    _seed(name="电视", slug="television", sort_order=220, aliases=["智能电视"], sample_keywords=["4K", "大屏", "家庭影院"], is_featured=True),
+    _seed(name="显示器", slug="monitor", sort_order=230, aliases=["电脑显示器"], sample_keywords=["高刷", "IPS", "办公显示器"], is_featured=True),
+    _seed(name="投影仪", slug="projector", sort_order=240, aliases=["投影机"], sample_keywords=["家用投影", "激光投影", "便携投影"], is_featured=True),
+    _seed(name="音响", slug="speaker", sort_order=250, aliases=["蓝牙音箱"], sample_keywords=["立体声", "低音", "户外音箱"], is_featured=True),
+    _seed(name="耳机", slug="headphones", sort_order=260, aliases=["蓝牙耳机"], sample_keywords=["降噪", "入耳式", "头戴式"], is_featured=True),
+    _seed(name="摄像头", slug="camera", sort_order=270, aliases=["监控摄像头", "网络摄像头"], sample_keywords=["夜视", "云台", "安防"], is_featured=True),
+    _seed(name="路由器", slug="router", sort_order=280, aliases=["无线路由器"], sample_keywords=["Wi-Fi", "mesh", "网络覆盖"], is_featured=True),
+    _seed(name="床垫", slug="mattress", sort_order=300, aliases=["记忆棉床垫"], sample_keywords=["软硬适中", "弹簧", "睡眠"], is_featured=True),
+    _seed(name="沙发", slug="sofa", sort_order=310, aliases=["布艺沙发", "功能沙发"], sample_keywords=["客厅家具", "靠背", "坐感"], is_featured=True),
+    _seed(name="书桌", slug="desk", sort_order=320, aliases=["办公桌"], sample_keywords=["学习桌", "木质桌面", "家居办公"], is_featured=True),
+    _seed(name="椅子", slug="chair", sort_order=330, aliases=["办公椅", "餐椅"], sample_keywords=["靠背椅", "人体工学", "座椅"], is_featured=True),
+    _seed(name="灯具", slug="lamp", sort_order=340, aliases=["台灯", "落地灯"], sample_keywords=["照明", "护眼灯", "氛围灯"], is_featured=True),
+    _seed(name="收纳柜", slug="storage_cabinet", sort_order=350, aliases=["柜子"], sample_keywords=["分层收纳", "抽屉", "置物"], is_featured=True),
+    _seed(name="置物架", slug="storage_rack", sort_order=360, aliases=["层架"], sample_keywords=["多层", "厨房收纳", "浴室收纳"], is_featured=True),
+    _seed(name="晾衣架", slug="drying_rack", sort_order=370, aliases=["晾衣杆"], sample_keywords=["折叠晾衣", "阳台晾晒"], is_featured=True),
+    _seed(name="保温杯", slug="thermos", sort_order=400, aliases=["水杯"], sample_keywords=["保冷", "保温", "316 不锈钢"], is_featured=True),
+    _seed(name="收纳盒", slug="storage_box", sort_order=410, aliases=["整理盒"], sample_keywords=["桌面收纳", "分类收纳"], is_featured=True),
+    _seed(name="拖把", slug="mop", sort_order=420, aliases=["平板拖把"], sample_keywords=["家务清洁", "免手洗", "拖地"], is_featured=True),
+    _seed(name="纸巾盒", slug="tissue_box", sort_order=430, aliases=["纸抽盒"], sample_keywords=["客厅纸巾盒", "桌面摆件"], is_featured=False),
+    _seed(name="垃圾桶", slug="trash_bin", sort_order=440, aliases=["废纸篓"], sample_keywords=["脚踏", "感应", "厨卫垃圾桶"], is_featured=True),
+    _seed(name="衣架", slug="hanger", sort_order=450, aliases=["裤架"], sample_keywords=["防滑衣架", "收纳挂架"], is_featured=False),
+    _seed(name="清洁刷", slug="cleaning_brush", sort_order=460, aliases=["刷子"], sample_keywords=["去污刷", "缝隙刷"], is_featured=False),
+    _seed(name="洗发水", slug="shampoo", sort_order=500, aliases=["洗发露"], sample_keywords=["控油", "去屑", "护发"], is_featured=True),
+    _seed(name="沐浴露", slug="body_wash", sort_order=510, aliases=["沐浴乳"], sample_keywords=["留香", "滋润", "清洁"], is_featured=True),
+    _seed(name="护肤品", slug="skincare", sort_order=520, aliases=["护肤套装"], sample_keywords=["保湿", "修护", "护肤"], is_featured=True),
+    _seed(name="精华", slug="serum", sort_order=530, aliases=["精华液"], sample_keywords=["抗老", "补水", "次抛"], is_featured=True),
+    _seed(name="面膜", slug="mask", sort_order=540, aliases=["贴片面膜"], sample_keywords=["补水面膜", "修护面膜"], is_featured=True),
+    _seed(name="防晒", slug="sunscreen", sort_order=550, aliases=["防晒霜"], sample_keywords=["SPF", "PA", "户外防晒"], is_featured=True),
+    _seed(name="牙膏", slug="toothpaste", sort_order=560, aliases=["牙膏套装"], sample_keywords=["清新口气", "美白", "口腔护理"], is_featured=True),
+    _seed(name="漱口水", slug="mouthwash", sort_order=570, aliases=["口腔清洁液"], sample_keywords=["口气清新", "便携装"], is_featured=False),
+    _seed(name="宠物粮", slug="pet_food", sort_order=600, aliases=["猫粮", "狗粮"], sample_keywords=["冻干", "成犬粮", "成猫粮"], is_featured=True),
+    _seed(name="猫砂", slug="cat_litter", sort_order=610, aliases=["豆腐猫砂"], sample_keywords=["除臭", "结团", "宠物清洁"], is_featured=True),
+    _seed(name="宠物玩具", slug="pet_toy", sort_order=620, aliases=["逗猫棒", "宠物球"], sample_keywords=["磨牙", "互动", "宠物用品"], is_featured=False),
+    _seed(name="宠物饮水机", slug="pet_water_fountain", sort_order=630, aliases=["宠物饮水器"], sample_keywords=["循环过滤", "猫咪饮水"], is_featured=True),
+    _seed(name="宠物窝", slug="pet_bed", sort_order=640, aliases=["猫窝", "狗窝"], sample_keywords=["保暖窝", "宠物睡垫"], is_featured=False),
+]
+
+
+def ensure_system_category_catalog(db: Session) -> None:
+    now = datetime.now(timezone.utc)
+    existing_by_slug = {
+        item.slug: item
+        for item in db.query(CategoryCatalogModel).filter(CategoryCatalogModel.is_system.is_(True)).all()
+    }
+    changed = False
+    for item in SYSTEM_CATEGORY_CATALOGS:
+        existing = existing_by_slug.get(item["slug"])
+        if existing is None:
+            db.add(
+                CategoryCatalogModel(
+                    **item,
+                    is_system=True,
+                    is_active=True,
+                    created_by=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            changed = True
+            continue
+        row_changed = False
+        for key in ("name", "sort_order", "aliases", "sample_keywords", "notes", "is_featured"):
+            if getattr(existing, key) != item[key]:
+                setattr(existing, key, item[key])
+                row_changed = True
+        if existing.is_system is not True:
+            existing.is_system = True
+            row_changed = True
+        if row_changed:
+            existing.updated_at = now
+            changed = True
+    if changed:
+        db.flush()
+
+
+def list_category_catalog(
+    db: Session,
+    *,
+    include_inactive: bool = False,
+) -> list[CategoryCatalogModel]:
+    ensure_system_category_catalog(db)
+    query = db.query(CategoryCatalogModel)
+    if not include_inactive:
+        query = query.filter(CategoryCatalogModel.is_active.is_(True))
+    return query.order_by(
+        CategoryCatalogModel.is_featured.desc(),
+        CategoryCatalogModel.sort_order.asc(),
+        CategoryCatalogModel.name.asc(),
+    ).all()
+
+
+def list_active_category_catalog(
+    *,
+    db: Session | None = None,
+) -> list[dict[str, Any]]:
+    def _serialize(items: list[CategoryCatalogModel]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": item.name,
+                "slug": item.slug,
+                "sort_order": int(item.sort_order or 0),
+                "aliases": [str(alias).strip() for alias in (item.aliases or []) if str(alias).strip()],
+                "sample_keywords": [str(keyword).strip() for keyword in (item.sample_keywords or []) if str(keyword).strip()],
+                "notes": str(item.notes or "").strip(),
+                "is_featured": bool(item.is_featured),
+            }
+            for item in items
+        ]
+
+    if db is not None:
+        return _serialize(list_category_catalog(db, include_inactive=False))
+    with db_session.SessionLocal() as owned_db:
+        return _serialize(list_category_catalog(owned_db, include_inactive=False))

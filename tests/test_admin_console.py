@@ -5,8 +5,6 @@ from PIL import Image
 from app.admin_db import session as admin_db_session
 from app.admin_models.admin_user import AdminUserModel
 from app.core.admin_auth import hash_password
-from app.db import session as db_session
-from app.services.user_accounts import adjust_wallet_balance
 
 
 def make_image_bytes(size=(1200, 1200), color=(240, 240, 240)) -> bytes:
@@ -14,16 +12,6 @@ def make_image_bytes(size=(1200, 1200), color=(240, 240, 240)) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
     return buf.getvalue()
-
-
-def register_user(client, email: str, password: str = "secret123", display_name: str = "User") -> dict:
-    response = client.post(
-        "/api/v2/auth/register",
-        json={"email": email, "password": password, "display_name": display_name},
-    )
-    assert response.status_code == 200, response.text
-    access_token = response.json()["data"]["access_token"]
-    return {"Authorization": f"Bearer {access_token}"}
 
 
 def create_admin_user(username="admin", password="secret123", display_name="Admin"):
@@ -39,25 +27,24 @@ def create_admin_user(username="admin", password="secret123", display_name="Admi
     return {"username": username, "password": password}
 
 
-def grant_credits_to_user(client, headers: dict, credits: int = 100) -> None:
-    me = client.get("/api/v2/auth/me", headers=headers).json()["data"]
-    with db_session.SessionLocal() as db:
-        adjust_wallet_balance(db, user_id=me["user_id"], credits_delta=credits, note="test topup", source="test_seed")
-        db.commit()
+def admin_headers_for(client) -> dict:
+    creds = create_admin_user()
+    response = client.post("/api/admin/v1/auth/login", json=creds)
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['data']['access_token']}"}
 
 
-def create_ready_session(client, headers: dict, platform_id: str = "temu") -> str:
-    sid = client.post("/api/v2/sessions", headers=headers).json()["data"]["session_id"]
+def create_ready_session(client, platform_id: str = "temu") -> str:
+    sid = client.post("/api/v2/sessions").json()["data"]["session_id"]
     files = {"file": ("p.jpg", make_image_bytes(), "image/jpeg")}
     data = {"slot_type": "front", "display_order": "1"}
-    client.post(f"/api/v2/sessions/{sid}/images", files=files, data=data, headers=headers)
-    client.post(f"/api/v2/sessions/{sid}/analysis", headers=headers)
+    client.post(f"/api/v2/sessions/{sid}/images", files=files, data=data)
+    client.post(f"/api/v2/sessions/{sid}/analysis")
     client.put(
         f"/api/v2/sessions/{sid}/platform-selection",
         json={"selected_platform_ids": [platform_id], "active_platform_id": platform_id},
-        headers=headers,
     )
-    copy_payload = client.get(f"/api/v2/sessions/{sid}/copy", headers=headers).json()["data"]
+    copy_payload = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     copy_payload.update(
         {
             "product_name": "智能空气净化器",
@@ -69,67 +56,37 @@ def create_ready_session(client, headers: dict, platform_id: str = "temu") -> st
             "style_custom": "浅色暖光",
         }
     )
-    client.put(f"/api/v2/sessions/{sid}/copy", json=copy_payload, headers=headers)
-    client.post(f"/api/v2/sessions/{sid}/strategy/preview", headers=headers)
+    client.put(f"/api/v2/sessions/{sid}/copy", json=copy_payload)
+    client.post(f"/api/v2/sessions/{sid}/strategy/preview")
     return sid
 
 
-def admin_headers_for(client) -> dict:
-    creds = create_admin_user()
-    response = client.post("/api/admin/v1/auth/login", json=creds)
-    assert response.status_code == 200, response.text
-    return {"Authorization": f"Bearer {response.json()['data']['access_token']}"}
-
-
-def test_admin_console_dashboard_runtime_notifications_and_audit(client):
-    headers = register_user(client, "console-user@example.com", display_name="Console User")
-    user_id = client.get("/api/v2/auth/me", headers=headers).json()["data"]["user_id"]
+def test_admin_console_overview_runtime_and_audit_are_image_only(client):
+    session_id = create_ready_session(client)
     admin_headers = admin_headers_for(client)
-
-    order = client.post(
-        f"/api/admin/v1/users/{user_id}/orders",
-        json={
-            "plan_name": "Starter Pack",
-            "amount": 99,
-            "currency": "CNY",
-            "credits_delta": 50,
-            "source": "manual_grant",
-            "operator_note": "manual top-up for support",
-        },
-        headers=admin_headers,
-    )
-    assert order.status_code == 200, order.text
-
-    notifications = client.get(f"/api/admin/v1/users/{user_id}/notifications", headers=admin_headers)
-    assert notifications.status_code == 200, notifications.text
-    assert notifications.json()["data"]["total"] >= 1
 
     overview = client.get("/api/admin/v1/dashboard/overview", headers=admin_headers)
     trends = client.get("/api/admin/v1/dashboard/trends?days=7", headers=admin_headers)
-    business = client.get("/api/admin/v1/dashboard/business", headers=admin_headers)
     runtime = client.get("/api/admin/v1/system/runtime", headers=admin_headers)
-    pricing = client.get("/api/admin/v1/system/pricing", headers=admin_headers)
 
     assert overview.status_code == 200, overview.text
     assert trends.status_code == 200, trends.text
-    assert business.status_code == 200, business.text
     assert runtime.status_code == 200, runtime.text
-    assert pricing.status_code == 200, pricing.text
-    assert runtime.json()["data"]["queue_stats"]
-    assert pricing.json()["data"]["total"] >= 1
 
-    audit = client.get("/api/admin/v1/audit-logs?module=users", headers=admin_headers)
-    assert audit.status_code == 200, audit.text
-    first_item = audit.json()["data"]["items"][0]
-    assert first_item["module"] == "users"
-    assert first_item["operator_note"] == "manual top-up for support"
-    assert first_item["risk_level"] == "high"
+    overview_data = overview.json()["data"]
+    assert overview_data["runtime_cards"]
+    assert overview_data["ops_cards"]
+    assert overview_data["config_cards"]
+    assert "business_cards" not in overview_data
+    assert runtime.json()["data"]["queue_stats"]
+
+    sessions = client.get(f"/api/admin/v1/sessions?session_id={session_id}", headers=admin_headers)
+    assert sessions.status_code == 200, sessions.text
+    assert sessions.json()["data"]["items"][0]["service_id"] == "default"
 
 
 def test_admin_console_session_job_history_results_and_previews(client):
-    headers = register_user(client, "console-session@example.com", display_name="Console Session")
-    grant_credits_to_user(client, headers)
-    session_id = create_ready_session(client, headers)
+    session_id = create_ready_session(client)
     admin_headers = admin_headers_for(client)
 
     session_detail = client.get(f"/api/admin/v1/sessions/{session_id}", headers=admin_headers)
@@ -153,6 +110,7 @@ def test_admin_console_session_job_history_results_and_previews(client):
     jobs = client.get(f"/api/admin/v1/jobs?session_id={session_id}", headers=admin_headers)
     assert jobs.status_code == 200, jobs.text
     job_id = jobs.json()["data"]["items"][0]["job_id"]
+    assert jobs.json()["data"]["items"][0]["service_id"] == "default"
 
     history = client.get(f"/api/admin/v1/jobs/{job_id}/events/history", headers=admin_headers)
     assert history.status_code == 200, history.text
@@ -168,3 +126,63 @@ def test_admin_console_session_job_history_results_and_previews(client):
     audit = client.get("/api/admin/v1/audit-logs?module=jobs", headers=admin_headers)
     assert audit.status_code == 200, audit.text
     assert any(item["operator_note"] == "replay failed or stale job from admin console" for item in audit.json()["data"]["items"])
+
+
+def test_admin_category_catalog_crud_and_audit(client):
+    admin_headers = admin_headers_for(client)
+
+    listing = client.get("/api/admin/v1/category-catalog", headers=admin_headers)
+    assert listing.status_code == 200, listing.text
+    assert any(item["name"] == "空气净化器" for item in listing.json()["data"]["items"])
+
+    created = client.post(
+        "/api/admin/v1/category-catalog",
+        json={
+            "name": "香薰机",
+            "slug": "aroma_diffuser",
+            "sort_order": 710,
+            "aliases": ["香氛机"],
+            "sample_keywords": ["扩香", "精油"],
+            "notes": "香氛扩散设备",
+            "is_featured": True,
+            "operator_note": "新增香氛小家电品类",
+        },
+        headers=admin_headers,
+    )
+    assert created.status_code == 200, created.text
+    category_id = created.json()["data"]["category"]["category_id"]
+
+    updated = client.put(
+        f"/api/admin/v1/category-catalog/{category_id}",
+        json={
+            "sample_keywords": ["扩香", "精油", "香氛"],
+            "operator_note": "补充关键词",
+        },
+        headers=admin_headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert "香氛" in updated.json()["data"]["category"]["sample_keywords"]
+
+    archived = client.post(
+        f"/api/admin/v1/category-catalog/{category_id}/archive",
+        json={"operator_note": "暂时下线测试品类"},
+        headers=admin_headers,
+    )
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["data"]["category"]["is_active"] is False
+
+    restored = client.post(
+        f"/api/admin/v1/category-catalog/{category_id}/restore",
+        json={"operator_note": "恢复测试品类"},
+        headers=admin_headers,
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["data"]["category"]["is_active"] is True
+
+    audit = client.get("/api/admin/v1/audit-logs?module=category_catalog", headers=admin_headers)
+    assert audit.status_code == 200, audit.text
+    notes = [item["operator_note"] for item in audit.json()["data"]["items"]]
+    assert "新增香氛小家电品类" in notes
+    assert "补充关键词" in notes
+    assert "暂时下线测试品类" in notes
+    assert "恢复测试品类" in notes

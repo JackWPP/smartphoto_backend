@@ -122,24 +122,6 @@ export const adminApi = {
   dashboardTrends(params = {}) {
     return request('GET', `/dashboard/trends${buildQuery(params)}`)
   },
-  dashboardBusiness() {
-    return request('GET', '/dashboard/business')
-  },
-  listUsers(params = {}) {
-    return request('GET', `/users${buildQuery(params)}`)
-  },
-  getUser(userId) {
-    return request('GET', `/users/${userId}`)
-  },
-  listUserNotifications(userId, params = {}) {
-    return request('GET', `/users/${userId}/notifications${buildQuery(params)}`)
-  },
-  adjustUserWallet(userId, payload) {
-    return request('POST', `/users/${userId}/wallet/adjust`, { body: payload })
-  },
-  createUserOrder(userId, payload) {
-    return request('POST', `/users/${userId}/orders`, { body: payload })
-  },
   listSessions(params = {}) {
     return request('GET', `/sessions${buildQuery(params)}`)
   },
@@ -233,6 +215,24 @@ export const adminApi = {
   clonePromptPreset(id, payload) {
     return request('POST', `/prompt-presets/${id}/clone`, { body: payload })
   },
+  listCategoryCatalog(params = {}) {
+    return request('GET', `/category-catalog${buildQuery(params)}`)
+  },
+  getCategoryCatalog(id) {
+    return request('GET', `/category-catalog/${id}`)
+  },
+  createCategoryCatalog(payload) {
+    return request('POST', '/category-catalog', { body: payload })
+  },
+  updateCategoryCatalog(id, payload) {
+    return request('PUT', `/category-catalog/${id}`, { body: payload })
+  },
+  archiveCategoryCatalog(id, payload) {
+    return request('POST', `/category-catalog/${id}/archive`, { body: payload })
+  },
+  restoreCategoryCatalog(id, payload) {
+    return request('POST', `/category-catalog/${id}/restore`, { body: payload })
+  },
   listRulePacks(params = {}) {
     return request('GET', `/rule-packs${buildQuery(params)}`)
   },
@@ -259,8 +259,5 @@ export const adminApi = {
   },
   getSystemRuntime() {
     return request('GET', '/system/runtime')
-  },
-  getSystemPricing() {
-    return request('GET', '/system/pricing')
   },
 }

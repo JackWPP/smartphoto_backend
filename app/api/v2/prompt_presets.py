@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user_id
+from app.core.deps import get_service_principal
 from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
@@ -55,7 +55,7 @@ def list_presets(
     slot_family: str | None = Query(default=None),
     include_inactive: bool = Query(default=False),
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    principal=Depends(get_service_principal),
 ) -> dict:
     presets = list_prompt_presets(
         db,
@@ -63,7 +63,7 @@ def list_presets(
         asset_family=asset_family,
         platform_id=platform_id,
         slot_family=slot_family,
-        user_id=str(user_id),
+        user_id=principal.app_id,
         include_inactive=include_inactive,
     )
     db.commit()
@@ -80,14 +80,14 @@ def list_presets(
 def create_preset(
     req: PromptPresetCreateRequest,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    principal=Depends(get_service_principal),
 ) -> dict:
     preset = PromptPresetModel(
         **req.model_dump(),
         version_no=1,
         is_system=False,
         is_active=True,
-        created_by=str(user_id),
+        created_by=principal.app_id,
     )
     db.add(preset)
     db.commit()
@@ -106,9 +106,9 @@ def update_preset(
     preset_id: str,
     req: PromptPresetUpdateRequest,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    principal=Depends(get_service_principal),
 ) -> dict:
-    preset = get_prompt_preset_or_404(db, preset_id, str(user_id))
+    preset = get_prompt_preset_or_404(db, preset_id, principal.app_id)
     if preset.is_system:
         raise AppError("forbidden", "system preset is read-only", 403)
     payload = req.model_dump(exclude_unset=True)
@@ -116,7 +116,7 @@ def update_preset(
         setattr(preset, key, value)
     preset.version_no += 1
     if not preset.created_by:
-        preset.created_by = str(user_id)
+        preset.created_by = principal.app_id
     db.commit()
     db.refresh(preset)
     return success_response({"preset": _serialize_preset(preset)})
@@ -132,14 +132,14 @@ def update_preset(
 def archive_preset(
     preset_id: str,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    principal=Depends(get_service_principal),
 ) -> dict:
-    preset = get_prompt_preset_or_404(db, preset_id, str(user_id))
+    preset = get_prompt_preset_or_404(db, preset_id, principal.app_id)
     if preset.is_system:
         raise AppError("forbidden", "system preset is read-only", 403)
     preset.is_active = False
     if not preset.created_by:
-        preset.created_by = str(user_id)
+        preset.created_by = principal.app_id
     db.commit()
     db.refresh(preset)
     return success_response({"preset": _serialize_preset(preset)})
@@ -155,9 +155,9 @@ def archive_preset(
 def clone_preset(
     preset_id: str,
     db: Session = Depends(get_db),
-    user_id=Depends(get_current_user_id),
+    principal=Depends(get_service_principal),
 ) -> dict:
-    preset = get_prompt_preset_or_404(db, preset_id, str(user_id))
+    preset = get_prompt_preset_or_404(db, preset_id, principal.app_id)
     clone = PromptPresetModel(
         name=f"{preset.name} Copy",
         preset_type=preset.preset_type,
@@ -174,7 +174,7 @@ def clone_preset(
         version_no=1,
         is_system=False,
         is_active=True,
-        created_by=str(user_id),
+        created_by=principal.app_id,
     )
     db.add(clone)
     db.commit()

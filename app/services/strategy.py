@@ -122,6 +122,7 @@ def build_strategy_preview(
         analysis_snapshot=analysis_snapshot or {},
         planner_instruction=planner_instruction,
     )
+    planner_meta = llm_slot_plan.get("_planner_meta") if isinstance(llm_slot_plan, dict) else None
     if llm_slot_plan:
         asset_plan = [_merge_asset_plan_item(plan_item, llm_slot_plan.get(str(plan_item["slot_id"])) or llm_slot_plan.get(str(plan_item["role"]))) for plan_item in asset_plan]
     prompt_plan = _build_prompt_plan(
@@ -155,6 +156,11 @@ def build_strategy_preview(
         "planner_instruction": planner_instruction,
         "platform_rule_pack": profile.main_rule_pack_id if profile else "default_main_gallery_v2",
         "platform_overlay": overlay,
+        "provider": (planner_meta or {}).get("provider", "whatai"),
+        "model": (planner_meta or {}).get("model", ""),
+        "prompt_version": (planner_meta or {}).get("prompt_version", ""),
+        "repair_round": int((planner_meta or {}).get("repair_round") or 0),
+        "source": (planner_meta or {}).get("source", "rule_based"),
         "slot_preferences": list(resolved_slot_preferences.values()),
         "strategy_overrides": list(resolved_prompt_overrides.values()),
         "reference_manifest": reference_manifest,

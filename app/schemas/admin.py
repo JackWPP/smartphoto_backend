@@ -57,7 +57,7 @@ class AdminDashboardSummary(BaseModel):
 class AdminDashboardOverviewData(BaseModel):
     summary: AdminDashboardSummary
     runtime_cards: list[AdminMetricCard] = Field(default_factory=list)
-    business_cards: list[AdminMetricCard] = Field(default_factory=list)
+    ops_cards: list[AdminMetricCard] = Field(default_factory=list)
     config_cards: list[AdminMetricCard] = Field(default_factory=list)
     recent_failed_jobs: list[dict[str, Any]] = Field(default_factory=list)
     recent_high_risk_actions: list[dict[str, Any]] = Field(default_factory=list)
@@ -68,8 +68,7 @@ class AdminDashboardTrendPoint(BaseModel):
     jobs_total: int = 0
     jobs_failed: int = 0
     assets_ready: int = 0
-    users_created: int = 0
-    orders_created: int = 0
+    sessions_active: int = 0
 
 
 class AdminDashboardTrendsData(BaseModel):
@@ -77,24 +76,9 @@ class AdminDashboardTrendsData(BaseModel):
     points: list[AdminDashboardTrendPoint] = Field(default_factory=list)
 
 
-class AdminDashboardBusinessData(BaseModel):
-    total_users: int
-    active_sessions_7d: int
-    paid_orders_total: int
-    paid_orders_7d: int
-    credits_granted_total: int
-    credits_granted_7d: int
-    credits_consumed_total: int
-    credits_consumed_7d: int
-    unread_notifications_total: int
-
-
 class AdminSessionListItem(BaseModel):
     session_id: str
-    user_id: str | None = None
-    guest_id: str | None = None
-    owner_kind: str = "user"
-    owner_label: str
+    service_id: str
     status: str
     active_platform_id: str | None = None
     current_step: int
@@ -117,10 +101,7 @@ class AdminSessionListData(AdminPaginationData):
 class AdminJobItem(BaseModel):
     job_id: str
     session_id: str
-    user_id: str | None = None
-    guest_id: str | None = None
-    owner_kind: str = "user"
-    owner_label: str
+    service_id: str
     job_type: str
     status: str
     progress: int
@@ -267,43 +248,24 @@ class AdminRulePackListData(AdminPaginationData):
     items: list[AdminRulePackItem]
 
 
-class AdminUserListItem(BaseModel):
-    user_id: str
-    email: str
-    display_name: str | None = None
-    status: str
-    wallet_balance: int
-    session_count: int
+class AdminCategoryCatalogItem(BaseModel):
+    category_id: str
+    name: str
+    slug: str
+    sort_order: int
+    aliases: list[str] = Field(default_factory=list)
+    sample_keywords: list[str] = Field(default_factory=list)
+    notes: str | None = None
+    is_featured: bool
+    is_system: bool
+    is_active: bool
+    created_by: str | None = None
     created_at: str | None = None
-    last_login_at: str | None = None
+    updated_at: str | None = None
 
 
-class AdminUserListData(AdminPaginationData):
-    items: list[AdminUserListItem]
-
-
-class AdminUserNotificationItem(BaseModel):
-    notification_id: str
-    category: str
-    title: str
-    content: str
-    is_read: bool
-    read_at: str | None = None
-    created_at: str | None = None
-    payload: dict[str, Any] = Field(default_factory=dict)
-
-
-class AdminUserNotificationListData(AdminPaginationData):
-    items: list[AdminUserNotificationItem]
-    unread_count: int
-
-
-class AdminUserDetailData(BaseModel):
-    user: dict[str, Any]
-    wallet: dict[str, Any]
-    recent_orders: list[dict[str, Any]]
-    recent_transactions: list[dict[str, Any]]
-    stats: dict[str, Any]
+class AdminCategoryCatalogListData(AdminPaginationData):
+    items: list[AdminCategoryCatalogItem]
 
 
 class AdminSystemQueueStat(BaseModel):
@@ -328,18 +290,6 @@ class AdminSystemRuntimeData(BaseModel):
     worker_queues: list[str] = Field(default_factory=list)
     image_poll_profile: list[dict[str, int]] = Field(default_factory=list)
     generation_concurrency: dict[str, int] = Field(default_factory=dict)
-
-
-class AdminPricingRuleItem(BaseModel):
-    pricing_rule_id: str
-    action: str
-    credits: int
-    description: str
-
-
-class AdminSystemPricingData(BaseModel):
-    items: list[AdminPricingRuleItem] = Field(default_factory=list)
-    total: int
 
 
 class AdminOperatorNoteMixin(BaseModel):
@@ -404,6 +354,31 @@ class AdminRulePackUpdateRequest(AdminOperatorNoteMixin):
 
 
 class AdminRulePackMutationRequest(AdminOperatorNoteMixin):
+    pass
+
+
+class AdminCategoryCatalogCreateRequest(AdminOperatorNoteMixin):
+    name: str
+    slug: str
+    sort_order: int = Field(default=100, ge=1, le=9999)
+    aliases: list[str] = Field(default_factory=list)
+    sample_keywords: list[str] = Field(default_factory=list)
+    notes: str | None = Field(default=None, max_length=1000)
+    is_featured: bool = False
+
+
+class AdminCategoryCatalogUpdateRequest(AdminOperatorNoteMixin):
+    name: str | None = None
+    slug: str | None = None
+    sort_order: int | None = Field(default=None, ge=1, le=9999)
+    aliases: list[str] | None = None
+    sample_keywords: list[str] | None = None
+    notes: str | None = Field(default=None, max_length=1000)
+    is_featured: bool | None = None
+    is_active: bool | None = None
+
+
+class AdminCategoryCatalogMutationRequest(AdminOperatorNoteMixin):
     pass
 
 

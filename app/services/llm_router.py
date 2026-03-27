@@ -11,9 +11,28 @@ from app.core.errors import AppError
 
 class LLMRouter:
     RETRYABLE_ERRORS = (httpx.TransportError,)
+    WHATI_CHAT_ROUTE = "whatai_chat"
+    WHATI_GEMINI_ROUTE = "whatai_gemini"
+    OPENROUTER_TEXT_ROUTE = "openrouter_text"
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+
+    def route_for_task(self, task: str) -> str:
+        mapping = {
+            "analysis": self.settings.llm_route_analysis,
+            "main_planner": self.settings.llm_route_main_planner,
+            "detail_planner": self.settings.llm_route_detail_planner,
+            "parameter": self.settings.llm_route_parameter_visual,
+            "form_rewrite": self.settings.llm_route_form_rewrite,
+            "text_review": self.settings.llm_route_text_review,
+            "text_presentation": self.settings.llm_route_text_presentation,
+            "fallback": self.WHATI_CHAT_ROUTE,
+        }
+        route = str(mapping.get(task) or "").strip().lower()
+        if route in {self.WHATI_CHAT_ROUTE, self.WHATI_GEMINI_ROUTE, self.OPENROUTER_TEXT_ROUTE}:
+            return route
+        return self.WHATI_CHAT_ROUTE
 
     def model_for_task(self, task: str) -> str:
         mapping = {
@@ -21,12 +40,33 @@ class LLMRouter:
             "main_planner": self.settings.llm_main_planner_model,
             "detail_planner": self.settings.llm_detail_planner_model,
             "parameter": self.settings.llm_parameter_model,
+            "form_rewrite": self.settings.openrouter_form_rewrite_model,
+            "text_review": self.settings.openrouter_text_review_model,
+            "text_presentation": self.settings.openrouter_text_presentation_model,
             "fallback": self.settings.llm_fallback_model,
         }
+        route = self.route_for_task(task)
+        if route == self.WHATI_GEMINI_ROUTE:
+            whatai_mapping = {
+                "analysis": self.settings.whatai_analysis_model,
+                "main_planner": self.settings.whatai_planner_model,
+                "detail_planner": self.settings.whatai_planner_model,
+                "parameter": self.settings.whatai_parameter_model,
+                "fallback": self.settings.whatai_chat_model,
+            }
+            return str(whatai_mapping.get(task) or self.settings.whatai_chat_model).strip()
+        if route == self.WHATI_CHAT_ROUTE:
+            return str(self.settings.whatai_chat_model).strip()
         return str(mapping.get(task) or self.settings.llm_fallback_model).strip()
 
-    def is_available(self) -> bool:
-        provider = self.settings.llm_provider
+    def provider_for_task(self, task: str) -> str:
+        route = self.route_for_task(task)
+        if route == self.OPENROUTER_TEXT_ROUTE:
+            return "openrouter"
+        return "whatai"
+
+    def is_available(self, task: str) -> bool:
+        provider = self.provider_for_task(task)
         if provider == "openrouter":
             return bool(self.settings.openrouter_api_key)
         return bool(self.settings.whatai_api_key)
@@ -41,7 +81,7 @@ class LLMRouter:
         model: str | None = None,
     ) -> dict[str, Any] | None:
         resolved_model = str(model or self.model_for_task(task)).strip()
-        if not resolved_model or not self.is_available():
+        if not resolved_model or not self.is_available(task):
             return None
 
         payload = {
@@ -50,12 +90,12 @@ class LLMRouter:
             "temperature": temperature,
             "response_format": {"type": "json_object"},
         }
-        response = self._post_chat_json(payload, error_key)
+        response = self._post_chat_json(payload, error_key, task=task)
         text = self._extract_text(response)
         return self._parse_json_object(text)
 
-    def _post_chat_json(self, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
-        provider = self.settings.llm_provider
+    def _post_chat_json(self, payload: dict[str, Any], error_key: str, *, task: str) -> dict[str, Any]:
+        provider = self.provider_for_task(task)
         model = str(payload.get("model") or "")
         if provider == "openrouter":
             return self._request_json_with_retry(
