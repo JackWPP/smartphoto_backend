@@ -25,6 +25,13 @@ from app.services.reference_images import LoadedReferenceImage
 
 logger = logging.getLogger(__name__)
 ALLOWED_VIEW_SLOTS = ("front", "angle45", "side", "extra")
+ALLOWED_EXTRA_IMAGE_KINDS = (
+    "detail_closeup",
+    "water_tank",
+    "filter_structure",
+    "size_in_hand",
+    "use_scene_real",
+)
 DETAIL_STORY_BRIEF_KEYS = (
     "trust_overview",
     "mechanism",
@@ -39,6 +46,9 @@ ANALYSIS_PROMPT_VERSION = "analysis_v3_prompt_first"
 MAIN_PLANNER_PROMPT_VERSION = "main_planner_v3_prompt_first"
 DETAIL_PLANNER_PROMPT_VERSION = "detail_planner_v3_prompt_first"
 PARAMETER_PROMPT_VERSION = "parameter_v2_prompt_first"
+PARAMETER_COMPLETION_PROMPT_VERSION = "parameter_completion_v1"
+MAIN_COPY_DESIGN_PROMPT_VERSION = "main_copy_design_v1"
+DETAIL_COPY_REVIEW_PROMPT_VERSION = "detail_copy_review_v1"
 
 
 def _sanitize_planner_freeform_text(value: Any) -> str:
@@ -129,8 +139,12 @@ class WhataiClient:
                         "category_candidates 至少返回 3 个候选项，每项包含 category,confidence,reason，并按置信度排序。"
                         "category_candidates 必须优先从给定的全局品类库中选择，只有完全无法归类时才允许使用“其他”。"
                         "不要把具体家电、个护、宠物、家具产品泛化成“家居用品”。"
-                        "supplement_image_recommendations 每项必须包含 slot_type,label,reason,priority。"
+                        "supplement_image_recommendations 每项必须包含 slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption。"
                         "slot_type 只能是 front,angle45,side,extra。priority 只能输出 1-10 的整数，不允许输出 high/medium/low。"
+                        "如果 slot_type=extra，可额外输出 image_kind，且只能是 detail_closeup,water_tank,filter_structure,size_in_hand,use_scene_real 之一。"
+                        "补图建议的重点是告诉用户还需要补上传什么图片，不要主要输出抽象拍摄技巧。"
+                        "upload_goal 要描述补这张图是为了什么；must_show 要写清楚希望图里出现的真实结构元素；framing_hint 要说明构图建议；example_caption 给一句短标题示例。"
+                        "建议数量控制在 2-4 条，优先覆盖当前缺失的视角和关键结构信息。"
                         "missing_views 和 detected_view_slots 只能使用 front,angle45,side,extra 这 4 个槽位。"
                         "reference_summary 至少包含 shape,colors,materials,structures,must_keep。"
                         "如果某个候选品类置信度低，请在 reason 中明确指出不确定原因。"
@@ -272,6 +286,7 @@ class WhataiClient:
         style_grid: LoadedReferenceImage | None,
         planner_instruction: str | None,
         analysis_snapshot: dict[str, Any],
+        parameter_snapshot: dict[str, Any],
     ) -> dict[str, Any]:
         if not self.llm_router.is_available("detail_planner"):
             return {}
@@ -291,6 +306,7 @@ class WhataiClient:
                     "Visible copy should be concise and suitable for ecommerce detail page panels. "
                     "Do not make all panels feel like horizontal main images; they must form a narrative sequence. "
                     f"Confirmed copy: {json.dumps(confirmed_copy, ensure_ascii=False)}. "
+                    f"Parameter snapshot: {json.dumps(parameter_snapshot or {}, ensure_ascii=False)}. "
                     f"Product manifest: {json.dumps(product_manifest, ensure_ascii=False)}. "
                     f"Style manifest: {json.dumps(style_manifest, ensure_ascii=False)}. "
                     f"Reference summary: {json.dumps((analysis_snapshot or {}).get('reference_summary') or {}, ensure_ascii=False)}. "
@@ -441,6 +457,198 @@ class WhataiClient:
         snapshot = self._merge_parameter_snapshot(fallback, parsed) if isinstance(parsed, dict) else fallback
         snapshot.update(outcome["meta"])
         return snapshot
+
+    def complete_parameters(
+        self,
+        *,
+        parameter_snapshot: dict[str, Any],
+        analysis_snapshot: dict[str, Any],
+        confirmed_copy: dict[str, Any],
+        active_platform_id: str | None,
+        completion_instruction: str | None = None,
+    ) -> dict[str, Any]:
+        base_snapshot = self._normalize_completed_parameter_snapshot(parameter_snapshot)
+        fallback = {
+            **base_snapshot,
+            "completion_status": "fallback",
+            "completion_source": "fallback",
+            "inferred_core_selling_points": [],
+            "inferred_key_parameters": [],
+            "inferred_advantages": [],
+            "confidence_notes": ["未启用参数补全模型，保留首轮提取结果。"],
+        }
+        if not self.llm_router.is_available("parameter_completion"):
+            fallback.update(
+                {
+                    "provider": self.llm_router.provider_for_task("parameter_completion"),
+                    "model": self.llm_router.model_for_task("parameter_completion"),
+                    "prompt_version": PARAMETER_COMPLETION_PROMPT_VERSION,
+                    "repair_round": 0,
+                    "source": "fallback",
+                }
+            )
+            return fallback
+
+        content = [
+            {
+                "type": "text",
+                "text": (
+                    "你是 SmartPhoto 的 Step3 参数补全 Agent。"
+                    "你不会推翻首轮结构化提取，只负责补全与当前商品强相关的参数、卖点和优势。"
+                    "请只返回 JSON 对象。"
+                    "输出字段必须包含：completion_status,completion_source,inferred_core_selling_points,inferred_key_parameters,inferred_advantages,confidence_notes。"
+                    "completion_status 只能是 completed 或 no_change。completion_source 固定为 llm。"
+                    "inferred_core_selling_points 和 inferred_advantages 必须是短句数组。"
+                    "inferred_key_parameters 必须是数组，每项都包含 key,label,value,unit。"
+                    "补全必须严格基于已识别到的商品结构、analysis 与首轮 parameter_snapshot，不能凭空杜撰危险事实。"
+                    "若缺乏依据，请返回 no_change，并在 confidence_notes 说明原因。"
+                    f"当前平台：{active_platform_id or 'temu'}。"
+                    f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
+                    f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
+                    f"当前 parameter_snapshot：{json.dumps(base_snapshot, ensure_ascii=False)}。"
+                    f"额外补全指令：{completion_instruction or '无'}。"
+                ),
+            }
+        ]
+        outcome = self._run_structured_task(
+            task="parameter_completion",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.2,
+            error_key="upstream_llm_error",
+            prompt_version=PARAMETER_COMPLETION_PROMPT_VERSION,
+            validator=self._validate_parameter_completion_result,
+            fallback_result=fallback,
+        )
+        parsed = outcome["result"]
+        snapshot = (
+            self._merge_parameter_completion_snapshot(base_snapshot, parsed)
+            if isinstance(parsed, dict)
+            else fallback
+        )
+        snapshot.update(outcome["meta"])
+        return snapshot
+
+    def design_main_copy_blocks(
+        self,
+        *,
+        confirmed_copy: dict[str, Any],
+        analysis_snapshot: dict[str, Any],
+        strategy_asset_plan: list[dict[str, Any]],
+        prompt_plan: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if not self.llm_router.is_available("main_copy_design"):
+            return {}
+        content = [
+            {
+                "type": "text",
+                "text": (
+                    "你是 SmartPhoto 的主图文字设计 Agent。"
+                    "你的职责是为每个主图槽位补充适合上图的短标题、短副文案和参数标签。"
+                    "只能返回 JSON 对象，顶层键必须是 copy_design_plan，值为数组。"
+                    "每项必须包含：slot_id,headline,supporting,proof_lines,matrix_lines,text_density,visual_emphasis,global_consistency_note。"
+                    "headline/supporting 必须短、能上图，不要长段文字。"
+                    "proof_lines 和 matrix_lines 必须是短标签数组。"
+                    "global_consistency_note 需要指出本商品哪些结构细节绝对不能画错，尤其适用于局部图。"
+                    "不要改写商品事实，不要替代视觉识别。"
+                    f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
+                    f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
+                    f"asset_plan：{json.dumps(strategy_asset_plan or [], ensure_ascii=False)}。"
+                    f"prompt_plan：{json.dumps(prompt_plan or [], ensure_ascii=False)}。"
+                ),
+            }
+        ]
+        outcome = self._run_structured_task(
+            task="main_copy_design",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.3,
+            error_key="upstream_llm_error",
+            prompt_version=MAIN_COPY_DESIGN_PROMPT_VERSION,
+            validator=lambda parsed: self._validate_main_copy_design_result(parsed, strategy_asset_plan),
+            fallback_result={},
+        )
+        parsed = outcome["result"]
+        if not isinstance(parsed, dict):
+            return {}
+        items = parsed.get("copy_design_plan")
+        if not isinstance(items, list):
+            return {}
+        by_slot: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            slot_id = str(item.get("slot_id") or "").strip()
+            if not slot_id:
+                continue
+            by_slot[slot_id] = {
+                "headline": repair_broken_text(item.get("headline")),
+                "supporting": repair_broken_text(item.get("supporting")),
+                "proof_lines": self._normalize_string_list(item.get("proof_lines"), []),
+                "matrix_lines": self._normalize_string_list(item.get("matrix_lines"), []),
+                "text_density": repair_broken_text(item.get("text_density")),
+                "visual_emphasis": repair_broken_text(item.get("visual_emphasis")),
+                "global_consistency_note": repair_broken_text(item.get("global_consistency_note")),
+                "_meta": outcome["meta"],
+            }
+        return by_slot
+
+    def review_detail_panel_copy(
+        self,
+        *,
+        confirmed_copy: dict[str, Any],
+        analysis_snapshot: dict[str, Any],
+        parameter_snapshot: dict[str, Any],
+        panel_plan: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        if not self.llm_router.is_available("detail_copy_review"):
+            return {}
+        content = [
+            {
+                "type": "text",
+                "text": (
+                    "你是 SmartPhoto 的详情页文案 reviewer。"
+                    "你不会重做 panel 规划，只负责补充每个 panel 的文字重点和真实性说明。"
+                    "请返回 JSON 对象，顶层键必须是 panel_review_plan，值为数组。"
+                    "每项必须包含：panel_id,copy_focus,panel_goal,visual_truth_mode,origin_note。"
+                    "visual_truth_mode 只能是 faithful_closeup,mechanism_illustration,scene_reconstruction,parameter_board。"
+                    "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释。"
+                    "不要让 8 个 panel 的 copy_focus 高度重复。"
+                    f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
+                    f"parameter_snapshot：{json.dumps(parameter_snapshot or {}, ensure_ascii=False)}。"
+                    f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
+                    f"panel_plan：{json.dumps(panel_plan or [], ensure_ascii=False)}。"
+                ),
+            }
+        ]
+        outcome = self._run_structured_task(
+            task="detail_copy_review",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.2,
+            error_key="upstream_llm_error",
+            prompt_version=DETAIL_COPY_REVIEW_PROMPT_VERSION,
+            validator=lambda parsed: self._validate_detail_copy_review_result(parsed, panel_plan),
+            fallback_result={},
+        )
+        parsed = outcome["result"]
+        if not isinstance(parsed, dict):
+            return {}
+        items = parsed.get("panel_review_plan")
+        if not isinstance(items, list):
+            return {}
+        by_panel: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            panel_id = str(item.get("panel_id") or "").strip()
+            if not panel_id:
+                continue
+            by_panel[panel_id] = {
+                "copy_focus": repair_broken_text(item.get("copy_focus")),
+                "panel_goal": repair_broken_text(item.get("panel_goal")),
+                "visual_truth_mode": repair_broken_text(item.get("visual_truth_mode")),
+                "origin_note": repair_broken_text(item.get("origin_note")),
+                "_meta": outcome["meta"],
+            }
+        return by_panel
 
     def regenerate_copy(
         self,
@@ -1166,14 +1374,18 @@ class WhataiClient:
                 slot_type = str(item.get("slot_type") or "").strip()
                 if slot_type not in ALLOWED_VIEW_SLOTS:
                     errors.append(self._validation_error(f"supplement_image_recommendations[{index}].slot_type", "enum", f"slot_type 只能使用 {ALLOWED_VIEW_SLOTS}", slot_type))
+                image_kind = str(item.get("image_kind") or "").strip()
+                if slot_type == "extra" and image_kind and image_kind not in ALLOWED_EXTRA_IMAGE_KINDS:
+                    errors.append(self._validation_error(f"supplement_image_recommendations[{index}].image_kind", "enum", f"image_kind 只能使用 {ALLOWED_EXTRA_IMAGE_KINDS}", image_kind))
                 priority = item.get("priority")
                 if not isinstance(priority, int):
                     try:
                         int(str(priority).strip())
                     except (TypeError, ValueError):
                         errors.append(self._validation_error(f"supplement_image_recommendations[{index}].priority", "integer", "priority 必须是 1-10 的整数", priority))
-                if not repair_broken_text(item.get("reason")):
-                    errors.append(self._validation_error(f"supplement_image_recommendations[{index}].reason", "required", "reason 不能为空", item.get("reason")))
+                for key in ("reason", "upload_goal", "must_show", "framing_hint", "example_caption"):
+                    if not repair_broken_text(item.get(key)):
+                        errors.append(self._validation_error(f"supplement_image_recommendations[{index}].{key}", "required", f"{key} 不能为空", item.get(key)))
         return errors
 
     def _validate_main_planner_result(
@@ -1307,6 +1519,76 @@ class WhataiClient:
                     errors.append(self._validation_error(f"key_parameters[{index}]", "split_fields", "label 和 value 不能重复，需拆开参数名与参数值", item))
         return errors
 
+    def _validate_parameter_completion_result(self, parsed: Any) -> list[dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return [self._validation_error("$", "json_object", "parameter completion 必须返回 JSON 对象", parsed)]
+        errors: list[dict[str, Any]] = []
+        status = str(parsed.get("completion_status") or "").strip().lower()
+        if status not in {"completed", "no_change"}:
+            errors.append(self._validation_error("completion_status", "enum", "completion_status 只能是 completed 或 no_change", parsed.get("completion_status")))
+        for key in ("inferred_core_selling_points", "inferred_advantages", "confidence_notes"):
+            value = parsed.get(key)
+            if not isinstance(value, list):
+                errors.append(self._validation_error(key, "list", f"{key} 必须是数组", value))
+        value = parsed.get("inferred_key_parameters")
+        if not isinstance(value, list):
+            errors.append(self._validation_error("inferred_key_parameters", "list", "inferred_key_parameters 必须是数组", value))
+        else:
+            for index, item in enumerate(value):
+                if not isinstance(item, dict):
+                    errors.append(self._validation_error(f"inferred_key_parameters[{index}]", "object", "参数项必须是对象", item))
+        return errors
+
+    def _validate_main_copy_design_result(
+        self,
+        parsed: Any,
+        asset_plan: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return [self._validation_error("$", "json_object", "main copy design 必须返回 JSON 对象", parsed)]
+        items = parsed.get("copy_design_plan")
+        if not isinstance(items, list):
+            return [self._validation_error("copy_design_plan", "list", "copy_design_plan 必须是数组", items)]
+        valid_slot_ids = {str(item.get("slot_id") or "") for item in asset_plan if str(item.get("slot_id") or "")}
+        errors: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                errors.append(self._validation_error(f"copy_design_plan[{index}]", "object", "copy design 项必须是对象", item))
+                continue
+            slot_id = str(item.get("slot_id") or "").strip()
+            if slot_id not in valid_slot_ids:
+                errors.append(self._validation_error(f"copy_design_plan[{index}].slot_id", "enum", "slot_id 必须命中当前主图槽位", slot_id))
+            for key in ("proof_lines", "matrix_lines"):
+                value = item.get(key)
+                if value is not None and not isinstance(value, list):
+                    errors.append(self._validation_error(f"copy_design_plan[{index}].{key}", "list", f"{key} 必须是数组", value))
+        return errors
+
+    def _validate_detail_copy_review_result(
+        self,
+        parsed: Any,
+        panel_plan: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return [self._validation_error("$", "json_object", "detail copy review 必须返回 JSON 对象", parsed)]
+        items = parsed.get("panel_review_plan")
+        if not isinstance(items, list):
+            return [self._validation_error("panel_review_plan", "list", "panel_review_plan 必须是数组", items)]
+        valid_panel_ids = {str(item.get("panel_id") or "") for item in panel_plan if str(item.get("panel_id") or "")}
+        allowed_modes = {"faithful_closeup", "mechanism_illustration", "scene_reconstruction", "parameter_board"}
+        errors: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                errors.append(self._validation_error(f"panel_review_plan[{index}]", "object", "panel review 项必须是对象", item))
+                continue
+            panel_id = str(item.get("panel_id") or "").strip()
+            if panel_id not in valid_panel_ids:
+                errors.append(self._validation_error(f"panel_review_plan[{index}].panel_id", "enum", "panel_id 必须命中当前 panel", panel_id))
+            mode = str(item.get("visual_truth_mode") or "").strip()
+            if mode and mode not in allowed_modes:
+                errors.append(self._validation_error(f"panel_review_plan[{index}].visual_truth_mode", "enum", "visual_truth_mode 非法", mode))
+        return errors
+
     def _merge_analysis_result(
         self,
         fallback: dict[str, Any],
@@ -1394,6 +1676,8 @@ class WhataiClient:
             parsed.get("supplement_image_recommendations"),
             merged["missing_views"],
             fallback.get("supplement_image_recommendations", []),
+            recognized_product=merged["recognized_product"],
+            reference_summary=merged["reference_summary"],
         )
         if not merged["suggestions"]:
             merged["suggestions"] = [
@@ -1536,16 +1820,24 @@ class WhataiClient:
         value: Any,
         missing_views: list[str],
         fallback: list[Any],
+        *,
+        recognized_product: dict[str, Any],
+        reference_summary: dict[str, Any],
     ) -> list[dict[str, Any]]:
         parsed = self._decode_json_like(value)
         items = parsed if isinstance(parsed, list) else fallback
         normalized: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
+        category = repair_broken_text(recognized_product.get("category"))
         for item in items:
             if not isinstance(item, dict):
                 continue
             slot_type = str(item.get("slot_type") or "").strip()
-            if slot_type not in ALLOWED_VIEW_SLOTS or slot_type in seen:
+            image_kind = str(item.get("image_kind") or "").strip() if slot_type == "extra" else ""
+            if image_kind and image_kind not in ALLOWED_EXTRA_IMAGE_KINDS:
+                image_kind = ""
+            signature = (slot_type, image_kind)
+            if slot_type not in ALLOWED_VIEW_SLOTS or signature in seen:
                 continue
             normalized.append(
                 {
@@ -1556,22 +1848,52 @@ class WhataiClient:
                         item.get("priority"),
                         default=len(normalized) + 1,
                     ),
+                    "image_kind": image_kind or None,
+                    "upload_goal": repair_broken_text(item.get("upload_goal")) or self._fallback_upload_goal(slot_type, image_kind=image_kind, category=category),
+                    "must_show": repair_broken_text(item.get("must_show")) or self._fallback_must_show(slot_type, image_kind=image_kind, reference_summary=reference_summary),
+                    "framing_hint": repair_broken_text(item.get("framing_hint")) or self._fallback_framing_hint(slot_type, image_kind=image_kind),
+                    "example_caption": repair_broken_text(item.get("example_caption")) or self._fallback_example_caption(slot_type, image_kind=image_kind),
                 }
             )
-            seen.add(slot_type)
+            seen.add(signature)
         for index, slot_type in enumerate(missing_views, start=len(normalized) + 1):
-            if slot_type in seen:
+            signature = (slot_type, "")
+            if signature in seen:
                 continue
             normalized.append(
                 {
                     "slot_type": slot_type,
                     "label": self._slot_label(slot_type),
-                    "reason": f"当前缺少 {self._slot_label(slot_type)}，建议补充以提升识别和生成稳定性。",
+                    "reason": f"当前缺少 {self._slot_label(slot_type)}，建议补传这一视角以提升识别和生成稳定性。",
                     "priority": index,
+                    "image_kind": None,
+                    "upload_goal": self._fallback_upload_goal(slot_type, image_kind="", category=category),
+                    "must_show": self._fallback_must_show(slot_type, image_kind="", reference_summary=reference_summary),
+                    "framing_hint": self._fallback_framing_hint(slot_type, image_kind=""),
+                    "example_caption": self._fallback_example_caption(slot_type, image_kind=""),
                 }
             )
-            seen.add(slot_type)
-        return normalized
+            seen.add(signature)
+
+        for image_kind in self._recommended_extra_image_kinds(category):
+            signature = ("extra", image_kind)
+            if signature in seen or len(normalized) >= 4:
+                continue
+            normalized.append(
+                {
+                    "slot_type": "extra",
+                    "label": self._extra_image_kind_label(image_kind),
+                    "reason": f"建议补传 {self._extra_image_kind_label(image_kind)}，帮助后续卖点图和详情页更准确表达。",
+                    "priority": len(normalized) + 1,
+                    "image_kind": image_kind,
+                    "upload_goal": self._fallback_upload_goal("extra", image_kind=image_kind, category=category),
+                    "must_show": self._fallback_must_show("extra", image_kind=image_kind, reference_summary=reference_summary),
+                    "framing_hint": self._fallback_framing_hint("extra", image_kind=image_kind),
+                    "example_caption": self._fallback_example_caption("extra", image_kind=image_kind),
+                }
+            )
+            seen.add(signature)
+        return normalized[:4]
 
     def _normalize_recommendation_priority(self, value: Any, *, default: int) -> int:
         if value is None or value == "":
@@ -1585,6 +1907,87 @@ class WhataiClient:
         if text.isdigit():
             return max(1, min(int(text), 10))
         return max(1, min(default, 10))
+
+    def _recommended_extra_image_kinds(self, category: str) -> list[str]:
+        normalized = category.strip()
+        if normalized in {"除湿机", "加湿器"}:
+            return ["water_tank", "detail_closeup"]
+        if normalized in {"空气净化器", "净水器", "宠物饮水机"}:
+            return ["filter_structure", "detail_closeup"]
+        if normalized in {"小风扇", "取暖器", "吸尘器", "扫地机", "洗地机"}:
+            return ["detail_closeup", "use_scene_real"]
+        return ["detail_closeup"]
+
+    def _extra_image_kind_label(self, image_kind: str) -> str:
+        return {
+            "detail_closeup": "局部细节近景",
+            "water_tank": "水箱/水位结构图",
+            "filter_structure": "滤芯/内部结构图",
+            "size_in_hand": "尺寸手持对比图",
+            "use_scene_real": "真实使用场景图",
+        }.get(image_kind, "补充结构图")
+
+    def _fallback_upload_goal(self, slot_type: str, *, image_kind: str, category: str) -> str:
+        if slot_type == "front":
+            return "补齐商品正面完整外观，帮助识别主体轮廓和主视觉结构。"
+        if slot_type == "angle45":
+            return "补齐 45 度角信息，帮助模型理解立体结构和厚薄关系。"
+        if slot_type == "side":
+            return "补齐侧面结构，帮助后续局部图和详情页避免比例出错。"
+        mapping = {
+            "detail_closeup": "补齐局部做工和材质细节，帮助卖点图、细节图更贴近真实商品。",
+            "water_tank": f"补齐 {category or '商品'} 的水箱/容器结构，帮助后续参数和细节表达更准确。",
+            "filter_structure": f"补齐 {category or '商品'} 的滤芯或核心结构信息，帮助机制图和细节图不跑偏。",
+            "size_in_hand": "补齐尺寸感和真实比例参照，帮助场景图和详情页更可信。",
+            "use_scene_real": "补齐真实使用环境，帮助主图场景和详情页场景不空泛。",
+        }
+        return mapping.get(image_kind, "补齐额外结构信息，帮助生成链路更稳定。")
+
+    def _fallback_must_show(self, slot_type: str, *, image_kind: str, reference_summary: dict[str, Any]) -> str:
+        structures = repair_broken_text((reference_summary or {}).get("structures"))
+        shape = repair_broken_text((reference_summary or {}).get("shape"))
+        if slot_type in {"front", "angle45", "side"}:
+            return structures or shape or "商品主体轮廓、主要开孔、按钮、边角和装配关系。"
+        mapping = {
+            "detail_closeup": "材质纹理、连接缝、边角做工和关键功能部件。",
+            "water_tank": "水箱轮廓、水位窗、开合结构和与主机的连接关系。",
+            "filter_structure": "滤芯位置、进出风结构、可拆卸部件和真实层级关系。",
+            "size_in_hand": "商品主体与手部或常见物体的比例关系。",
+            "use_scene_real": "商品在真实空间中的摆放方式和使用接触关系。",
+        }
+        return mapping.get(image_kind, structures or "商品真实结构细节。")
+
+    def _fallback_framing_hint(self, slot_type: str, *, image_kind: str) -> str:
+        if slot_type == "front":
+            return "商品完整入镜，尽量居中，避免遮挡和过强透视。"
+        if slot_type == "angle45":
+            return "保持 45 度左右斜角，完整拍到顶部、正面和一侧。"
+        if slot_type == "side":
+            return "以侧面为主，尽量让厚度、侧开孔和连接结构清晰可见。"
+        mapping = {
+            "detail_closeup": "中近景或特写，只放大一个真实细节区域，不要虚构内部结构。",
+            "water_tank": "优先拍容器区域的中近景，保证边界、刻度或开合处清晰。",
+            "filter_structure": "如果能拆开就拍真实拆解结构；不能拆开时拍可见相关区域近景。",
+            "size_in_hand": "以手持或常见物体作参照，主体和参照物都要清晰。",
+            "use_scene_real": "在真实使用空间中拍摄，商品本体仍需清晰占主导。",
+        }
+        return mapping.get(image_kind, "优先清晰、真实、无遮挡，不做过度滤镜。")
+
+    def _fallback_example_caption(self, slot_type: str, *, image_kind: str) -> str:
+        if slot_type == "front":
+            return "正面外观一图看清"
+        if slot_type == "angle45":
+            return "45°结构更清楚"
+        if slot_type == "side":
+            return "侧面结构补全"
+        mapping = {
+            "detail_closeup": "局部做工细节补全",
+            "water_tank": "水箱结构补全",
+            "filter_structure": "核心结构补全",
+            "size_in_hand": "真实尺寸更直观",
+            "use_scene_real": "真实场景更好理解",
+        }
+        return mapping.get(image_kind, "补充结构图")
 
     def _decode_json_like(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -1644,8 +2047,13 @@ class WhataiClient:
                 {
                     "slot_type": slot_type,
                     "label": self._slot_label(slot_type),
-                    "reason": f"建议补充 {self._slot_label(slot_type)} 以提升 {platform_hint} 平台适配效果。",
+                    "reason": f"建议补传 {self._slot_label(slot_type)} 以提升 {platform_hint} 平台适配效果。",
                     "priority": index + 1,
+                    "image_kind": None,
+                    "upload_goal": self._fallback_upload_goal(slot_type, image_kind="", category="其他"),
+                    "must_show": self._fallback_must_show(slot_type, image_kind="", reference_summary={}),
+                    "framing_hint": self._fallback_framing_hint(slot_type, image_kind=""),
+                    "example_caption": self._fallback_example_caption(slot_type, image_kind=""),
                 }
                 for index, slot_type in enumerate(missing_views[:3])
             ],
@@ -1657,21 +2065,12 @@ class WhataiClient:
                 ],
             ],
             "copy_draft": {
-                "headline": "高效体验，稳定品质",
-                "selling_points": "核心功能突出｜视觉清爽｜易于理解",
-                "usage_scenes": "客厅、办公、卧室",
-                "specs": "参数A 100｜参数B 200",
+                "headline": "",
+                "selling_points": "",
+                "usage_scenes": "",
+                "specs": "",
             },
-            "key_parameters": [
-                {
-                    "key": "param_a",
-                    "label": "参数A",
-                    "value": "100",
-                    "unit": "unit",
-                    "confidence": 0.7,
-                    "editable": True,
-                }
-            ],
+            "key_parameters": [],
             "suggested_styles": ["现代简约", "科技感"],
             "reference_summary": {
                 "shape": f"当前参考图包含 {slot_hint} 视角，建议保持商品整体轮廓、比例和边角特征一致",
@@ -1717,14 +2116,17 @@ class WhataiClient:
             "hero_scene": confirmed_copy.get("usage_scenes") or "客厅净化",
             "core_selling_points": selling_points[:3] or ["核心卖点待补充"],
             "key_parameters": key_parameters,
-            "product_advantages": [
-                "适合电商主图提炼的短优势表达",
-                f"平台 {active_platform_id or 'temu'} 可继续做定向调优",
-            ],
-            "feature_highlights": [
-                "参数信息可人工确认后进入策略生成",
-                "不相关附件会被拦截并返回解释",
-            ],
+            "product_advantages": self._normalize_string_list(
+                confirmed_copy.get("product_advantages"),
+                [],
+            )[:6],
+            "feature_highlights": [],
+            "completion_status": "pending",
+            "completion_source": "extract_only",
+            "inferred_core_selling_points": [],
+            "inferred_key_parameters": [],
+            "inferred_advantages": [],
+            "confidence_notes": [],
             "source_summary": [
                 {"source_type": "image", "count": len(image_attachments)},
                 {"source_type": "file", "count": len(file_attachments)},
@@ -1753,6 +2155,24 @@ class WhataiClient:
             parsed.get("feature_highlights"),
             fallback.get("feature_highlights", []),
         )
+        snapshot["completion_status"] = str(parsed.get("completion_status") or fallback.get("completion_status") or "pending").strip() or "pending"
+        snapshot["completion_source"] = str(parsed.get("completion_source") or fallback.get("completion_source") or "extract_only").strip() or "extract_only"
+        snapshot["inferred_core_selling_points"] = self._normalize_string_list(
+            parsed.get("inferred_core_selling_points"),
+            fallback.get("inferred_core_selling_points", []),
+        )
+        snapshot["inferred_key_parameters"] = self._normalize_key_parameters(
+            parsed.get("inferred_key_parameters"),
+            fallback.get("inferred_key_parameters", []),
+        )
+        snapshot["inferred_advantages"] = self._normalize_string_list(
+            parsed.get("inferred_advantages"),
+            fallback.get("inferred_advantages", []),
+        )
+        snapshot["confidence_notes"] = self._normalize_string_list(
+            parsed.get("confidence_notes"),
+            fallback.get("confidence_notes", []),
+        )
         source_summary = parsed.get("source_summary")
         if isinstance(source_summary, list):
             snapshot["source_summary"] = [
@@ -1765,6 +2185,38 @@ class WhataiClient:
         if snapshot["relevance_status"] == "invalid" and not snapshot["rejection_reason"]:
             snapshot["rejection_reason"] = "请上传与当前产品直接相关的说明书、参数图或产品附件。"
         return snapshot
+
+    def _normalize_completed_parameter_snapshot(self, snapshot: dict[str, Any] | None) -> dict[str, Any]:
+        base = self._merge_parameter_snapshot(self._fake_parameter_snapshot({}, None, [], []), snapshot or {})
+        base["completion_status"] = str((snapshot or {}).get("completion_status") or base.get("completion_status") or "pending")
+        base["completion_source"] = str((snapshot or {}).get("completion_source") or base.get("completion_source") or "extract_only")
+        return base
+
+    def _merge_parameter_completion_snapshot(
+        self,
+        base_snapshot: dict[str, Any],
+        parsed: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = {**base_snapshot}
+        merged["completion_status"] = str(parsed.get("completion_status") or "completed").strip() or "completed"
+        merged["completion_source"] = str(parsed.get("completion_source") or "llm").strip() or "llm"
+        merged["inferred_core_selling_points"] = self._normalize_string_list(
+            parsed.get("inferred_core_selling_points"),
+            base_snapshot.get("inferred_core_selling_points", []),
+        )
+        merged["inferred_key_parameters"] = self._normalize_key_parameters(
+            parsed.get("inferred_key_parameters"),
+            base_snapshot.get("inferred_key_parameters", []),
+        )
+        merged["inferred_advantages"] = self._normalize_string_list(
+            parsed.get("inferred_advantages"),
+            base_snapshot.get("inferred_advantages", []),
+        )
+        merged["confidence_notes"] = self._normalize_string_list(
+            parsed.get("confidence_notes"),
+            base_snapshot.get("confidence_notes", []),
+        )
+        return merged
 
     def _fake_image(self, prompt: str) -> bytes:
         img = Image.new("RGB", (1024, 1024), color=(245, 245, 245))

@@ -495,6 +495,10 @@ class ParameterSnapshotData(BaseModel):
     overwrite_mode: str = Field(default="replace_all", description="参数结果映射到 copy 的默认策略。")
 
 
+class ParameterCompletionRequest(BaseModel):
+    completion_instruction: str | None = Field(default=None, description="可选的二次补全指令。")
+
+
 class ParameterSnapshotUpdateRequest(BaseModel):
     relevance_status: str = Field(default="invalid", description="参数附件与当前商品的相关性状态。")
     rejection_reason: str = Field(default="", description="当相关性无效时的解释说明。")

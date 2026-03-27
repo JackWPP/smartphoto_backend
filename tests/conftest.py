@@ -29,7 +29,7 @@ if TEST_DB_PATH.exists():
 if ADMIN_TEST_DB_PATH.exists():
     ADMIN_TEST_DB_PATH.unlink()
 if TEST_STORAGE.exists():
-    shutil.rmtree(TEST_STORAGE)
+    shutil.rmtree(TEST_STORAGE, ignore_errors=True)
 TMP_ROOT.mkdir(parents=True, exist_ok=True)
 TEST_STORAGE.mkdir(parents=True, exist_ok=True)
 
@@ -54,7 +54,7 @@ def setup_database():
     if ADMIN_TEST_DB_PATH.exists():
         ADMIN_TEST_DB_PATH.unlink()
     if TEST_STORAGE.exists():
-        shutil.rmtree(TEST_STORAGE)
+        shutil.rmtree(TEST_STORAGE, ignore_errors=True)
 
     engine = create_engine(TEST_DB, connect_args={"check_same_thread": False})
     testing_session_local = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
@@ -79,7 +79,7 @@ def setup_database():
     if ADMIN_TEST_DB_PATH.exists():
         ADMIN_TEST_DB_PATH.unlink()
     if TEST_STORAGE.exists():
-        shutil.rmtree(TEST_STORAGE)
+        shutil.rmtree(TEST_STORAGE, ignore_errors=True)
 
 
 @pytest.fixture
@@ -100,6 +100,6 @@ def reset_test_state(setup_database):
             db.execute(table.delete())
         db.commit()
     if TEST_STORAGE.exists():
-        shutil.rmtree(TEST_STORAGE)
+        shutil.rmtree(TEST_STORAGE, ignore_errors=True)
     TEST_STORAGE.mkdir(parents=True, exist_ok=True)
     yield

@@ -284,3 +284,15 @@
   - `analysis_snapshot / strategy_preview / detail_strategy_preview / parameter_snapshot` 补充 `provider/model/prompt_version/repair_round/source` 调试元数据
   - 新增全局品类库 `category_catalogs`、后台管理接口 `/api/admin/v1/category-catalog*` 与后台页面，Step 2 analysis prompt 改为显式消费启用品类库
   - fallback 默认类目继续保持 `其他`，不再把 `家居用品` 当成弱默认兜底；analysis 输出非法 `priority/slot_type/category` 时优先 repair，不再直接打挂 worker
+- 2026-03-27 M19:
+  - Step 2 `supplement_image_recommendations` 升级为“建议补传什么图片”的结构化清单，新增 `upload_goal/must_show/framing_hint/example_caption/image_kind`
+  - Step 3 新增同步二次补全接口 `POST /api/v2/sessions/{session_id}/parameters/complete`，参数链路改为 `extract -> complete` 两段式；`parameter_snapshot` 新增 `completion_status/completion_source/inferred_* / confidence_notes`
+  - 主图策略预览新增文本侧 `main copy design agent`，为每个槽位补充 `headline/supporting/proof_lines/matrix_lines/text_density/visual_emphasis`，并引入 `global_consistency_note` 约束局部图不得杜撰结构
+  - 详情页策略预览新增文本侧 `detail copy reviewer agent`，`panel_plan` 与结果补充 `visual_truth_mode/origin_note`，用于区分真实局部图与机制示意图
+  - 详情页 worker 事件流补充 `detail_strategy_ready/detail_panel_render_started/detail_panel_render_succeeded/detail_stitched_ready`，后台 runtime 卡片单独暴露 detail 队列运行态
+  - `SmartPhoto/dev2` 前端同步适配：AnalyzeStep 直接消费后端补图建议，UploadStep 展示补传卡片，GenerateStep 顺序调用 `extract -> complete`，详情页确认/结果页展示 `panel_goal/copy_focus/narrative_section/visual_truth_mode/origin_note`
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、OpenAPI 导出与 Step2/Step3/详情页相关回归测试
+- 2026-03-27 M20:
+  - 不再使用 `xiaomi/mimo` 作为默认 OpenRouter 文本模型；文本辅助默认收口为 `deepseek + minimax`
+  - 为避免额外时延与过度设计，`llm_route_main_copy_design` 与 `llm_route_detail_copy_review` 默认改为 `disabled`
+  - 视觉主链模型不因这次文本 Agent 收口而变更；Step 3 二次补全仍保留为唯一默认开启的 OpenRouter 文本链路

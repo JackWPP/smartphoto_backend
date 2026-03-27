@@ -32,11 +32,17 @@ def merge_parameter_snapshot_into_copy(
 def parameter_snapshot_to_copy_fields(parameter_snapshot: dict[str, Any] | None) -> dict[str, Any]:
     snapshot = parameter_snapshot or {}
     key_parameters = snapshot.get("key_parameters") if isinstance(snapshot.get("key_parameters"), list) else []
+    inferred_key_parameters = snapshot.get("inferred_key_parameters") if isinstance(snapshot.get("inferred_key_parameters"), list) else []
+    merged_key_parameters = key_parameters + [item for item in inferred_key_parameters if item not in key_parameters]
+    core_selling_points = normalize_string_list(snapshot.get("core_selling_points"))
+    inferred_core_selling_points = normalize_string_list(snapshot.get("inferred_core_selling_points"))
+    product_advantages = normalize_string_list(snapshot.get("product_advantages"))
+    inferred_advantages = normalize_string_list(snapshot.get("inferred_advantages"))
     return {
         "hero_scene": str(snapshot.get("hero_scene") or "").strip(),
-        "core_selling_points": normalize_string_list(snapshot.get("core_selling_points")),
-        "key_parameters": key_parameters,
-        "product_advantages": normalize_string_list(snapshot.get("product_advantages")),
+        "core_selling_points": _merge_text_lists(core_selling_points, inferred_core_selling_points),
+        "key_parameters": merged_key_parameters,
+        "product_advantages": _merge_text_lists(product_advantages, inferred_advantages),
     }
 
 
@@ -67,3 +73,15 @@ def apply_parameter_snapshot_to_copy(
 
 def _parameter_texts(items: list[Any]) -> list[str]:
     return key_parameter_strings(items)
+
+
+def _merge_text_lists(primary: list[str], secondary: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*primary, *secondary]:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+    return merged

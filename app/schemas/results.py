@@ -57,6 +57,8 @@ class DetailPanelAssetItem(BaseModel):
     panel_goal: str | None = Field(default=None, description="详情页 panel 目标。")
     copy_focus: str | None = Field(default=None, description="详情页文案重点。")
     panel_type: str | None = Field(default=None, description="详情页板块类型。")
+    visual_truth_mode: str | None = Field(default=None, description="该 panel 更接近真实局部图、机制示意、场景重建还是参数板。")
+    origin_note: str | None = Field(default=None, description="对该 panel 来源和真实性边界的补充说明。")
     render_total_ms: int | None = Field(default=None, description="该 panel 生成耗时。")
     status: str = Field(description="资产状态。")
     display_order: int = Field(description="显示顺序。")

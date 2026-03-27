@@ -670,7 +670,18 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
                 {"category": "其他", "confidence": 10, "reason": "保底候选"},
             ],
             "scene_tags": ["白底产品"],
-            "supplement_image_recommendations": [{"slot_type": "angle45", "label": "45 度角图", "reason": "补充结构信息", "priority": 1}],
+            "supplement_image_recommendations": [
+                {
+                    "slot_type": "angle45",
+                    "label": "45 度角图",
+                    "reason": "补充结构信息",
+                    "priority": 1,
+                    "upload_goal": "补齐立体结构和厚薄关系。",
+                    "must_show": "顶部、正面和一侧的真实连接关系。",
+                    "framing_hint": "45 度斜拍，完整带到顶部和侧边。",
+                    "example_caption": "45°结构更清楚",
+                }
+            ],
             "detected_view_slots": ["front"],
         }
 
@@ -788,7 +799,18 @@ def test_analyze_images_repairs_invalid_priority_before_fallback(monkeypatch):
                     {"category": "其他", "confidence": 8, "reason": "保底"},
                 ],
                 "scene_tags": ["白底产品"],
-                "supplement_image_recommendations": [{"slot_type": "angle45", "label": "45 度角图", "reason": "补充结构", "priority": "high"}],
+                "supplement_image_recommendations": [
+                    {
+                        "slot_type": "angle45",
+                        "label": "45 度角图",
+                        "reason": "补充结构",
+                        "priority": "high",
+                        "upload_goal": "补齐立体结构信息。",
+                        "must_show": "机身顶部、前侧边界和主要开孔。",
+                        "framing_hint": "斜拍但不要过强透视。",
+                        "example_caption": "45°结构补全",
+                    }
+                ],
                 "detected_view_slots": ["front"],
             },
             {
@@ -806,7 +828,18 @@ def test_analyze_images_repairs_invalid_priority_before_fallback(monkeypatch):
                     {"category": "其他", "confidence": 8, "reason": "保底"},
                 ],
                 "scene_tags": ["白底产品"],
-                "supplement_image_recommendations": [{"slot_type": "angle45", "label": "45 度角图", "reason": "补充结构", "priority": 1}],
+                "supplement_image_recommendations": [
+                    {
+                        "slot_type": "angle45",
+                        "label": "45 度角图",
+                        "reason": "补充结构",
+                        "priority": 1,
+                        "upload_goal": "补齐立体结构信息。",
+                        "must_show": "机身顶部、前侧边界和主要开孔。",
+                        "framing_hint": "斜拍但不要过强透视。",
+                        "example_caption": "45°结构补全",
+                    }
+                ],
                 "detected_view_slots": ["front"],
             },
         ]

@@ -13,9 +13,12 @@
 | LLM Router Agent | 按任务类型选择文本模型，统一屏蔽 OpenRouter / WhatAI 文本调用差异 | `app/services/llm_router.py` |
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
 | Parameter Extract Agent | 读取参数附件，产出 `parameter_snapshot` | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
+| Parameter Completion Agent | 基于首轮参数抽取、分析结果和当前 copy 做二次补全，不覆盖已确认事实 | `POST /sessions/{id}/parameters/complete` + `WhataiClient.complete_parameters` |
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
 | Strategy Builder | 生成 `strategy_preview`、`reference_manifest`、`prompt_plan` 和可执行 `asset_plan` | `build_strategy_preview` |
+| Main Copy Design Agent | 为主图每个槽位补充更适合上图的短标题、短副文案和参数标签 | `WhataiClient.design_main_copy_blocks` + `build_strategy_preview` |
 | Detail Page Planner | 生成 `detail_strategy_preview`、商品/风格参考 manifest 和 8 个 panel 规划 | `build_detail_strategy_preview` |
+| Detail Copy Reviewer Agent | 审视详情页 panel 文案与图像语义，补充“真实局部图 / 机制示意图”说明 | `WhataiClient.review_detail_panel_copy` + `build_detail_strategy_preview` |
 | Prompt Composer | 按主图槽位输出结构化 prompt blocks 与最终 `final_prompt` | `compose_prompt` |
 | Detail Prompt Composer | 按 panel slot 输出带字详情页 prompt blocks 与最终 `final_prompt` | `compose_detail_panel_prompt` |
 | Image Generation Agent | 批量提交上游异步任务、集中轮询、并发下载图片字节 | `WhataiClient.submit_image_request/poll_image_tasks/download_image_bytes` |
@@ -67,10 +70,16 @@
     - `category_candidates[{category,confidence,reason}]`
     - `scene_tags`
     - `detected_view_slots`
-    - `supplement_image_recommendations[{slot_type,label,reason,priority}]`
+    - `supplement_image_recommendations[{slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption,image_kind?}]`
     - `reanalysis_required`
     - `provider/model/prompt_version/repair_round/source`
   - Step 2 品类识别会优先消费后台启用的“全局品类库”，而不是开放式自由猜类目
+  - Step 2 的补图建议已经收口为“建议补传什么图片”，不再是抽象拍摄技巧：
+    - `upload_goal` 描述要补哪块视觉信息
+    - `must_show` 描述图片里必须出现的真实结构元素
+    - `framing_hint` 描述建议前端如何提示用户取景
+    - `example_caption` 只作为补图意图示例
+    - `extra.image_kind` 当前支持 `detail_closeup / water_tank / filter_structure / size_in_hand / use_scene_real`
   - fallback 不再把 `家居用品` 当成默认结论；推不出时返回 `其他` + 弱候选列表
 
 ### 3.3 Copy Regen Agent
@@ -90,6 +99,24 @@
   - `job_type = extract_parameters`
   - 当前复用 `q.analysis` 队列
 
+### 3.3.2 Parameter Completion Agent
+- 输入：
+  - 当前 `parameter_snapshot`
+  - `analysis_snapshot`
+  - `confirmed_copy`
+  - 可选 `completion_instruction`
+- 输出：
+  - 补全后的 `parameter_snapshot`
+  - 增量 `applied_copy_fields`
+- 状态责任：
+  - 区分“首轮识别结果”和“二次推断补全结果”
+  - 追加 `completion_status/completion_source/inferred_core_selling_points/inferred_key_parameters/inferred_advantages/confidence_notes`
+  - 不覆盖已确认的关键商品事实
+- 当前实现说明：
+  - 为同步接口，不创建独立 job
+  - 默认走 OpenRouter 文本路由与国产文本模型
+  - 如果 completion 失败，前端仍应继续使用首轮 `extract` 结果
+
 ### 3.4 Strategy Builder
 - 输入：`confirmed_copy` + `active_platform_id` + session 图片 + 可选 `planner_instruction`
 - 输出：`strategy_preview`（含 `asset_plan`、`reference_manifest`、`prompt_plan`）
@@ -99,6 +126,10 @@
 - 额外约束：
   - 同一份输入会按 `input_hash` 直接复用已持久化 `strategy_preview`
   - `input_hash` 与正式构建共享同一批已加载 reference images，避免重复读图
+  - 主图 planner 之后会追加一层 `Main Copy Design Agent`：
+    - 只根据 `analysis_snapshot + confirmed_copy + strategy_preview` 设计更适合上图的短标题和短副文案
+    - 不改写视觉识别结论
+    - 输出结构化 `headline/supporting/proof_lines/matrix_lines/text_density/visual_emphasis`
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”
   - 默认平台固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
   - 阿里系平台固定输出 5 个槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
@@ -106,6 +137,9 @@
   - 每个 `prompt_plan` 项都带 `reference_image_ids/must_keep/must_avoid/background_rule/composition_rule/lighting_rule/fidelity_rule/final_prompt_base/rule_modules_used/resolved_constraints`
   - 当前支持在 Step 5 通过 `planner_instruction` 对整组策略做一轮额外优化
   - 当前优先让 planner 决定 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包退化为 guardrail + fallback
+  - `prompt_plan` / `asset_plan` 现在还会带 `global_consistency_note`：
+    - 用于约束局部图和结构图必须与参考图整体结构一致
+    - 如果没有内部结构证据，就不能直接生成强结构剖面图
 
 ### 3.5 Prompt Composer + Image Generation Agent
 - 输入：copy、strategy、slot/role、可选 instruction、参考图
@@ -178,13 +212,24 @@
   - `panel_count` 固定为 `8`
   - 同一份输入会按 `input_hash` 直接复用已持久化 `detail_strategy_preview`
   - `detail_strategy_preview` 当前额外带 `detail_story_brief`
-  - `panel_plan` 当前带 `slot_id/narrative_section/panel_goal/copy_focus/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used/product_reference_ids/style_reference_ids`
+  - `panel_plan` 当前带 `slot_id/narrative_section/panel_goal/copy_focus/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used/product_reference_ids/style_reference_ids/visual_truth_mode/origin_note`
+  - 详情页 planner 会显式复用同一 `session_id` 下的 `analysis_snapshot + 商品图 + parameter_snapshot`
+  - 详情页链路保持独立生成，但语义上是 narrative-first，不是主图 5 槽位的复写
+  - planner 之后会追加一层 `Detail Copy Reviewer Agent`：
+    - 审视 panel 文案和结构解释是否越权
+    - 补充 `visual_truth_mode` 与 `origin_note`
+    - 明确区分“真实局部放大”与“机制示意图”
   - 未上传风格图时，优先使用 `style_preset_id` 解析出的风格摘要，再拼接 `style_custom`；仅兼容回退 `style_choice`
   - 生图默认使用 1 张商品 grid；有风格图时追加 1 张 style/font grid
   - 详情页执行阶段优先消费 panel 级参考图，grid 只作为 fallback/辅助参考，不再让所有 panel 共用同一组主参考输入
 - Job / 事件语义：
   - `job_type = generate_detail_page`
-  - 事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_succeeded|job_failed`
+  - 通用事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_succeeded|job_failed`
+  - 当前会额外写入详情页专属阶段事件：
+    - `detail_strategy_ready`
+    - `detail_panel_render_started`
+    - `detail_panel_render_succeeded`
+    - `detail_stitched_ready`
   - `asset_ready` 会产出 9 次：8 次 panel + 1 次 stitched
 
 ### 3.6 Storage/Versioning Agent
@@ -300,7 +345,7 @@ sequenceDiagram
 5. 失败可定位：失败必须写 `job_failed` 且带错误信息。
 6. Prompt 可追溯：最终写入 `assets.prompt_snapshot` 的是实际提交给上游的 `final_prompt`。
 7. 引用可追溯：`assets.generation_snapshot` 必须记录 `reference_image_ids/reference_slots/upstream_endpoint/planner_instruction/size`。
-8. 槽位可追溯：主图资产需写 `slot_id/expression_mode/rule_pack_id`；详情页资产需写 `slot_id/panel_type`。
+8. 槽位可追溯：主图资产需写 `slot_id/expression_mode/rule_pack_id`；详情页资产需写 `slot_id/panel_type/visual_truth_mode/origin_note`。
 9. 后台资产归档不物理删除，只修改 `visibility_status` 并记录后台审计日志。
 
 ## 6.1 Prompt Debug 只读接口

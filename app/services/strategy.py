@@ -136,6 +136,14 @@ def build_strategy_preview(
         platform_overlay=overlay,
         llm_plan=llm_slot_plan,
     )
+    copy_design_plan = _design_main_gallery_copy(
+        confirmed_copy=normalized_copy,
+        analysis_snapshot=analysis_snapshot or {},
+        asset_plan=asset_plan,
+        prompt_plan=prompt_plan,
+    )
+    if copy_design_plan:
+        asset_plan, prompt_plan = _apply_main_copy_design(asset_plan, prompt_plan, copy_design_plan)
 
     return {
         "product_name": normalized_copy.get("product_name", ""),
@@ -161,6 +169,7 @@ def build_strategy_preview(
         "prompt_version": (planner_meta or {}).get("prompt_version", ""),
         "repair_round": int((planner_meta or {}).get("repair_round") or 0),
         "source": (planner_meta or {}).get("source", "rule_based"),
+        "text_design_source": _copy_design_source(copy_design_plan),
         "slot_preferences": list(resolved_slot_preferences.values()),
         "strategy_overrides": list(resolved_prompt_overrides.values()),
         "reference_manifest": reference_manifest,
@@ -374,6 +383,87 @@ def _plan_main_gallery(
     )
 
 
+def _design_main_gallery_copy(
+    *,
+    confirmed_copy: dict[str, Any],
+    analysis_snapshot: dict[str, Any],
+    asset_plan: list[dict[str, Any]],
+    prompt_plan: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    client = WhataiClient()
+    return client.design_main_copy_blocks(
+        confirmed_copy=confirmed_copy,
+        analysis_snapshot=analysis_snapshot,
+        strategy_asset_plan=asset_plan,
+        prompt_plan=prompt_plan,
+    )
+
+
+def _apply_main_copy_design(
+    asset_plan: list[dict[str, Any]],
+    prompt_plan: list[dict[str, Any]],
+    copy_design_plan: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    prompt_by_slot = {str(item.get("slot_id") or ""): item for item in prompt_plan if isinstance(item, dict)}
+    next_asset_plan: list[dict[str, Any]] = []
+    next_prompt_plan: list[dict[str, Any]] = []
+
+    for item in asset_plan:
+        slot_id = str(item.get("slot_id") or "")
+        design = copy_design_plan.get(slot_id) or {}
+        copy_blocks = dict(item.get("copy_blocks") or {})
+        merged_blocks = {
+            **copy_blocks,
+            **{
+                "headline": design.get("headline") or copy_blocks.get("headline"),
+                "supporting": design.get("supporting") or copy_blocks.get("supporting"),
+                "proof_lines": design.get("proof_lines") or copy_blocks.get("proof_lines") or [],
+                "matrix_lines": design.get("matrix_lines") or copy_blocks.get("matrix_lines") or [],
+            },
+        }
+        next_asset_plan.append(
+            {
+                **item,
+                "copy_blocks": merged_blocks,
+                "text_density": design.get("text_density") or item.get("text_density"),
+                "visual_emphasis": design.get("visual_emphasis") or item.get("visual_emphasis"),
+                "global_consistency_note": design.get("global_consistency_note") or item.get("global_consistency_note"),
+            }
+        )
+
+    for item in prompt_plan:
+        slot_id = str(item.get("slot_id") or "")
+        design = copy_design_plan.get(slot_id) or {}
+        copy_blocks = dict(item.get("copy_blocks") or {})
+        next_prompt_plan.append(
+            {
+                **item,
+                "copy_blocks": {
+                    **copy_blocks,
+                    **{
+                        "headline": design.get("headline") or copy_blocks.get("headline"),
+                        "supporting": design.get("supporting") or copy_blocks.get("supporting"),
+                        "proof_lines": design.get("proof_lines") or copy_blocks.get("proof_lines") or [],
+                        "matrix_lines": design.get("matrix_lines") or copy_blocks.get("matrix_lines") or [],
+                    },
+                },
+                "text_density": design.get("text_density") or item.get("text_density"),
+                "visual_emphasis": design.get("visual_emphasis") or item.get("visual_emphasis"),
+                "global_consistency_note": design.get("global_consistency_note") or item.get("global_consistency_note"),
+            }
+        )
+        prompt_by_slot.pop(slot_id, None)
+    return next_asset_plan, next_prompt_plan
+
+
+def _copy_design_source(copy_design_plan: dict[str, dict[str, Any]]) -> str:
+    for value in copy_design_plan.values():
+        meta = value.get("_meta") if isinstance(value, dict) else None
+        if isinstance(meta, dict):
+            return str(meta.get("source") or "rule_based")
+    return "rule_based"
+
+
 def _merge_asset_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(llm_item, dict):
         return base
@@ -429,6 +519,7 @@ def _build_default_prompt_plan_item(
         or (specs[0] if specs else "材质与结构")
     )
     rule_modules_used = [str(item) for item in plan_item.get("rule_modules_used", []) if str(item).strip()]
+    global_consistency_note = repair_broken_text(plan_item.get("global_consistency_note")) or _fallback_text(reference_summary.get("must_keep"), "")
     slot_guardrails_map = {
         "primary_kv": [
             "主体占画面约 45%-60%，必须预留主标题区",
@@ -529,6 +620,10 @@ def _build_default_prompt_plan_item(
         resolved_constraints.append("没有真实证书素材时，优先参数标签、面板特写或结构放大，不伪造权威认证。")
     if slot_id == "benefit_scene_or_compare":
         resolved_constraints.append("画面必须有明确视觉强化区域，不允许做平淡白底陈列图。")
+    if global_consistency_note:
+        resolved_constraints.append(f"全局一致性锚点：{global_consistency_note}")
+    if slot_id in {"detail", "proof_authority"}:
+        resolved_constraints.append("局部图只能放大解释上传参考图里可验证的结构，不可杜撰不属于真实商品的内部细节。")
 
     return {
         "slot_id": slot_id,
@@ -566,6 +661,7 @@ def _build_default_prompt_plan_item(
         "platform_context": f"{platform_name} {plan_item.get('slot_label') or plan_item.get('role_label')} 视觉策略",
         "white_bg_mode": bool(plan_item.get("requires_white_bg_validation")),
         "rule_modules_used": rule_modules_used,
+        "global_consistency_note": global_consistency_note,
         "resolved_constraints": resolved_constraints,
         "text_policy": plan_item.get("text_policy"),
     }
@@ -730,6 +826,7 @@ def _normalize_prompt_plan(
                 "must_avoid": _normalize_text_list(item.get("must_avoid", base["must_avoid"])),
                 "slot_guardrails": _normalize_text_list(item.get("slot_guardrails", base.get("slot_guardrails", []))),
                 "rule_modules_used": [str(v) for v in item.get("rule_modules_used", base["rule_modules_used"])],
+                "global_consistency_note": repair_broken_text(item.get("global_consistency_note", base.get("global_consistency_note"))),
                 "resolved_constraints": _normalize_text_list(item.get("resolved_constraints", base["resolved_constraints"])),
                 "background_rule": repair_broken_text(item.get("background_rule", base["background_rule"])),
                 "composition_rule": repair_broken_text(item.get("composition_rule", base["composition_rule"])),

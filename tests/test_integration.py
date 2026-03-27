@@ -8,6 +8,8 @@ from app.admin_db import session as admin_db_session
 from app.admin_models.admin_user import AdminUserModel
 from app.core.admin_auth import hash_password
 from app.models.asset import AssetModel
+from app.models.job import JobModel
+from app.models.job_event import JobEventModel
 from app.models.session import SessionModel
 
 
@@ -129,6 +131,54 @@ def test_trigger_analysis_recovers_created_session_with_uploaded_images(client):
     assert status["analysis_snapshot"]["reanalysis_required"] is False
 
 
+def test_complete_parameters_enriches_snapshot_and_copy_fields(client, monkeypatch):
+    sid = create_ready_session(client)
+
+    client.put(
+        f"/api/v2/sessions/{sid}/parameters",
+        json={
+            "hero_scene": "卧室除湿",
+            "core_selling_points": ["静音除湿"],
+            "key_parameters": [{"key": "tank", "label": "水箱容量", "value": "1250ml"}],
+            "product_advantages": ["小巧易摆放"],
+            "feature_highlights": [],
+            "completion_status": "pending",
+            "completion_source": "extract_only",
+        },
+    )
+
+    def _fake_complete(self, **kwargs):
+        base = dict(kwargs["parameter_snapshot"] or {})
+        base.update(
+            {
+                "completion_status": "completed",
+                "completion_source": "openrouter_text",
+                "inferred_core_selling_points": ["地下室防潮更直接"],
+                "inferred_key_parameters": [{"key": "airflow", "label": "进风结构", "value": "360环绕进风"}],
+                "inferred_advantages": ["可视化水箱更方便观察水位"],
+                "confidence_notes": ["部分优势来自视觉结构推断，请人工确认。"],
+            }
+        )
+        return base
+
+    monkeypatch.setattr("app.api.v2.sessions.WhataiClient.complete_parameters", _fake_complete)
+
+    response = client.post(f"/api/v2/sessions/{sid}/parameters/complete", json={})
+    assert response.status_code == 200
+    data = response.json()["data"]
+    snapshot = data["parameter_snapshot"]
+
+    assert snapshot["completion_status"] == "completed"
+    assert snapshot["completion_source"] == "openrouter_text"
+    assert snapshot["inferred_key_parameters"][0]["label"] == "进风结构"
+    assert "地下室防潮更直接" in data["applied_copy_fields"]["core_selling_points"]
+    assert any(item["label"] == "进风结构" for item in data["applied_copy_fields"]["key_parameters"])
+
+    session_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert session_snapshot["strategy_preview"] is None
+    assert session_snapshot["detail_strategy_preview"] is None
+
+
 def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, monkeypatch):
     sid = create_ready_session(client)
 
@@ -150,6 +200,31 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
     )
     assert reused.status_code == 200
     assert reused.json()["data"]["detail_strategy_preview"]["input_hash"] == original["input_hash"]
+
+
+def test_detail_generation_job_emits_detail_specific_events(client):
+    sid = create_ready_session(client)
+    preview = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert preview.status_code == 200
+
+    generation = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={})
+    assert generation.status_code == 200
+    job_id = generation.json()["data"]["job_id"]
+
+    with db_session.SessionLocal() as db:
+        job = db.query(JobModel).filter(JobModel.id == job_id).one()
+        events = (
+            db.query(JobEventModel)
+            .filter(JobEventModel.job_id == job.id)
+            .order_by(JobEventModel.seq_no.asc())
+            .all()
+        )
+        event_types = [item.event_type for item in events]
+
+    assert "detail_strategy_ready" in event_types
+    assert "detail_panel_render_started" in event_types
+    assert "detail_panel_render_succeeded" in event_types
+    assert "detail_stitched_ready" in event_types
 
 
 def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, monkeypatch):
