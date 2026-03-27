@@ -55,6 +55,51 @@ def _summary(db: Session, since_24h: datetime) -> dict:
     }
 
 
+def _detail_job_metrics(db: Session, since_24h: datetime) -> dict[str, float | int]:
+    detail_job_types = ["generate_detail_page", "regenerate_detail_panel"]
+    running = (
+        db.query(func.count(JobModel.id))
+        .filter(JobModel.job_type.in_(detail_job_types), JobModel.status.in_(["queued", "running"]))
+        .scalar()
+        or 0
+    )
+    total_24h = (
+        db.query(func.count(JobModel.id))
+        .filter(JobModel.job_type.in_(detail_job_types), JobModel.created_at >= since_24h)
+        .scalar()
+        or 0
+    )
+    failed_24h = (
+        db.query(func.count(JobModel.id))
+        .filter(JobModel.job_type.in_(detail_job_types), JobModel.created_at >= since_24h, JobModel.status == "failed")
+        .scalar()
+        or 0
+    )
+    completed_jobs = (
+        db.query(JobModel)
+        .filter(
+            JobModel.job_type.in_(detail_job_types),
+            JobModel.created_at >= since_24h,
+            JobModel.started_at.is_not(None),
+            JobModel.finished_at.is_not(None),
+        )
+        .all()
+    )
+    avg_duration_seconds = 0.0
+    if completed_jobs:
+        total_seconds = sum(
+            max((item.finished_at - item.started_at).total_seconds(), 0.0)
+            for item in completed_jobs
+            if item.started_at and item.finished_at
+        )
+        avg_duration_seconds = total_seconds / len(completed_jobs)
+    return {
+        "running": int(running),
+        "failed_rate_24h": float(failed_24h / total_24h) if total_24h else 0.0,
+        "avg_duration_seconds_24h": round(avg_duration_seconds, 2),
+    }
+
+
 @router.get("/summary", response_model=APIResponse[AdminDashboardSummary], operation_id="adminDashboardSummary", responses={**OPENAPI_ERROR_RESPONSES})
 def dashboard_summary(
     db: Session = Depends(get_db),
@@ -73,6 +118,7 @@ def dashboard_overview(
 ) -> dict:
     _, since_24h, since_7d = _now_window()
     summary = _summary(db, since_24h)
+    detail_metrics = _detail_job_metrics(db, since_24h)
     active_sessions_7d = db.query(func.count(SessionModel.id)).filter(SessionModel.updated_at >= since_7d).scalar() or 0
     queue_backlog = db.query(func.count(JobModel.id)).filter(JobModel.status.in_(["queued", "running"])).scalar() or 0
     recent_failed_jobs = (
@@ -94,6 +140,7 @@ def dashboard_overview(
             "summary": summary,
             "runtime_cards": [
                 {"key": "running_jobs", "label": "运行中任务", "value": summary["running_jobs"], "trend_hint": "实时"},
+                {"key": "detail_running_jobs", "label": "详情页运行中任务", "value": int(detail_metrics["running"]), "trend_hint": "实时"},
                 {"key": "failed_jobs", "label": "失败任务", "value": summary["failed_jobs"], "trend_hint": "累计"},
                 {"key": "assets_24h", "label": "24h 成功资产", "value": summary["generated_assets_24h"], "trend_hint": "24h"},
             ],
@@ -101,6 +148,8 @@ def dashboard_overview(
                 {"key": "active_sessions_7d", "label": "7日活跃 Session", "value": int(active_sessions_7d), "trend_hint": "7d"},
                 {"key": "queue_backlog", "label": "当前队列积压", "value": int(queue_backlog), "trend_hint": "实时"},
                 {"key": "failed_rate_24h", "label": "24h 失败率", "value": round(summary["failed_rate_24h"] * 100, 2), "unit": "%", "trend_hint": "24h"},
+                {"key": "detail_failed_rate_24h", "label": "详情页 24h 失败率", "value": round(float(detail_metrics["failed_rate_24h"]) * 100, 2), "unit": "%", "trend_hint": "24h"},
+                {"key": "detail_avg_duration_24h", "label": "详情页平均耗时", "value": float(detail_metrics["avg_duration_seconds_24h"]), "unit": "s", "trend_hint": "24h"},
             ],
             "config_cards": [
                 {"key": "prompt_preset_count", "label": "Prompt Preset", "value": summary["prompt_preset_count"], "trend_hint": "当前"},

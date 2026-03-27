@@ -40,6 +40,7 @@ from app.schemas.session import (
     GenerationJobData,
     GenericGenerationJobData,
     ParameterAttachmentsData,
+    ParameterCompletionRequest,
     ParameterExtractionJobData,
     ParameterSnapshotData,
     PlatformSelectionData,
@@ -110,6 +111,7 @@ from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter, public_url_for
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview, strategy_preview_input_hash
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
+from app.services.upstream import WhataiClient
 from app.services.user_accounts import refresh_session_search_cache
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -195,6 +197,7 @@ def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> di
         product_images=list_active_session_images(db, session.id),
         style_images=list_active_detail_style_images(db, session.id),
         analysis_snapshot=session.analysis_snapshot or {},
+        parameter_snapshot=session.parameter_snapshot or {},
         active_platform_id=session.active_platform_id,
         prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.service_id),
     )
@@ -1030,6 +1033,45 @@ def get_parameters(
     )
 
 
+@router.post(
+    "/{session_id}/parameters/complete",
+    response_model=APIResponse[ParameterSnapshotData],
+    summary="补全参数提取结果",
+    operation_id="completeParameters",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def complete_parameters(
+    session_id: str,
+    req: ParameterCompletionRequest,
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    client = WhataiClient()
+    snapshot = client.complete_parameters(
+        parameter_snapshot=session.parameter_snapshot or {},
+        analysis_snapshot=session.analysis_snapshot or {},
+        confirmed_copy=_resolved_copy_for_session(session, db),
+        active_platform_id=session.active_platform_id,
+        completion_instruction=req.completion_instruction,
+    )
+    session.parameter_snapshot = snapshot
+    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
+    refresh_session_search_cache(session)
+    session.current_step = max(session.current_step, 3)
+    session.strategy_preview = None
+    session.detail_strategy_preview = None
+    db.commit()
+    return success_response(
+        {
+            "session_id": session.id,
+            "parameter_snapshot": session.parameter_snapshot or {},
+            "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "overwrite_mode": "replace_all",
+        }
+    )
+
+
 @router.put(
     "/{session_id}/parameters",
     response_model=APIResponse[ParameterSnapshotData],
@@ -1388,6 +1430,7 @@ def build_detail_strategy(
         product_images=product_images,
         style_images=style_images,
         analysis_snapshot=session.analysis_snapshot or {},
+        parameter_snapshot=session.parameter_snapshot or {},
         planner_instruction=payload.get("planner_instruction"),
         panel_preferences=resolved_panel_preferences,
         active_platform_id=session.active_platform_id,
@@ -1559,6 +1602,7 @@ def put_detail_strategy_overrides(
             product_images=list_active_session_images(db, session.id),
             style_images=list_active_detail_style_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
+            parameter_snapshot=session.parameter_snapshot or {},
             planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
             panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
             active_platform_id=session.active_platform_id,
@@ -1970,6 +2014,8 @@ def get_detail_page_results(
                     "panel_goal": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("panel_goal"),
                     "copy_focus": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("copy_focus"),
                     "panel_type": (asset.generation_snapshot or {}).get("panel_type"),
+                    "visual_truth_mode": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("visual_truth_mode"),
+                    "origin_note": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("origin_note"),
                     "render_total_ms": (asset.generation_snapshot or {}).get("timing", {}).get("render_total_ms"),
                     "status": asset.status,
                     "display_order": asset.display_order,

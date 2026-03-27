@@ -14,8 +14,10 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 - **批量异步提速链路**：主图和详情页都采用“批量提交上游任务 -> 集中轮询 -> 并发下载”的执行方式，默认拆分 `q.generation.main` / `q.generation.detail` 两个队列。
 - **上线级存储接入能力**：支持 `StorageAdapter` 切换到 S3 兼容对象存储，浏览器上传走 `presign -> 直传 -> complete`，结果图默认私有桶签名读。
 - **Step 3 参数附件链路**：支持说明书/参数图/PDF 上传、鲁棒参数提取和策略参考图补充输入。
+- **Step 2 / Step 3 智能补强**：Step 2 现在直接返回“建议补传什么图片”的结构化清单；Step 3 支持 `extract -> complete` 两段式参数补全，不覆盖已确认事实。
 - **纯图片 SaaS 鉴权模型**：`/api/v2` 图片主链路统一通过 `X-App-Key` 做服务端调用鉴权，只保留 `session -> upload -> analysis -> strategy -> generation -> results`。
 - **主图/详情页同 Session 复用**：主图与详情页共用同一个 `session_id`、商品图与分析结果，详情页只额外接收风格图或已存在的对象存储路径。
+- **文本辅助 Agent 协同**：当前默认只保留 Step 3 参数补全这 1 条 OpenRouter 文本链路；主图文字设计与详情页 reviewer 默认关闭，避免额外时延与过度设计。
 - **用户体系彻底解耦**：`/api/v2/auth/*`、`/api/v2/account/*`、`/api/v2/guest/*` 已下线并返回 `410 feature_removed`，外部用户映射交由接入方服务处理。
 - **独立后台管理能力**：支持 `/api/admin/v1` 图片运维控制台、SQLite 管理员账号库、运行/产出看板、Session/Job/Asset 排障、模板与规则包后台化及高风险操作审计。
 

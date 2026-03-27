@@ -69,7 +69,12 @@
 ### 1.3 关键状态与枚举
 - Session 状态：`created` `images_uploaded` `analyzing` `analyzed` `platform_selected` `copy_ready` `strategy_ready` `generating` `completed` `failed`
 - Job 状态：`queued` `running` `succeeded` `failed`
-- 任务事件：`job_queued` `job_started` `job_progress` `asset_ready` `job_succeeded` `job_failed`
+- 通用任务事件：`job_queued` `job_started` `job_progress` `asset_ready` `job_succeeded` `job_failed`
+- 详情页专属事件：
+  - `detail_strategy_ready`
+  - `detail_panel_render_started`
+  - `detail_panel_render_succeeded`
+  - `detail_stitched_ready`
 
 ### 1.4 常用错误码
 - `40002` `invalid_session_status`
@@ -147,7 +152,7 @@
     - `category_candidates[{category,confidence,reason}]`
     - `scene_tags`
     - `detected_view_slots`
-    - `supplement_image_recommendations[{slot_type,label,reason,priority}]`
+    - `supplement_image_recommendations[{slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption,image_kind?}]`
     - `reanalysis_required`
     - `provider`
     - `model`
@@ -155,6 +160,18 @@
     - `repair_round`
     - `source`
   - `category_candidates` 现在优先从后台启用的“全局品类库”中选择；仅在确实无法归类时回退 `其他`
+  - Step 2 的 `supplement_image_recommendations` 语义已收口为“建议补传什么图片”，不是抽象拍摄技巧：
+    - `slot_type` 仍限制为 `front | angle45 | side | extra`
+    - `extra` 允许额外细分 `image_kind`，当前至少支持：
+      - `detail_closeup`
+      - `water_tank`
+      - `filter_structure`
+      - `size_in_hand`
+      - `use_scene_real`
+    - `upload_goal` 描述这张补图要解决什么信息缺口
+    - `must_show` 描述图片里必须出现的真实结构元素
+    - `framing_hint` 描述前端可提示给用户的取景方式
+    - `example_caption` 仅作为补图意图示例，不直接等价于最终上图文案
   - `analysis_snapshot` 额外包含 `reference_summary`：
     - `shape`
     - `colors`
@@ -209,6 +226,7 @@
   - 支持图片与 PDF；不相关内容会在后续提取结果中返回 `relevance_status=invalid`
 - 参数提取接口：
   - `POST /sessions/{session_id}/parameters/extract`
+  - `POST /sessions/{session_id}/parameters/complete`
   - `GET /sessions/{session_id}/parameters`
   - `PUT /sessions/{session_id}/parameters`
 - 当前实现行为：
@@ -221,6 +239,14 @@
     - `core_selling_points`
     - `key_parameters`
     - `product_advantages`
+  - Step 3 现在支持两段式：
+    1. `extract`：Gemini 先做首轮结构化抽取
+    2. `complete`：文本侧 completion agent 再基于 `parameter_snapshot + analysis_snapshot + confirmed_copy` 做二次补全
+  - `POST /sessions/{session_id}/parameters/complete` 为同步接口：
+    - 默认走 OpenRouter 文本路由
+    - 用于补更多相关参数、推断卖点与优势
+    - 不会覆盖已确认的关键商品事实
+    - 若调用失败，前端仍可继续使用首轮 `extract` 结果
   - `parameter_snapshot` 至少包含：
     - `relevance_status`
     - `rejection_reason`
@@ -230,6 +256,12 @@
     - `product_advantages`
     - `feature_highlights`
     - `source_summary`
+    - `completion_status`
+    - `completion_source`
+    - `inferred_core_selling_points`
+    - `inferred_key_parameters`
+    - `inferred_advantages`
+    - `confidence_notes`
 - 补充说明：
   - 当前参数提取不走 OCR
   - 提取结果是“可用抽取 + 人工可改”，不会强承诺复杂图表/版面还原精度
@@ -259,6 +291,7 @@
   - Step 5 当前会结合 `confirmed_copy + active_platform_id + session 图片 + analysis.reference_summary` 做一轮槽位级 prompt planner
   - `strategy_preview.input_hash` 与正式构建共享同一批已加载 reference images，避免重复读图
   - planner 当前允许由 LLM 主导输出 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包只负责 guardrail 和 fallback
+  - Step 5 现在会额外调用文本侧 `main copy design agent`，为每个槽位补充更适合上图的短标题/短副文案/参数标签；该层只增强 `copy_blocks`，不替代视觉 planner
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”：
     - 默认平台仍输出 5 张：`hero` `white_bg` `selling_point` `scene` `detail`
     - 阿里系（`1688` / `taobao` / `alibaba_intl`）输出 5 个阿里槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
@@ -342,6 +375,12 @@
       - `rule_modules_used`
       - `resolved_constraints`
       - `white_bg_mode`
+      - `global_consistency_note`
+  - `strategy_preview` 顶层还会回传：
+    - `text_design_source`
+  - `global_consistency_note` 用于约束局部图/结构图：
+    - 只能放大解释参考图里可验证的结构
+    - 不可杜撰不属于真实商品的内部结构
 - 成功后：状态写为 `strategy_ready`
 - 常见错误：`40002` `40003`
 - 并发/幂等：无 Idempotency-Key
@@ -469,7 +508,7 @@
   - `DELETE /sessions/{session_id}/detail-pages/style-images/{image_id}`
   - 当前只接收 `display_order`，不要求 `slot_type`
   - 最多 4 张，可为空
-- 详情页策略预览：
+  - 详情页策略预览：
   - 接口：`POST /sessions/{session_id}/detail-pages/strategy/preview`
   - 请求体：
     - `planner_instruction: string | null`
@@ -486,6 +525,13 @@
     - `product_reference_manifest`
     - `style_reference_manifest`
     - `panel_plan`
+  - 详情页 planner 当前会显式复用同一 `session_id` 下的：
+    - `analysis_snapshot`
+    - 商品图
+    - `parameter_snapshot`
+  - 但主图与详情页仍保持分链：
+    - 主图是 `5` 槽位、conversion-first
+    - 详情页是 `8` panel、narrative-first
   - `panel_plan` 每项至少包含：
     - `slot_id`
     - `panel_id`
@@ -507,6 +553,8 @@
     - `product_reference_ids`
     - `style_reference_ids`
     - `rule_modules_used`
+    - `visual_truth_mode`
+    - `origin_note`
   - 未上传风格图时，planner 自动退回 `style_preset_id(style_summary/name) + style_custom`；若缺失再兼容回退 `style_choice`
   - 详情页 override 接口：
     - `GET /sessions/{session_id}/detail-pages/strategy/overrides`
@@ -554,6 +602,11 @@
   - 结果查询：`GET /sessions/{session_id}/detail-pages/results`
   - 下载：`GET /sessions/{session_id}/detail-pages/download`
   - `job_type`：`generate_detail_page`
+  - 当前 worker / admin 可观测的详情页专属事件：
+    - `detail_strategy_ready`
+    - `detail_panel_render_started`
+    - `detail_panel_render_succeeded`
+    - `detail_stitched_ready`
   - 单 panel 重生：`POST /assets/{asset_id}/regenerate`
     - 当 `asset_family=detail_page` 且 `asset_kind=panel` 时，会转成 `job_type=regenerate_detail_panel`
     - carry-forward 基线取 `parent_asset.version_no`；未改动 panel 与最终 stitched 长图都按该版本物化
@@ -565,6 +618,13 @@
     - `panel_goal`
     - `copy_focus`
     - `panel_type`
+    - `visual_truth_mode`
+    - `origin_note`
+  - `visual_truth_mode` 用于区分：
+    - 真实局部放大
+    - 机制示意
+    - 结构解释图
+    前端应把这个语义透出，避免误解成对实物细节的 1:1 还原
   - 详情页执行阶段当前优先消费 panel 级 `product_reference_ids/style_reference_ids`；grid 只作为辅助 fallback，不再作为所有 panel 的唯一参考
   - 独立版本字段：
     - `detail_generation_round`

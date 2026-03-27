@@ -23,7 +23,12 @@ from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
 from app.models.session_prompt_override import SessionPromptOverrideModel
 from app.models.strategy_reference_image import StrategyReferenceImageModel
-from app.services.copy_normalization import key_parameter_strings, normalize_copy_payload, normalize_copy_text
+from app.services.copy_normalization import (
+    is_placeholder_copy_text,
+    key_parameter_strings,
+    normalize_copy_payload,
+    normalize_copy_text,
+)
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
@@ -236,23 +241,33 @@ def _analysis_defaults_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
     draft = _snapshot_section(snapshot, "copy_draft", text_key="headline")
     recognized_product = _snapshot_section(snapshot, "recognized_product", text_key="product_name")
     suggested_styles = _snapshot_string_list(snapshot, "suggested_styles")
+    draft_has_placeholder = any(
+        is_placeholder_copy_text(draft.get(field, ""))
+        for field in ("headline", "selling_points", "specs")
+    )
+    key_parameters = (
+        snapshot.get("key_parameters")
+        if isinstance(snapshot.get("key_parameters"), list)
+        else []
+    )
+    placeholder_parameters = key_parameter_strings(key_parameters)
+    if placeholder_parameters and all(is_placeholder_copy_text(item) for item in placeholder_parameters):
+        key_parameters = []
     return normalize_copy_payload(
         {
             "product_name": recognized_product.get("product_name", ""),
             "category": recognized_product.get("category", ""),
-            "headline": draft.get("headline", ""),
-            "hero_scene": draft.get("usage_scenes", "") or "",
-            "core_selling_points": _snapshot_string_list(draft, "selling_points"),
-            "selling_points": draft.get("selling_points", ""),
-            "usage_scenes": draft.get("usage_scenes", ""),
-            "specs": draft.get("specs", ""),
+            "headline": "" if draft_has_placeholder else draft.get("headline", ""),
+            "hero_scene": "" if draft_has_placeholder else (draft.get("usage_scenes", "") or ""),
+            "core_selling_points": [] if draft_has_placeholder else _snapshot_string_list(draft, "selling_points"),
+            "selling_points": "" if draft_has_placeholder else draft.get("selling_points", ""),
+            "usage_scenes": "" if draft_has_placeholder else draft.get("usage_scenes", ""),
+            "specs": "" if draft_has_placeholder else draft.get("specs", ""),
             "product_advantages": [],
             "style_preset_id": None,
             "style_choice": suggested_styles[0] if suggested_styles else "",
             "style_custom": "",
-            "key_parameters": snapshot.get("key_parameters", [])
-            if isinstance(snapshot.get("key_parameters"), list)
-            else [],
+            "key_parameters": key_parameters,
         }
     )
 
@@ -1232,6 +1247,19 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
         style_images = _detail_style_images(db, session.id)
 
         effective_strategy_preview = _ensure_detail_strategy_preview(db, session, session_images, style_images)
+        update_job_status(db, job, status="running", progress=10, stage="planning")
+        append_job_event(
+            db,
+            job.id,
+            "detail_strategy_ready",
+            {
+                "event": "detail_strategy_ready",
+                "job_id": job.id,
+                "panel_count": len(effective_strategy_preview.get("panel_plan") or []),
+                "input_hash": effective_strategy_preview.get("input_hash"),
+                "detail_rule_pack": effective_strategy_preview.get("detail_rule_pack"),
+            },
+        )
         loaded_product_images = load_reference_images(session_images, storage=storage)
         loaded_style_images = load_reference_images(style_images, storage=storage) if style_images else []
         product_grid, style_grid = build_detail_reference_grids(loaded_product_images, loaded_style_images)
@@ -1266,6 +1294,25 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 if slot_id == requested_slot_id:
                     continue
                 carry_forward_sources.append(asset)
+
+        for item in plan:
+            if not isinstance(item, dict):
+                continue
+            append_job_event(
+                db,
+                job.id,
+                "detail_panel_render_started",
+                {
+                    "event": "detail_panel_render_started",
+                    "panel_id": item.get("panel_id"),
+                    "slot_id": item.get("slot_id"),
+                    "display_order": item.get("display_order"),
+                    "panel_type": item.get("panel_type"),
+                    "narrative_section": item.get("narrative_section"),
+                    "panel_goal": item.get("panel_goal"),
+                    "copy_focus": item.get("copy_focus"),
+                },
+            )
 
         rendered_panels = _render_detail_panels_concurrently(
             db=db,
@@ -1338,6 +1385,20 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                     "render_total_ms": (rendered.get("generation_snapshot") or {}).get("timing", {}).get("render_total_ms"),
                 },
             )
+            append_job_event(
+                db,
+                job.id,
+                "detail_panel_render_succeeded",
+                {
+                    "event": "detail_panel_render_succeeded",
+                    "asset_id": asset.id,
+                    "panel_id": rendered["panel_id"],
+                    "slot_id": rendered.get("slot_id"),
+                    "display_order": rendered["display_order"],
+                    "panel_type": rendered.get("panel_type"),
+                    "render_total_ms": (rendered.get("generation_snapshot") or {}).get("timing", {}).get("render_total_ms"),
+                },
+            )
 
         for source_asset in carry_forward_sources:
             asset = _clone_asset_for_version(
@@ -1362,6 +1423,20 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                     "asset_id": asset.id,
                     "asset_kind": "panel",
                     "panel_id": asset.asset_role,
+                    "display_order": asset.display_order,
+                    "carry_forward": True,
+                    "render_total_ms": 0,
+                },
+            )
+            append_job_event(
+                db,
+                job.id,
+                "detail_panel_render_succeeded",
+                {
+                    "event": "detail_panel_render_succeeded",
+                    "asset_id": asset.id,
+                    "panel_id": asset.asset_role,
+                    "slot_id": asset.slot_id,
                     "display_order": asset.display_order,
                     "carry_forward": True,
                     "render_total_ms": 0,
@@ -1419,9 +1494,9 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
         append_job_event(
             db,
             job.id,
-            "asset_ready",
+            "detail_stitched_ready",
             {
-                "event": "asset_ready",
+                "event": "detail_stitched_ready",
                 "asset_id": stitched_asset.id,
                 "asset_kind": "stitched",
                 "display_order": stitched_asset.display_order,
@@ -1590,6 +1665,7 @@ def _ensure_detail_strategy_preview(
         product_images=session_images,
         style_images=style_images,
         analysis_snapshot=session.analysis_snapshot or {},
+        parameter_snapshot=session.parameter_snapshot or {},
         active_platform_id=session.active_platform_id,
         prompt_overrides=prompt_overrides,
     )
@@ -1599,6 +1675,7 @@ def _ensure_detail_strategy_preview(
         product_images=session_images,
         style_images=style_images,
         analysis_snapshot=session.analysis_snapshot or {},
+        parameter_snapshot=session.parameter_snapshot or {},
         planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
         panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
         active_platform_id=session.active_platform_id,
@@ -1745,6 +1822,11 @@ def _finalize_detail_rendered_panel(
         "planner_instruction": render_spec["planner_instruction"],
         "planner_source": prompt_payload.get("planner_source"),
         "slot_id": render_spec["slot_id"],
+        "narrative_section": plan_item.get("narrative_section"),
+        "panel_goal": plan_item.get("panel_goal"),
+        "copy_focus": plan_item.get("copy_focus"),
+        "visual_truth_mode": plan_item.get("visual_truth_mode"),
+        "origin_note": plan_item.get("origin_note"),
         "panel_type": prompt_payload.get("panel_type"),
         "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
         "display_order": render_spec["display_order"],
@@ -1857,6 +1939,11 @@ def _render_single_detail_panel(
         "planner_instruction": planner_instruction,
         "planner_source": prompt_payload.get("planner_source"),
         "slot_id": slot_id,
+        "narrative_section": plan_item.get("narrative_section"),
+        "panel_goal": plan_item.get("panel_goal"),
+        "copy_focus": plan_item.get("copy_focus"),
+        "visual_truth_mode": plan_item.get("visual_truth_mode"),
+        "origin_note": plan_item.get("origin_note"),
         "panel_type": prompt_payload.get("panel_type"),
         "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
         "display_order": display_order,

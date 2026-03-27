@@ -247,6 +247,9 @@ def _compose_subject_block(
     if slot_id == "proof_authority":
         base += " 优先围绕面板、参数、结构或证据性细节来组织主体。"
     if must_keep:
+        consistency = _clean_text(prompt_plan.get("global_consistency_note"))
+        if consistency:
+            return f"{base} 必须保留：{must_keep}。全局一致性锚点：{consistency}"
         return f"{base} 必须保留：{must_keep}"
     return base
 

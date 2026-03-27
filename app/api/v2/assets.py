@@ -112,6 +112,7 @@ def regenerate_asset(
             product_images=list_active_session_images(db, session.id),
             style_images=list_active_detail_style_images(db, session.id),
             analysis_snapshot=session.analysis_snapshot or {},
+            parameter_snapshot=session.parameter_snapshot or {},
             active_platform_id=session.active_platform_id,
             prompt_overrides=[
                 serialize_session_override(override)

@@ -14,6 +14,7 @@ class LLMRouter:
     WHATI_CHAT_ROUTE = "whatai_chat"
     WHATI_GEMINI_ROUTE = "whatai_gemini"
     OPENROUTER_TEXT_ROUTE = "openrouter_text"
+    DISABLED_ROUTE = "disabled"
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -24,13 +25,16 @@ class LLMRouter:
             "main_planner": self.settings.llm_route_main_planner,
             "detail_planner": self.settings.llm_route_detail_planner,
             "parameter": self.settings.llm_route_parameter_visual,
+            "parameter_completion": self.settings.llm_route_parameter_completion,
+            "main_copy_design": self.settings.llm_route_main_copy_design,
+            "detail_copy_review": self.settings.llm_route_detail_copy_review,
             "form_rewrite": self.settings.llm_route_form_rewrite,
             "text_review": self.settings.llm_route_text_review,
             "text_presentation": self.settings.llm_route_text_presentation,
             "fallback": self.WHATI_CHAT_ROUTE,
         }
         route = str(mapping.get(task) or "").strip().lower()
-        if route in {self.WHATI_CHAT_ROUTE, self.WHATI_GEMINI_ROUTE, self.OPENROUTER_TEXT_ROUTE}:
+        if route in {self.WHATI_CHAT_ROUTE, self.WHATI_GEMINI_ROUTE, self.OPENROUTER_TEXT_ROUTE, self.DISABLED_ROUTE}:
             return route
         return self.WHATI_CHAT_ROUTE
 
@@ -40,12 +44,17 @@ class LLMRouter:
             "main_planner": self.settings.llm_main_planner_model,
             "detail_planner": self.settings.llm_detail_planner_model,
             "parameter": self.settings.llm_parameter_model,
+            "parameter_completion": self.settings.openrouter_parameter_completion_model,
+            "main_copy_design": self.settings.openrouter_main_copy_design_model,
+            "detail_copy_review": self.settings.openrouter_detail_copy_review_model,
             "form_rewrite": self.settings.openrouter_form_rewrite_model,
             "text_review": self.settings.openrouter_text_review_model,
             "text_presentation": self.settings.openrouter_text_presentation_model,
             "fallback": self.settings.llm_fallback_model,
         }
         route = self.route_for_task(task)
+        if route == self.DISABLED_ROUTE:
+            return ""
         if route == self.WHATI_GEMINI_ROUTE:
             whatai_mapping = {
                 "analysis": self.settings.whatai_analysis_model,
@@ -61,12 +70,16 @@ class LLMRouter:
 
     def provider_for_task(self, task: str) -> str:
         route = self.route_for_task(task)
+        if route == self.DISABLED_ROUTE:
+            return "disabled"
         if route == self.OPENROUTER_TEXT_ROUTE:
             return "openrouter"
         return "whatai"
 
     def is_available(self, task: str) -> bool:
         provider = self.provider_for_task(task)
+        if provider == "disabled":
+            return False
         if provider == "openrouter":
             return bool(self.settings.openrouter_api_key)
         return bool(self.settings.whatai_api_key)

@@ -17,6 +17,7 @@ from app.services.detail_panel_library import (
     resolve_panel_preferences,
 )
 from app.services.platforms import get_platform_or_none
+from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
 from app.services.reference_images import LoadedReferenceImage, build_reference_manifest, load_reference_images
 from app.services.rule_packs import DETAIL_RULE_PACK_ID, load_published_rule_pack_config
 from app.services.strategy_overrides import resolve_session_overrides
@@ -99,12 +100,13 @@ def build_detail_strategy_preview(
     product_images: list[Any],
     style_images: list[Any] | None = None,
     analysis_snapshot: dict[str, Any] | None = None,
+    parameter_snapshot: dict[str, Any] | None = None,
     planner_instruction: str | None = None,
     panel_preferences: list[dict[str, Any]] | None = None,
     active_platform_id: str | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    normalized_copy = normalize_copy_payload(confirmed_copy)
+    normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
     platform_profile = get_platform_or_none(active_platform_id or "amazon")
     rule_pack, version, _ = load_published_rule_pack_config(
         asset_family="detail_page",
@@ -175,9 +177,17 @@ def build_detail_strategy_preview(
         style_grid=style_grid,
         planner_instruction=planner_instruction,
         analysis_snapshot=analysis_snapshot or {},
+        parameter_snapshot=parameter_snapshot or {},
     )
 
     merged_plan = _merge_panel_plan(fallback_plan, llm_result.get("panel_plan") or [])
+    review_plan = client.review_detail_panel_copy(
+        confirmed_copy=normalized_copy,
+        analysis_snapshot=analysis_snapshot or {},
+        parameter_snapshot=parameter_snapshot or {},
+        panel_plan=merged_plan,
+    )
+    merged_plan = _apply_detail_panel_review(merged_plan, review_plan)
     return {
         "use_case": DETAIL_PAGE_USE_CASE,
         "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
@@ -224,6 +234,7 @@ def normalize_detail_strategy_preview(
     product_images: list[Any],
     style_images: list[Any] | None = None,
     analysis_snapshot: dict[str, Any] | None = None,
+    parameter_snapshot: dict[str, Any] | None = None,
     active_platform_id: str | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -241,6 +252,7 @@ def normalize_detail_strategy_preview(
         product_images=product_images,
         style_images=style_images,
         analysis_snapshot=analysis_snapshot,
+        parameter_snapshot=parameter_snapshot,
         planner_instruction=(strategy_preview or {}).get("planner_instruction") if strategy_preview else None,
         panel_preferences=(strategy_preview or {}).get("panel_preferences") if strategy_preview else None,
         active_platform_id=active_platform_id,
@@ -332,6 +344,9 @@ def compose_detail_panel_prompt(
     layout_template = str(plan.get("layout_template") or "feature_card")
     rule_modules_used = [str(item) for item in plan.get("rule_modules_used", []) if str(item).strip()]
     raw_prompt_override = str(plan.get("raw_prompt_override") or "").strip()
+    visual_truth_mode = str(plan.get("visual_truth_mode") or _default_visual_truth_mode(panel_type)).strip()
+    origin_note = str(plan.get("origin_note") or "").strip()
+    truth_constraint = _visual_truth_constraint(visual_truth_mode, origin_note)
 
     blocks = {
         "goal": planner_base,
@@ -342,7 +357,8 @@ def compose_detail_panel_prompt(
         "constraints": (
             "Render one single horizontal detail page panel only. "
             "Visible text should be concise and integrated into the composition. "
-            "Do not create a gallery sheet, watermark, UI screenshot, duplicated product or irrelevant props."
+            "Do not create a gallery sheet, watermark, UI screenshot, duplicated product or irrelevant props. "
+            f"{truth_constraint}"
         ),
         "instruction": _fallback_text(instruction, "No extra edit instruction."),
     }
@@ -386,6 +402,8 @@ def compose_detail_panel_prompt(
         ],
         "panel_type": panel_type,
         "panel_type_reason": str(plan.get("panel_type_reason") or ""),
+        "visual_truth_mode": visual_truth_mode,
+        "origin_note": origin_note,
         "layout_template": layout_template,
         "product_reference_ids": [str(item) for item in plan.get("product_reference_ids", []) if str(item).strip()],
         "style_reference_ids": [str(item) for item in plan.get("style_reference_ids", []) if str(item).strip()],
@@ -412,6 +430,8 @@ def find_detail_panel_plan_item(strategy_preview: dict[str, Any], panel_id: str,
         "panel_goal": "",
         "copy_focus": "",
         "panel_type": panel_type,
+        "visual_truth_mode": _default_visual_truth_mode(panel_type),
+        "origin_note": "",
         "panel_type_label": meta["panel_type_label"],
         "layout_template": meta["layout_template"],
         "planner_prompt_base": "",
@@ -500,6 +520,8 @@ def _build_default_panel_plan(
                 "panel_goal": copy_lines[0] if copy_lines else product_name,
                 "copy_focus": copy_lines[0] if copy_lines else product_name,
                 "panel_type": panel_type,
+                "visual_truth_mode": _default_visual_truth_mode(panel_type),
+                "origin_note": "",
                 "panel_type_label": panel_meta["panel_type_label"],
                 "panel_type_reason": panel_type_reason,
                 "candidate_panel_types": list(spec["candidate_panel_types"]),
@@ -541,7 +563,7 @@ def _merge_panel_plan(
             merged.append(item)
             continue
         merged_item = {**item}
-        for key in ("panel_label", "planner_prompt_base", "layout_notes", "narrative_section", "panel_goal", "copy_focus", "panel_type", "layout_template"):
+        for key in ("panel_label", "planner_prompt_base", "layout_notes", "narrative_section", "panel_goal", "copy_focus", "panel_type", "layout_template", "visual_truth_mode", "origin_note"):
             value = str(llm_item.get(key) or "").strip()
             if value:
                 merged_item[key] = value
@@ -559,6 +581,28 @@ def _merge_panel_plan(
                 merged_item["layout_template"] = panel_meta["layout_template"]
         merged_item["planner_source"] = "llm"
         merged.append(merged_item)
+    return merged
+
+
+def _apply_detail_panel_review(
+    panel_plan: list[dict[str, Any]],
+    review_plan: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not review_plan:
+        return panel_plan
+    merged: list[dict[str, Any]] = []
+    for item in panel_plan:
+        panel_id = str(item.get("panel_id") or "")
+        review = review_plan.get(panel_id) or {}
+        merged.append(
+            {
+                **item,
+                "copy_focus": review.get("copy_focus") or item.get("copy_focus"),
+                "panel_goal": review.get("panel_goal") or item.get("panel_goal"),
+                "visual_truth_mode": review.get("visual_truth_mode") or item.get("visual_truth_mode") or _default_visual_truth_mode(str(item.get("panel_type") or "")),
+                "origin_note": review.get("origin_note") or item.get("origin_note") or "",
+            }
+        )
     return merged
 
 
@@ -649,6 +693,28 @@ def _layout_notes_for_panel_type(panel_type: str) -> str:
         "parameter_explainer": "保留参数/要点排版空间，适合规格信息展示。",
     }
     return notes.get(panel_type, "横向信息排布，主产品完整清晰。")
+
+
+def _default_visual_truth_mode(panel_type: str) -> str:
+    if panel_type in {"feature_exploded_view", "feature_process_material"}:
+        return "mechanism_illustration"
+    if panel_type in {"feature_scene", "feature_compare", "feature_benefit", "kv_problem_solution"}:
+        return "scene_reconstruction"
+    if panel_type in {"parameter_explainer", "sales_proof"}:
+        return "parameter_board"
+    return "faithful_closeup"
+
+
+def _visual_truth_constraint(visual_truth_mode: str, origin_note: str) -> str:
+    base = {
+        "faithful_closeup": "Only enlarge or restage structures that are verifiably present in the uploaded references. Do not invent hidden internal parts.",
+        "mechanism_illustration": "This panel may use a conceptual mechanism illustration, but it must stay anchored to the real product silhouette and visible structure.",
+        "scene_reconstruction": "This panel may reconstruct a usage scene, but product appearance, proportions and key structures must remain faithful to the uploaded references.",
+        "parameter_board": "This panel can be more informational, but parameter text and highlighted structures must remain grounded in the known product facts.",
+    }.get(visual_truth_mode, "Keep product structure faithful to the uploaded references.")
+    if origin_note:
+        return f"{base} Reviewer note: {origin_note}"
+    return base
 
 
 def _build_text_block(copy_lines: list[str], copy_blocks: dict[str, Any]) -> str:
