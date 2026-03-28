@@ -202,6 +202,26 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
     assert reused.json()["data"]["detail_strategy_preview"]["input_hash"] == original["input_hash"]
 
 
+def test_detail_generation_reuses_cached_strategy_preview_in_worker(client, monkeypatch):
+    sid = create_ready_session(client)
+
+    preview = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
+        json={"planner_instruction": "标题更短，版式更清晰"},
+    )
+    assert preview.status_code == 200
+
+    def _unexpected_rebuild(*args, **kwargs):
+        raise AssertionError("detail strategy preview should have been reused during generation")
+
+    monkeypatch.setattr("app.services.pipeline.build_detail_strategy_preview", _unexpected_rebuild)
+
+    generation = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={})
+    assert generation.status_code == 200
+    results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results").json()["data"]
+    assert results["summary"]["ready_count"] >= 8
+
+
 def test_detail_generation_job_emits_detail_specific_events(client):
     sid = create_ready_session(client)
     preview = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
@@ -972,6 +992,20 @@ def test_parameter_attachment_extract_flow(client):
     assert copy_data["hero_scene"]
     assert copy_data["core_selling_points"]
     assert copy_data["key_parameters"]
+
+
+def test_parameter_extract_without_attachments_uses_analysis_and_session_images(client):
+    sid = create_ready_session(client)
+
+    extract = client.post(f"/api/v2/sessions/{sid}/parameters/extract").json()["data"]
+    assert extract["job_type"] == "extract_parameters"
+
+    parameter_data = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]
+    snapshot = parameter_data["parameter_snapshot"]
+    assert snapshot["source_mode"] == "analysis_only"
+    assert snapshot["evidence_priority"] == "analysis_then_copy"
+    assert snapshot["relevance_status"] == "valid"
+    assert parameter_data["applied_copy_fields"]["hero_scene"]
 
 
 def test_idempotency_and_conflict(client, monkeypatch):

@@ -296,3 +296,26 @@
   - 不再使用 `xiaomi/mimo` 作为默认 OpenRouter 文本模型；文本辅助默认收口为 `deepseek + minimax`
   - 为避免额外时延与过度设计，`llm_route_main_copy_design` 与 `llm_route_detail_copy_review` 默认改为 `disabled`
   - 视觉主链模型不因这次文本 Agent 收口而变更；Step 3 二次补全仍保留为唯一默认开启的 OpenRouter 文本链路
+- 2026-03-28 M21:
+  - Step 3 职责重定义为“单次调用的小型文案策划 Agent”：默认前端主链只使用 `POST /api/v2/sessions/{session_id}/parameters/extract`
+  - `POST /api/v2/sessions/{session_id}/parameters/extract` 不再要求必须先上传参数附件；无附件时改为基于 `analysis_snapshot + 当前 session 商品图 + confirmed_copy` 生成可编辑整页结果
+  - `parameter_snapshot` 收口为 Step 3 最终结果源，固定承载 `hero_scene/core_selling_points/key_parameters/product_advantages/feature_highlights`，并补充 `source_mode/evidence_priority/evidence_summary`
+  - `POST /api/v2/sessions/{session_id}/parameters/complete` 保留兼容，但退出默认前端流程
+  - `SmartPhoto` Step 3 页默认不再自动调用 `parameters/complete`，首次进入和补传附件后都只重跑一次 `parameters/extract`
+  - Step 3 本地/样例环境变量统一显式收口：`WHATAI_PARAMETER_MODEL` 默认改为 `gemini-3-flash-preview`，避免再出现实现与规划不一致
+- 2026-03-28 M22:
+  - Step 5 策略预览新增运行时 `planner_profile`，当前支持 `harness_first|light_model` 两档；`strategy_preview/detail_strategy_preview` 与对应 `input_hash` 均会记录当前 profile/provider/model
+  - 主图/详情页 planner 默认模型收口为 `WHATAI_PLANNER_MODEL=gemini-3.1-pro-preview-thinking-high`，轻量档默认 `WHATAI_PLANNER_LIGHT_MODEL=gemini-3-flash-preview`，OpenRouter 轻量备选为 `moonshotai/kimi-k2.5`
+  - 图片生成默认模型切换为 `WHATAI_IMAGE_MODEL=gemini-3.1-flash-image-preview-2k`
+  - `job status` 接口新增返回 `result_payload`；当上游返回 `429` 时，worker 会显式写入 `rate_limited (42901)` 与 `upstream_http_status/upstream_reason`
+  - `SmartPhoto` 主图/详情页结果页新增“上游限流”错误映射，不再把 `429` 一律展示成 `Job timed out`
+- 2026-03-28 M23:
+  - `POST /api/v2/sessions/{session_id}/generations` 进入 worker 后，会优先复用 session 上已持久化且 `input_hash` 未变化的 `strategy_preview`，不再为了正式生成再重跑 Step 5 planner
+  - `POST /api/v2/sessions/{session_id}/detail-pages/generations` 同样优先复用已持久化且 `input_hash` 未变化的 `detail_strategy_preview`
+  - 该改动用于消除“策略页已经成功，但正式生成时又被 planner 限流卡住”的重复耗时与重复失败源
+- 2026-03-28 M24:
+  - 主图/详情页 planner 默认临时切到 `WhatAI + kimi-k2.5`，并对 `kimi-k2.5` 请求自动追加 `enable_thinking=true`
+  - planner 命中 `429/超时` 时新增“一次轻量降级补救”：自动切到 `PLANNER_FALLBACK_ROUTE + WHATAI_PLANNER_LIGHT_MODEL` 再试 1 次，不做同模型多轮重试
+  - `strategy_preview/detail_strategy_preview` 新增 `planner_primary_* / planner_fallback_* / planner_attempt_count / planner_final_source` 调试元数据；job failure payload 增加 `planner_stage`
+  - 详情页 prompt 组装新增“planning context vs visible copy”隔离，过滤 `Proof/panel_goal/copy_focus/设计证明/【...】` 等内部规划标签，避免泄露到最终成图
+  - 修复 detail worker 复用预览时误读 `product_manifest` 字段的问题，确保 `detail_strategy_preview` 命中同一 `input_hash` 时不再重跑 planner/reviewer

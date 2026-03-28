@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.session_image import SessionImageModel
 from app.services.copy_normalization import normalize_copy_payload, normalize_phrase_list, repair_broken_text
 from app.services.main_gallery_rules import (
@@ -48,6 +49,8 @@ def strategy_preview_input_hash(
     reference_manifest: list[dict[str, Any]] | None = None,
     strategy_reference_manifest: list[dict[str, Any]] | None = None,
 ) -> str:
+    settings = get_settings()
+    client = WhataiClient()
     normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
     loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
     loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
@@ -69,6 +72,9 @@ def strategy_preview_input_hash(
     payload["platform_overlay"] = get_platform_overlay(active_platform_id)
     payload["slot_blueprints"] = slot_blueprints
     payload["strategy_overrides"] = list(resolved_prompt_overrides.values())
+    payload["planner_profile"] = settings.planner_profile
+    payload["planner_provider"] = client.llm_router.provider_for_task("main_planner")
+    payload["planner_model"] = client.llm_router.model_for_task("main_planner")
     return _stable_hash(
         payload
     )
@@ -91,6 +97,7 @@ def build_strategy_preview(
     reference_manifest: list[dict[str, Any]] | None = None,
     strategy_reference_manifest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    settings = get_settings()
     normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
     profile = platform_profile(active_platform_id)
     platform_name = profile.name if profile else active_platform_id
@@ -166,6 +173,13 @@ def build_strategy_preview(
         "platform_overlay": overlay,
         "provider": (planner_meta or {}).get("provider", "whatai"),
         "model": (planner_meta or {}).get("model", ""),
+        "planner_profile": settings.planner_profile,
+        "planner_primary_provider": (planner_meta or {}).get("planner_primary_provider"),
+        "planner_primary_model": (planner_meta or {}).get("planner_primary_model"),
+        "planner_fallback_provider": (planner_meta or {}).get("planner_fallback_provider"),
+        "planner_fallback_model": (planner_meta or {}).get("planner_fallback_model"),
+        "planner_attempt_count": int((planner_meta or {}).get("planner_attempt_count") or 0),
+        "planner_final_source": (planner_meta or {}).get("planner_final_source"),
         "prompt_version": (planner_meta or {}).get("prompt_version", ""),
         "repair_round": int((planner_meta or {}).get("repair_round") or 0),
         "source": (planner_meta or {}).get("source", "rule_based"),

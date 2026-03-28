@@ -12,8 +12,8 @@
 | Service Principal Agent | 校验 `X-App-Key`、解析 `service_id`、隔离接入方数据访问 | `app/core/deps.py`, `app/core/actors.py` |
 | LLM Router Agent | 按任务类型选择文本模型，统一屏蔽 OpenRouter / WhatAI 文本调用差异 | `app/services/llm_router.py` |
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
-| Parameter Extract Agent | 读取参数附件，产出 `parameter_snapshot` | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
-| Parameter Completion Agent | 基于首轮参数抽取、分析结果和当前 copy 做二次补全，不覆盖已确认事实 | `POST /sessions/{id}/parameters/complete` + `WhataiClient.complete_parameters` |
+| Parameter Extract Agent | 基于 `analysis + 商品图 + confirmed_copy + 可选附件` 一次性产出 Step3 最终可编辑结果 | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
+| Parameter Completion Agent | 兼容保留的同步补全入口，不再属于默认 Step3 主链 | `POST /sessions/{id}/parameters/complete` + `WhataiClient.complete_parameters` |
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
 | Strategy Builder | 生成 `strategy_preview`、`reference_manifest`、`prompt_plan` 和可执行 `asset_plan` | `build_strategy_preview` |
 | Main Copy Design Agent | 为主图每个槽位补充更适合上图的短标题、短副文案和参数标签 | `WhataiClient.design_main_copy_blocks` + `build_strategy_preview` |
@@ -90,32 +90,32 @@
 - 重试策略：上游网络级异常可进入 Celery 任务重试，最多 3 次
 
 ### 3.3.1 Parameter Extract Agent
-- 输入：参数附件（图片/PDF）+ 当前 copy + active_platform
+- 输入：`analysis_snapshot + 当前 session 商品图 + confirmed_copy + 可选参数附件`
 - 输出：`parameter_snapshot`
 - 状态责任：
-  - 产出 `relevance_status/rejection_reason/hero_scene/core_selling_points/key_parameters/product_advantages/feature_highlights`
+  - 一次性产出 Step3 页面默认展示的最终可编辑结果：
+    - `hero_scene`
+    - `core_selling_points`
+    - `key_parameters`
+    - `product_advantages`
+    - `feature_highlights`
+  - 无附件时仍可运行，属于 `analysis_only` 轻策划模式
+  - 有附件时附件优先，属于 `attachment_backed` 模式，可整页覆盖旧的 analysis-only 结果
   - 不相关附件返回 `invalid`，但 job 仍可成功完成，供前端展示解释
+  - 快照额外补充：
+    - `source_mode`
+    - `evidence_priority`
+    - `evidence_summary`
+    - `provider/model/prompt_version/source`
 - Job 语义：
   - `job_type = extract_parameters`
   - 当前复用 `q.analysis` 队列
 
 ### 3.3.2 Parameter Completion Agent
-- 输入：
-  - 当前 `parameter_snapshot`
-  - `analysis_snapshot`
-  - `confirmed_copy`
-  - 可选 `completion_instruction`
-- 输出：
-  - 补全后的 `parameter_snapshot`
-  - 增量 `applied_copy_fields`
-- 状态责任：
-  - 区分“首轮识别结果”和“二次推断补全结果”
-  - 追加 `completion_status/completion_source/inferred_core_selling_points/inferred_key_parameters/inferred_advantages/confidence_notes`
-  - 不覆盖已确认的关键商品事实
 - 当前实现说明：
   - 为同步接口，不创建独立 job
-  - 默认走 OpenRouter 文本路由与国产文本模型
-  - 如果 completion 失败，前端仍应继续使用首轮 `extract` 结果
+  - 不再属于默认前端主链
+  - Step3 的产品语义已经收口为“单次 extract 出最终页”，不是 `extract -> complete` 两段式
 
 ### 3.4 Strategy Builder
 - 输入：`confirmed_copy` + `active_platform_id` + session 图片 + 可选 `planner_instruction`
@@ -126,10 +126,12 @@
 - 额外约束：
   - 同一份输入会按 `input_hash` 直接复用已持久化 `strategy_preview`
   - `input_hash` 与正式构建共享同一批已加载 reference images，避免重复读图
-  - 主图 planner 之后会追加一层 `Main Copy Design Agent`：
-    - 只根据 `analysis_snapshot + confirmed_copy + strategy_preview` 设计更适合上图的短标题和短副文案
-    - 不改写视觉识别结论
-    - 输出结构化 `headline/supporting/proof_lines/matrix_lines/text_density/visual_emphasis`
+  - `generate_gallery` 进入 worker 后，会优先复用 session 上已存在且 `input_hash` 未变化的 `strategy_preview`，不再为了正式生成再重跑一次 planner
+  - 当前支持通过 `planner_profile` 切换策略预览档位：
+    - `harness_first`：当前默认主/详情 planner 先走 `WhatAI + kimi-k2.5`，并对 `kimi-k2.5` 自动追加 `enable_thinking=true`；若命中 `429/超时` 再降级到 `WHATAI_PLANNER_LIGHT_MODEL`
+    - `light_model`：切到更轻量的 planner 模型
+  - `strategy_preview` / `detail_strategy_preview` 会记录 `planner_profile`、`planner_primary_* / planner_fallback_* / planner_attempt_count / planner_final_source`，同时 `input_hash` 也会把当前 profile/provider/model 纳入哈希
+  - `Main Copy Design Agent` 当前默认关闭，不再作为主链默认时延来源
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”
   - 默认平台固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
   - 阿里系平台固定输出 5 个槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
@@ -140,14 +142,22 @@
   - `prompt_plan` / `asset_plan` 现在还会带 `global_consistency_note`：
     - 用于约束局部图和结构图必须与参考图整体结构一致
     - 如果没有内部结构证据，就不能直接生成强结构剖面图
+  - 详情页 prompt 组装新增“内部规划语义 vs 可见文案”边界：
+    - `panel_goal/copy_focus/planner_prompt_base/visual_truth_mode/origin_note` 只作为内部 planning context
+    - 最终上图文案会过滤 `Proof/panel_goal/copy_focus/设计证明/【...】` 等规划标签，避免泄露到成图
 
 ### 3.5 Prompt Composer + Image Generation Agent
 - 输入：copy、strategy、slot/role、可选 instruction、参考图
 - 输出：单图结构化 prompt 预览与图片字节
 - 状态变更：job `running`，逐图产出 `asset_ready`
 - 失败处理：上游失败 `50202`，任务写 `job_failed`
+- 限流补充：
+  - 若上游返回 `429 Too Many Requests`，当前会直接写成 `rate_limited (42901)`
+  - `jobs.result_payload` 会补 `upstream_http_status=429` 与 `upstream_reason=rate_limited`
+  - 前端结果页应显示“上游限流”，而不是统一显示 timeout
 - 重试策略：
   - 当前主图组默认优先走 `/v1/images/edits`，把参考图以 multipart 形式上传到上游
+  - 当前默认图片模型为 `gemini-3.1-flash-image-preview-2k`
   - `/images/edits` 当前传 `aspect_ratio`；`/images/generations` 才传 `size`
   - 主图与详情页都采用“两阶段执行”：先批量提交全部上游异步任务，再集中轮询全部 `task_id`，最后并发下载结果
   - `/images/edits` 若在提交阶段出现传输层断连，会先做请求级重试；若仍失败，只对当前单张图做内部重试
@@ -211,6 +221,7 @@
   - `aspect_ratio` 固定为 `21:9`
   - `panel_count` 固定为 `8`
   - 同一份输入会按 `input_hash` 直接复用已持久化 `detail_strategy_preview`
+  - `generate_detail_page` 进入 worker 后，也会优先复用已存在且 `input_hash` 未变化的 `detail_strategy_preview`，不再为了正式生成再重跑一次详情页 planner
   - `detail_strategy_preview` 当前额外带 `detail_story_brief`
   - `panel_plan` 当前带 `slot_id/narrative_section/panel_goal/copy_focus/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used/product_reference_ids/style_reference_ids/visual_truth_mode/origin_note`
   - 详情页 planner 会显式复用同一 `session_id` 下的 `analysis_snapshot + 商品图 + parameter_snapshot`

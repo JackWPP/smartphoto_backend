@@ -14,10 +14,13 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 - **批量异步提速链路**：主图和详情页都采用“批量提交上游任务 -> 集中轮询 -> 并发下载”的执行方式，默认拆分 `q.generation.main` / `q.generation.detail` 两个队列。
 - **上线级存储接入能力**：支持 `StorageAdapter` 切换到 S3 兼容对象存储，浏览器上传走 `presign -> 直传 -> complete`，结果图默认私有桶签名读。
 - **Step 3 参数附件链路**：支持说明书/参数图/PDF 上传、鲁棒参数提取和策略参考图补充输入。
-- **Step 2 / Step 3 智能补强**：Step 2 现在直接返回“建议补传什么图片”的结构化清单；Step 3 支持 `extract -> complete` 两段式参数补全，不覆盖已确认事实。
+- **Step 2 / Step 3 智能补强**：Step 2 现在直接返回“建议补传什么图片”的结构化清单；Step 3 已收口为单次 `extract` 的轻策划 Agent，基于 `analysis + 商品图 + confirmed_copy + 可选附件` 一次性产出可编辑整页内容。
 - **纯图片 SaaS 鉴权模型**：`/api/v2` 图片主链路统一通过 `X-App-Key` 做服务端调用鉴权，只保留 `session -> upload -> analysis -> strategy -> generation -> results`。
 - **主图/详情页同 Session 复用**：主图与详情页共用同一个 `session_id`、商品图与分析结果，详情页只额外接收风格图或已存在的对象存储路径。
-- **文本辅助 Agent 协同**：当前默认只保留 Step 3 参数补全这 1 条 OpenRouter 文本链路；主图文字设计与详情页 reviewer 默认关闭，避免额外时延与过度设计。
+- **文本辅助 Agent 协同**：当前默认不再把 Step 3 拆成前台两段链路；主图文字设计与详情页 reviewer 默认关闭，避免额外时延与过度设计。
+- **Step 3 单模型默认值**：Step 3 当前默认仍走 WhatAI Gemini，`WHATAI_PARAMETER_MODEL` 默认值已收口为 `gemini-3-flash-preview`，由 `.env*` 显式管理。
+- **Step 5 / 详情页 Planner 临时切 Kimi**：主图与详情页 planner 当前默认走 `WhatAI + kimi-k2.5`，并对 `kimi-k2.5` 自动追加 `enable_thinking=true`；若命中 `429/超时`，会自动降级到 `WHATAI_PLANNER_LIGHT_MODEL` 再试 1 次。
+- **生图限流显式化**：图片生成阶段若上游返回 `429`，job 会明确写成 `rate_limited`，前端结果页会显示“上游限流”，不再笼统表现为 `Job timed out`。
 - **用户体系彻底解耦**：`/api/v2/auth/*`、`/api/v2/account/*`、`/api/v2/guest/*` 已下线并返回 `410 feature_removed`，外部用户映射交由接入方服务处理。
 - **独立后台管理能力**：支持 `/api/admin/v1` 图片运维控制台、SQLite 管理员账号库、运行/产出看板、Session/Job/Asset 排障、模板与规则包后台化及高风险操作审计。
 
@@ -158,10 +161,12 @@ cp .env.prod.example .env.prod
 - `IMAGE_SAAS_DEFAULT_APP_ID`
 - `ADMIN_JWT_SECRET`
 - `WHATAI_API_KEY`
+- `WHATAI_PLANNER_LIGHT_MODEL` / `PLANNER_PROFILE` / `PLANNER_FALLBACK_ROUTE`
 - `WHATAI_IMAGE_MODEL` / `WHATAI_REQUEST_TIMEOUT_SECONDS`
 - `LLM_ROUTE_ANALYSIS` / `LLM_ROUTE_MAIN_PLANNER` / `LLM_ROUTE_DETAIL_PLANNER` / `LLM_ROUTE_PARAMETER_VISUAL`
 - `OPENROUTER_API_KEY` / `OPENROUTER_API_BASE`
-- `LLM_ANALYSIS_MODEL` / `LLM_MAIN_PLANNER_MODEL` / `LLM_DETAIL_PLANNER_MODEL` / `LLM_PARAMETER_MODEL`
+- `OPENROUTER_MAIN_PLANNER_MODEL` / `OPENROUTER_DETAIL_PLANNER_MODEL` / `OPENROUTER_PLANNER_LIGHT_MODEL`（仅在显式切 OpenRouter planner 时使用）
+- `LLM_ANALYSIS_MODEL` / `LLM_PARAMETER_MODEL`
 - `OPENROUTER_FORM_REWRITE_MODEL` / `OPENROUTER_TEXT_REVIEW_MODEL` / `OPENROUTER_TEXT_PRESENTATION_MODEL`
 - 全部 `S3_*`
 - `POSTGRES_PASSWORD`
@@ -171,6 +176,15 @@ cp .env.prod.example .env.prod
 - 生产默认推荐 `STORAGE_BACKEND=s3`
 - `ADMIN_DATABASE_URL` 默认继续使用 `sqlite:///./storage/admin.sqlite3`，但会随 `./runtime/storage` 持久化
 - 当前默认推荐：视觉主链保持 `WhatAI + Gemini`，OpenRouter 只给文本辅助任务或横向试模型用
+- 当前默认策略规划配置：
+  - `PLANNER_PROFILE=harness_first`
+  - `LLM_ROUTE_MAIN_PLANNER=whatai_gemini`
+  - `LLM_ROUTE_DETAIL_PLANNER=whatai_gemini`
+  - `WHATAI_PLANNER_MODEL=kimi-k2.5`
+  - `WHATAI_PLANNER_LIGHT_MODEL=gemini-3-flash-preview`
+  - `PLANNER_FALLBACK_ROUTE=whatai_gemini`
+- 当前默认生图模型：
+  - `WHATAI_IMAGE_MODEL=gemini-3.1-flash-image-preview-2k`
 - analysis 会优先消费后台“全局品类库”；客户新增品类时优先在后台配置，不要再回到后端 fallback 硬编码
 - 生产示例文件不再替你预填 WhatAI / OpenRouter 模型，直接复用你当前已验证过的配置
 - 生产不要继续使用开发态默认 secret

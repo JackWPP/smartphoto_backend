@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageOps
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.services.copy_normalization import normalize_copy_payload
 from app.services.detail_panel_library import (
     list_detail_panel_slots,
@@ -58,9 +61,14 @@ def detail_strategy_preview_input_hash(
     panel_preferences: dict[str, dict[str, Any]],
     active_platform_id: str | None,
 ) -> str:
+    settings = get_settings()
+    client = WhataiClient()
     normalized_copy = normalize_copy_payload(confirmed_copy)
     return _stable_hash(
         {
+            "planner_profile": settings.planner_profile,
+            "planner_provider": client.llm_router.provider_for_task("detail_planner"),
+            "planner_model": client.llm_router.model_for_task("detail_planner"),
             "panel_preferences": panel_preferences,
             "planner_instruction": planner_instruction or "",
             "platform_id": active_platform_id or "amazon",
@@ -106,6 +114,7 @@ def build_detail_strategy_preview(
     active_platform_id: str | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    settings = get_settings()
     normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
     platform_profile = get_platform_or_none(active_platform_id or "amazon")
     rule_pack, version, _ = load_published_rule_pack_config(
@@ -135,7 +144,16 @@ def build_detail_strategy_preview(
             "style_reference_manifest": [],
             "style_summary": _style_summary(normalized_copy, style_loaded),
             "style_source": "style_images" if style_loaded else "copy_fields",
+            "planner_profile": settings.planner_profile,
+            "planner_primary_provider": None,
+            "planner_primary_model": None,
+            "planner_fallback_provider": None,
+            "planner_fallback_model": None,
+            "planner_attempt_count": 0,
+            "planner_final_source": None,
             "detail_story_brief": _empty_detail_story_brief(),
+            "detail_planner_ms": 0,
+            "detail_reviewer_ms": 0,
             "detail_rule_pack": rule_pack.id if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
             "detail_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
             "detail_rule_pack_version": version.version_no if version is not None else 1,
@@ -169,6 +187,7 @@ def build_detail_strategy_preview(
 
     client = WhataiClient()
     product_grid, style_grid = build_detail_reference_grids(product_loaded, style_loaded)
+    planner_started = time.perf_counter()
     llm_result = client.plan_detail_page_narrative(
         confirmed_copy=normalized_copy,
         product_manifest=product_manifest,
@@ -179,14 +198,17 @@ def build_detail_strategy_preview(
         analysis_snapshot=analysis_snapshot or {},
         parameter_snapshot=parameter_snapshot or {},
     )
+    detail_planner_ms = int((time.perf_counter() - planner_started) * 1000)
 
     merged_plan = _merge_panel_plan(fallback_plan, llm_result.get("panel_plan") or [])
+    reviewer_started = time.perf_counter()
     review_plan = client.review_detail_panel_copy(
         confirmed_copy=normalized_copy,
         analysis_snapshot=analysis_snapshot or {},
         parameter_snapshot=parameter_snapshot or {},
         panel_plan=merged_plan,
     )
+    detail_reviewer_ms = int((time.perf_counter() - reviewer_started) * 1000)
     merged_plan = _apply_detail_panel_review(merged_plan, review_plan)
     return {
         "use_case": DETAIL_PAGE_USE_CASE,
@@ -203,12 +225,21 @@ def build_detail_strategy_preview(
         "style_reference_manifest": style_manifest,
         "style_summary": _style_summary(normalized_copy, style_loaded),
         "style_source": "style_images" if style_loaded else "copy_fields",
+        "planner_profile": settings.planner_profile,
+        "planner_primary_provider": llm_result.get("planner_primary_provider"),
+        "planner_primary_model": llm_result.get("planner_primary_model"),
+        "planner_fallback_provider": llm_result.get("planner_fallback_provider"),
+        "planner_fallback_model": llm_result.get("planner_fallback_model"),
+        "planner_attempt_count": int(llm_result.get("planner_attempt_count") or 0),
+        "planner_final_source": llm_result.get("planner_final_source"),
         "detail_story_brief": _normalize_detail_story_brief(llm_result.get("detail_story_brief")),
         "provider": str(llm_result.get("provider") or "whatai"),
         "model": str(llm_result.get("model") or ""),
         "prompt_version": str(llm_result.get("prompt_version") or ""),
         "repair_round": int(llm_result.get("repair_round") or 0),
         "source": str(llm_result.get("source") or "rule_based"),
+        "detail_planner_ms": detail_planner_ms,
+        "detail_reviewer_ms": detail_reviewer_ms,
         "detail_rule_pack": rule_pack.id if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
         "detail_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
         "detail_rule_pack_version": version.version_no if version is not None else 1,
@@ -329,9 +360,12 @@ def compose_detail_panel_prompt(
     plan = panel_plan_item or find_detail_panel_plan_item(strategy_preview, panel_id, db=db)
     product_name = _fallback_text(confirmed_copy.get("product_name"), "product")
     style_summary = _fallback_text(strategy_preview.get("style_summary"), "clean ecommerce detail page style")
-    copy_lines = [str(item).strip() for item in plan.get("copy_lines", []) if str(item).strip()]
-    copy_blocks = dict(plan.get("copy_blocks") or _copy_blocks_from_lines(copy_lines, panel_type=str(plan.get("panel_type") or "feature_benefit")))
-    planner_base = _fallback_text(
+    panel_type = str(plan.get("panel_type") or "feature_benefit")
+    raw_copy_lines = [str(item).strip() for item in plan.get("copy_lines", []) if str(item).strip()]
+    raw_copy_blocks = dict(plan.get("copy_blocks") or _copy_blocks_from_lines(raw_copy_lines, panel_type=panel_type))
+    visible_copy_lines = _sanitize_visible_copy_lines(raw_copy_lines)
+    visible_copy_blocks = _sanitize_visible_copy_blocks(raw_copy_blocks, panel_type=panel_type, fallback_lines=visible_copy_lines)
+    planner_base = _sanitize_planning_context_text(
         plan.get("planner_prompt_base"),
         f"Create one ecommerce detail page panel for {product_name} with clear hierarchy and strong product fidelity.",
     )
@@ -339,7 +373,6 @@ def compose_detail_panel_prompt(
         "Use the panel-selected product references as the primary fidelity reference. "
         "If style/font reference images exist, follow their color and typography direction."
     )
-    panel_type = str(plan.get("panel_type") or "feature_benefit")
     panel_type_label = str(plan.get("panel_type_label") or panel_type)
     layout_template = str(plan.get("layout_template") or "feature_card")
     rule_modules_used = [str(item) for item in plan.get("rule_modules_used", []) if str(item).strip()]
@@ -347,17 +380,30 @@ def compose_detail_panel_prompt(
     visual_truth_mode = str(plan.get("visual_truth_mode") or _default_visual_truth_mode(panel_type)).strip()
     origin_note = str(plan.get("origin_note") or "").strip()
     truth_constraint = _visual_truth_constraint(visual_truth_mode, origin_note)
+    planning_context = _sanitize_planning_context_text(
+        " | ".join(
+            item
+            for item in [
+                planner_base,
+                str(plan.get("panel_goal") or "").strip(),
+                str(plan.get("copy_focus") or "").strip(),
+            ]
+            if str(item).strip()
+        ),
+        f"Highlight the key value of {product_name} with strong product fidelity and clear visual hierarchy.",
+    )
 
     blocks = {
-        "goal": planner_base,
+        "planning_context": planning_context,
         "subject": f"Keep {product_name} as the dominant subject. Preserve silhouette, structure, color and proportions.",
         "layout": _fallback_text(plan.get("layout_notes"), "Single 21:9 panel layout with clear hierarchy for image and text."),
-        "text": _build_text_block(copy_lines, copy_blocks),
+        "text": _build_text_block(visible_copy_lines, visible_copy_blocks),
         "style": f"Use an ecommerce-ready detail page look. Style direction: {style_summary}. {reference_rule}",
         "constraints": (
             "Render one single horizontal detail page panel only. "
             "Visible text should be concise and integrated into the composition. "
             "Do not create a gallery sheet, watermark, UI screenshot, duplicated product or irrelevant props. "
+            "Never render internal planning labels such as Proof, panel_goal, copy_focus, narrative_section, 设计证明, 布局模板, 规则模块 or any 【...】 wrappers. "
             f"{truth_constraint}"
         ),
         "instruction": _fallback_text(instruction, "No extra edit instruction."),
@@ -368,7 +414,7 @@ def compose_detail_panel_prompt(
         else (
             f"Create a single ecommerce detail page panel image in a {DETAIL_PAGE_ASPECT_RATIO} horizontal layout. "
             f"Panel type: {panel_type_label}. Layout template: {layout_template}. "
-            f"Goal: {blocks['goal']} "
+            f"Planning context only, not literal on-image copy: {blocks['planning_context']} "
             f"Subject: {blocks['subject']} "
             f"Layout: {blocks['layout']} "
             f"On-image copy: {blocks['text']} "
@@ -389,7 +435,7 @@ def compose_detail_panel_prompt(
         "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
         "use_case": DETAIL_PAGE_USE_CASE,
         "blocks": blocks,
-        "copy_blocks": copy_blocks,
+        "copy_blocks": visible_copy_blocks,
         "raw_prompt_override": raw_prompt_override or None,
         "applied_preset_id": plan.get("applied_preset_id"),
         "strategy_fields_used": [
@@ -408,7 +454,7 @@ def compose_detail_panel_prompt(
         "product_reference_ids": [str(item) for item in plan.get("product_reference_ids", []) if str(item).strip()],
         "style_reference_ids": [str(item) for item in plan.get("style_reference_ids", []) if str(item).strip()],
         "planner_source": str(plan.get("planner_source") or "rule_based"),
-        "planner_base": planner_base,
+        "planner_base": planning_context,
         "rule_modules_used": rule_modules_used,
         "final_prompt": final_prompt,
     }
@@ -715,6 +761,70 @@ def _visual_truth_constraint(visual_truth_mode: str, origin_note: str) -> str:
     if origin_note:
         return f"{base} Reviewer note: {origin_note}"
     return base
+
+
+_DETAIL_VISIBLE_COPY_BLOCKLIST = (
+    "proof",
+    "panel_goal",
+    "copy_focus",
+    "narrative_section",
+    "design proof",
+    "设计证明",
+    "规则模块",
+    "布局模板",
+    "rule module",
+    "layout template",
+)
+
+
+def _sanitize_visible_copy_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[【\[]([^】\]]+)[】\]]", r"\1", text)
+    text = re.sub(r"\((?:Proof|panel_goal|copy_focus)\)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" |：:;；-")
+    lowered = text.lower()
+    if any(token in lowered for token in _DETAIL_VISIBLE_COPY_BLOCKLIST):
+        return ""
+    return text
+
+
+def _sanitize_visible_copy_lines(copy_lines: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in copy_lines:
+        text = _sanitize_visible_copy_text(item)
+        if not text or text in seen:
+            continue
+        result.append(text)
+        seen.add(text)
+    return result
+
+
+def _sanitize_visible_copy_blocks(copy_blocks: dict[str, Any], *, panel_type: str, fallback_lines: list[str]) -> dict[str, Any]:
+    bullet_points = copy_blocks.get("bullet_points")
+    proof_lines = copy_blocks.get("proof_lines")
+    sanitized = {
+        "headline": _sanitize_visible_copy_text(copy_blocks.get("headline")),
+        "supporting": _sanitize_visible_copy_text(copy_blocks.get("supporting")),
+        "bullet_points": _sanitize_visible_copy_lines([str(item) for item in bullet_points]) if isinstance(bullet_points, list) else [],
+        "proof_lines": _sanitize_visible_copy_lines([str(item) for item in proof_lines]) if isinstance(proof_lines, list) else [],
+        "cta_line": _sanitize_visible_copy_text(copy_blocks.get("cta_line")),
+    }
+    if any(sanitized.values()):
+        return sanitized
+    return _copy_blocks_from_lines(fallback_lines, panel_type=panel_type)
+
+
+def _sanitize_planning_context_text(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    text = re.sub(r"[【\[]([^】\]]+)[】\]]", r"\1", text)
+    text = re.sub(r"(panel_goal|copy_focus|narrative_section|Proof|设计证明|规则模块|布局模板)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" |：:;；-")
+    return text or fallback
 
 
 def _build_text_block(copy_lines: list[str], copy_blocks: dict[str, Any]) -> str:

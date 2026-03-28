@@ -507,7 +507,9 @@ class ParameterSnapshotUpdateRequest(BaseModel):
     key_parameters: list[dict[str, Any]] = Field(default_factory=list, description="提取出的结构化关键参数。")
     product_advantages: list[str] = Field(default_factory=list, description="提取出的产品优势列表。")
     feature_highlights: list[str] = Field(default_factory=list, description="提取出的附加亮点列表。")
-    source_summary: list[dict[str, Any]] = Field(default_factory=list, description="提取来源摘要。")
+    source_mode: str = Field(default="analysis_only", description="Step3 本次结果的来源模式。")
+    evidence_priority: str = Field(default="analysis_then_copy", description="Step3 证据优先级说明。")
+    evidence_summary: list[dict[str, Any]] = Field(default_factory=list, description="Step3 证据摘要。")
 
     @field_validator("hero_scene", "rejection_reason", mode="before")
     @classmethod
