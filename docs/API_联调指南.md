@@ -20,7 +20,7 @@
 - 单图重生接口 `POST /assets/{asset_id}/regenerate` 现在有两种 job_type：
   - 主图：`regenerate_asset`
   - 详情页 panel：`regenerate_detail_panel`
-- Step 3 参数提取默认模型已切为 `gemini-3.1-flash-lite-preview`
+- Step 3 默认仍是单模型单次调用，当前默认模型由 `whatai_parameter_model` 控制，默认值为 `gemini-3-flash-preview`
 - `GET /jobs/{job_id}` 已补 timing 字段，前端可直接展示任务总耗时和阶段耗时
 - Apifox 请始终重新导入 `docs/openapi/smartphoto_backend_openapi.json`，不要手改字段定义
 
@@ -226,27 +226,27 @@
   - 支持图片与 PDF；不相关内容会在后续提取结果中返回 `relevance_status=invalid`
 - 参数提取接口：
   - `POST /sessions/{session_id}/parameters/extract`
-  - `POST /sessions/{session_id}/parameters/complete`
   - `GET /sessions/{session_id}/parameters`
   - `PUT /sessions/{session_id}/parameters`
+  - `POST /sessions/{session_id}/parameters/complete` 仅保留兼容，不再是默认前端流程
 - 当前实现行为：
   - 提取 job_type 为 `extract_parameters`
-  - 参数提取模型默认 `whatai_parameter_model = gemini-3.1-flash-lite-preview`
-  - 图片附件：直接作为多模态输入喂给参数提取模型
-  - PDF 附件：先转成 markdown，再把 markdown 正文交给参数提取模型解释
+  - Step 3 已收口为“单次调用的小型文案策划 Agent”，默认一次 `extract` 直接产出用户可编辑整页结果
+  - 参数提取模型默认由 `whatai_parameter_model` 控制，当前默认值为 `gemini-3-flash-preview`
+  - 没有附件时：
+    - 仍允许调用 `POST /parameters/extract`
+    - 主要依据 `analysis_snapshot + 当前 session 商品图 + confirmed_copy`
+    - 允许轻策划，但不能凭空创造 analysis 和图片里没有依据的功能/参数
+  - 有附件时：
+    - 附件优先级高于 analysis
+    - 图片附件直接作为多模态输入喂给参数提取模型
+    - PDF 附件先转成 markdown，再把 markdown 正文交给参数提取模型解释
+    - 默认整页重算，允许覆盖旧的 analysis-only Step3 结果
   - 提取完成后会默认用 `replace_all` 模式覆盖 Step 4 正式字段：
     - `hero_scene`
     - `core_selling_points`
     - `key_parameters`
     - `product_advantages`
-  - Step 3 现在支持两段式：
-    1. `extract`：Gemini 先做首轮结构化抽取
-    2. `complete`：文本侧 completion agent 再基于 `parameter_snapshot + analysis_snapshot + confirmed_copy` 做二次补全
-  - `POST /sessions/{session_id}/parameters/complete` 为同步接口：
-    - 默认走 OpenRouter 文本路由
-    - 用于补更多相关参数、推断卖点与优势
-    - 不会覆盖已确认的关键商品事实
-    - 若调用失败，前端仍可继续使用首轮 `extract` 结果
   - `parameter_snapshot` 至少包含：
     - `relevance_status`
     - `rejection_reason`
@@ -255,13 +255,16 @@
     - `key_parameters`
     - `product_advantages`
     - `feature_highlights`
-    - `source_summary`
-    - `completion_status`
-    - `completion_source`
-    - `inferred_core_selling_points`
-    - `inferred_key_parameters`
-    - `inferred_advantages`
-    - `confidence_notes`
+    - `source_mode`
+    - `evidence_priority`
+    - `evidence_summary`
+    - `provider`
+    - `model`
+    - `prompt_version`
+    - `source`
+- 兼容说明：
+  - `POST /sessions/{session_id}/parameters/complete` 仍然保留
+  - 但它不再属于默认前端主链，应视为兼容增强，而不是 Step3 的必经步骤
 - 补充说明：
   - 当前参数提取不走 OCR
   - 提取结果是“可用抽取 + 人工可改”，不会强承诺复杂图表/版面还原精度
@@ -280,6 +283,9 @@
   - 该接口仍是同步接口，若配置了 WhatAI planner 且存在参考图，会在请求内同步调用上游 LLM
   - 若前端部署在带 15~30 秒超时的边缘函数/CDN Worker 前，不建议继续经该层代理此接口；应直连后端 Nginx 或使用更长超时
   - 对同一 session、同一份输入再次调用时，后端会直接复用已持久化的 `strategy_preview`，避免前端重试时重复触发长耗时 planner
+  - 当前支持通过运行时配置切换 `planner_profile`：
+    - `harness_first`：当前默认主/详情 planner 先走 `WhatAI + kimi-k2.5`（自动追加 `enable_thinking=true`），若命中 `429/超时` 再降级到 `WHATAI_PLANNER_LIGHT_MODEL`
+    - `light_model`：切到轻量 planner 模型，用于压同步预览耗时
 - 主图文字 override 接口：
   - `GET /sessions/{session_id}/strategy/overrides`
   - `PUT /sessions/{session_id}/strategy/overrides`
@@ -288,10 +294,12 @@
   - 立即同步生成预览并落库
   - 创建 `build_strategy` job 记录，但不进队列
   - 对同一份输入再次调用时，会按 `input_hash` 直接复用已持久化的 `strategy_preview`
+  - `strategy_preview` 现在会返回 `planner_profile`，以及 `planner_primary_* / planner_fallback_* / planner_attempt_count / planner_final_source`
   - Step 5 当前会结合 `confirmed_copy + active_platform_id + session 图片 + analysis.reference_summary` 做一轮槽位级 prompt planner
   - `strategy_preview.input_hash` 与正式构建共享同一批已加载 reference images，避免重复读图
+  - `POST /sessions/{session_id}/generations` 现在会优先复用已持久化且 `input_hash` 未变化的 `strategy_preview`，不会在 worker 里再次补跑 planner
   - planner 当前允许由 LLM 主导输出 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包只负责 guardrail 和 fallback
-  - Step 5 现在会额外调用文本侧 `main copy design agent`，为每个槽位补充更适合上图的短标题/短副文案/参数标签；该层只增强 `copy_blocks`，不替代视觉 planner
+  - `main copy design agent` 当前默认关闭，不再作为主图预览默认时延来源
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”：
     - 默认平台仍输出 5 张：`hero` `white_bg` `selling_point` `scene` `detail`
     - 阿里系（`1688` / `taobao` / `alibaba_intl`）输出 5 个阿里槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
@@ -515,6 +523,7 @@
     - `panel_preferences: [{slot_id, panel_type, display_order, locked}]`
   - 同步落库到 `session.detail_strategy_preview`
   - 对同一份输入再次调用时，会按 `input_hash` 直接复用已持久化的 `detail_strategy_preview`
+  - `POST /sessions/{session_id}/detail-pages/generations` 现在也会优先复用已持久化且 `input_hash` 未变化的 `detail_strategy_preview`，不会在 worker 里再次补跑详情页 planner
   - 固定返回：
     - `use_case = amazon_detail`
     - `aspect_ratio = 21:9`

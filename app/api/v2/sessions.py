@@ -980,8 +980,6 @@ def extract_parameters(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    if not list_active_parameter_attachments(db, session.id):
-        raise AppError("invalid_request", "parameter attachments missing", 400)
 
     job = create_job(
         db,

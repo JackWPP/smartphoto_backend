@@ -5,8 +5,11 @@ from pathlib import Path
 
 from PIL import Image
 
+from app.core.config import Settings
 from app.core.errors import AppError
 from app.services.copy_normalization import normalize_key_parameters
+from app.services.detail_pages import compose_detail_panel_prompt
+from app.services.llm_router import LLMRouter
 from app.services.main_gallery_rules import build_copy_blocks, get_main_gallery_slot_blueprints
 from app.services.pipeline import _apply_analysis_defaults_to_copy
 from app.services.reference_images import LoadedReferenceImage, select_reference_images_for_role
@@ -935,3 +938,106 @@ def _image_bytes(image: Image.Image) -> bytes:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def test_llm_router_adds_enable_thinking_for_kimi_whatai(monkeypatch):
+    captured: dict[str, object] = {}
+    router = LLMRouter(
+        Settings(
+            whatai_api_key="test-key",
+            llm_route_main_planner="whatai_gemini",
+            whatai_planner_model="kimi-k2.5",
+        )
+    )
+
+    def _fake_request_json_with_retry(**kwargs):
+        captured["payload"] = kwargs["payload"]
+        return {"choices": [{"message": {"content": "{\"ok\": true}"}}]}
+
+    monkeypatch.setattr(router, "_request_json_with_retry", _fake_request_json_with_retry)
+
+    response = router.complete_json_with_meta(
+        task="main_planner",
+        messages=[{"role": "user", "content": "hi"}],
+        error_key="upstream_llm_error",
+    )
+
+    assert response["result"] == {"ok": True}
+    assert captured["payload"]["enable_thinking"] is True
+    assert response["meta"]["provider"] == "whatai"
+    assert response["meta"]["model"] == "kimi-k2.5"
+
+
+def test_llm_router_planner_falls_back_to_whatai_light_model(monkeypatch):
+    router = LLMRouter(
+        Settings(
+            openrouter_api_key="test-openrouter",
+            whatai_api_key="test-whatai",
+            llm_route_main_planner="openrouter_text",
+            planner_fallback_route="whatai_gemini",
+            openrouter_main_planner_model="moonshotai/kimi-k2.5",
+            whatai_planner_light_model="gemini-3-flash-preview",
+        )
+    )
+
+    def _fake_post_chat_json(payload, error_key, *, route):
+        if route == router.OPENROUTER_TEXT_ROUTE:
+            raise AppError("rate_limited", "busy", 429)
+        assert route == router.WHATI_GEMINI_ROUTE
+        assert payload["model"] == "gemini-3-flash-preview"
+        return {"candidates": [{"content": {"parts": [{"text": "{\"ok\": true}"}]}}]}
+
+    monkeypatch.setattr(router, "_post_chat_json", _fake_post_chat_json)
+
+    response = router.complete_json_with_meta(
+        task="main_planner",
+        messages=[{"role": "user", "content": "hi"}],
+        error_key="upstream_llm_error",
+    )
+
+    assert response["result"] == {"ok": True}
+    assert response["meta"]["planner_primary_model"] == "moonshotai/kimi-k2.5"
+    assert response["meta"]["planner_fallback_model"] == "gemini-3-flash-preview"
+    assert response["meta"]["planner_attempt_count"] == 2
+    assert response["meta"]["planner_final_source"] == "fallback"
+
+
+def test_compose_detail_panel_prompt_filters_internal_planning_terms():
+    prompt = compose_detail_panel_prompt(
+        confirmed_copy={"product_name": "桌面迷你除湿机"},
+        strategy_preview={"style_summary": "clean detail page"},
+        panel_id="panel_1",
+        panel_plan_item={
+            "panel_id": "panel_1",
+            "slot_id": "panel_1",
+            "panel_label": "结构说明",
+            "display_order": 1,
+            "panel_type": "feature_proof",
+            "panel_type_label": "结构说明",
+            "layout_template": "feature_card",
+            "panel_goal": "设计证明 (Proof)",
+            "copy_focus": "panel_goal",
+            "planner_prompt_base": "【高效吸湿结构】 展示内部设计证明",
+            "layout_notes": "横版排布",
+            "copy_lines": ["【高效吸湿结构】", "设计证明 (Proof)", "桌面迷你除湿机"],
+            "copy_blocks": {
+                "headline": "【高效吸湿结构】",
+                "supporting": "设计证明 (Proof)",
+                "bullet_points": ["桌面迷你除湿机", "copy_focus"],
+                "proof_lines": ["panel_goal"],
+                "cta_line": "",
+            },
+            "product_reference_ids": ["img-front"],
+            "style_reference_ids": [],
+            "planner_source": "llm",
+        },
+    )
+
+    final_prompt = prompt["final_prompt"]
+    visible_copy = final_prompt.split("On-image copy: ", 1)[1].split(" Style:", 1)[0]
+    assert "Proof" not in visible_copy
+    assert "panel_goal" not in visible_copy
+    assert "copy_focus" not in visible_copy
+    assert "设计证明" not in visible_copy
+    assert "【高效吸湿结构】" not in visible_copy
+    assert "桌面迷你除湿机" in visible_copy

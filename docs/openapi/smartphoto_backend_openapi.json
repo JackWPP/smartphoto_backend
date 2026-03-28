@@ -22343,14 +22343,26 @@
             "title": "Feature Highlights",
             "description": "提取出的附加亮点列表。"
           },
-          "source_summary": {
+          "source_mode": {
+            "type": "string",
+            "title": "Source Mode",
+            "description": "Step3 本次结果的来源模式。",
+            "default": "analysis_only"
+          },
+          "evidence_priority": {
+            "type": "string",
+            "title": "Evidence Priority",
+            "description": "Step3 证据优先级说明。",
+            "default": "analysis_then_copy"
+          },
+          "evidence_summary": {
             "items": {
               "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
-            "title": "Source Summary",
-            "description": "提取来源摘要。"
+            "title": "Evidence Summary",
+            "description": "Step3 证据摘要。"
           }
         },
         "type": "object",
@@ -25621,6 +25633,19 @@
             ],
             "title": "Error Message",
             "description": "失败时的错误消息。"
+          },
+          "result_payload": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Payload",
+            "description": "任务结果或失败附加信息。"
           }
         },
         "type": "object",

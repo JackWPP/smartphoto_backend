@@ -53,6 +53,7 @@ def get_job_status(job_id: str, db: Session = Depends(get_db), principal: Servic
         "stage_timings": timing_snapshot.get("stage_timings") or [],
         "error_code": job.error_code,
         "error_message": job.error_message,
+        "result_payload": job.result_payload,
     }
     return success_response(data)
 

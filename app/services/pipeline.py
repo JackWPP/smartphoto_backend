@@ -33,20 +33,20 @@ from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
     build_detail_prompt_previews,
+    detail_strategy_preview_input_hash,
     build_detail_reference_grids,
     build_detail_strategy_preview,
     compose_detail_panel_prompt,
-    normalize_detail_strategy_preview,
 )
 from app.services.jobs import append_job_event, update_job_status
 from app.services.locking import release_locks
 from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy, merge_parameter_snapshot_into_copy
 from app.services.prompts import compose_prompt
 from app.services.repo import list_visible_prompt_presets_by_ids
-from app.services.reference_images import load_reference_images, select_reference_images_for_role
+from app.services.reference_images import build_reference_manifest, load_reference_images, select_reference_images_for_role
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter
-from app.services.strategy import build_strategy_preview, normalize_strategy_preview
+from app.services.strategy import build_strategy_preview, strategy_preview_input_hash
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
 from app.services.user_accounts import create_job_completion_notification, refresh_session_search_cache, update_session_last_generated_at
@@ -374,22 +374,13 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
     session = _require_session(db, job.session_id)
 
     attachments = _parameter_attachments(db, session.id)
-    if not attachments:
-        update_job_status(
-            db,
-            job,
-            status="failed",
-            error_code="40001",
-            error_message="parameter attachments missing",
-            progress=100,
-        )
-        append_job_event(db, job.id, "job_failed", {"event": "job_failed", "error": "parameter attachments missing"})
-        raise AppError("invalid_request", "parameter attachments missing", 400)
+    session_images = _session_images(db, session.id)
 
     update_job_status(db, job, status="running", progress=10, stage="extracting")
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
     image_attachments = [attachment for attachment in attachments if attachment.mime_type.startswith("image/")]
+    loaded_product_images = load_reference_images(session_images, storage=storage, max_edge=1280) if session_images else []
     loaded_images = load_reference_images(image_attachments, storage=storage, max_edge=1280) if image_attachments else []
     file_attachments = []
     for attachment in attachments:
@@ -408,7 +399,9 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
 
     snapshot = client.extract_parameters(
         confirmed_copy=_resolved_copy_for_session(db, session),
+        analysis_snapshot=session.analysis_snapshot or {},
         active_platform_id=session.active_platform_id,
+        product_images=loaded_product_images,
         image_attachments=loaded_images,
         file_attachments=file_attachments,
     )
@@ -419,6 +412,7 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
     session.current_step = max(session.current_step, 3)
     session.strategy_preview = None
     session.detail_strategy_preview = None
+    refresh_session_search_cache(session)
 
     update_job_status(
         db,
@@ -652,6 +646,7 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         if not images:
             raise AppError("missing_required_images", http_status=400)
         loaded_reference_images = load_reference_images(images, storage=storage)
+        update_job_status(db, job, status="running", progress=8, stage="planning")
         effective_strategy_preview = _ensure_generation_strategy_preview(db, session, images)
 
         if job.job_type in {"generate_gallery", "regenerate_gallery", "global_edit"}:
@@ -809,8 +804,21 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
             stage="failed",
             error_code=str(exc.error.code),
             error_message=exc.message,
+            result_payload=_job_failure_payload(exc, planner_stage=_planner_stage_for_failure(job)),
         )
-        append_job_event(db, job.id, "job_failed", {"event": "job_failed", "error": exc.message})
+        append_job_event(
+            db,
+            job.id,
+            "job_failed",
+            {
+                "event": "job_failed",
+                "error": exc.message,
+                "error_code": exc.error.code,
+                "upstream_reason": exc.key,
+                "upstream_http_status": exc.http_status,
+                "planner_stage": _planner_stage_for_failure(job),
+            },
+        )
         session.status = "failed"
         raise
     finally:
@@ -822,6 +830,29 @@ def _ensure_generation_strategy_preview(db: Session, session: SessionModel, sess
     prompt_overrides = _session_prompt_overrides(db, session.id)
     strategy_reference_images = _strategy_reference_images(db, session.id)
     resolved_copy = _resolved_copy_for_session(db, session)
+    if isinstance(existing_preview, dict) and existing_preview.get("reference_manifest") and existing_preview.get("prompt_plan") and existing_preview.get("asset_plan"):
+        current_input_hash = strategy_preview_input_hash(
+            resolved_copy,
+            session.active_platform_id or "temu",
+            db=db,
+            session_images=session_images,
+            analysis_snapshot=session.analysis_snapshot or {},
+            parameter_snapshot=session.parameter_snapshot or {},
+            planner_instruction=existing_preview.get("planner_instruction"),
+            slot_preferences=existing_preview.get("slot_preferences") or [],
+            prompt_overrides=prompt_overrides,
+            strategy_reference_images=strategy_reference_images,
+        )
+        if existing_preview.get("input_hash") in {None, "", current_input_hash}:
+            if existing_preview.get("input_hash") != current_input_hash:
+                session.strategy_preview = {**existing_preview, "input_hash": current_input_hash}
+            logger.info(
+                "Reusing persisted strategy_preview during generation: session_id=%s input_hash=%s",
+                session.id,
+                current_input_hash,
+            )
+            return session.strategy_preview or existing_preview
+
     rebuilt = build_strategy_preview(
         resolved_copy,
         session.active_platform_id or "temu",
@@ -834,23 +865,32 @@ def _ensure_generation_strategy_preview(db: Session, session: SessionModel, sess
         prompt_overrides=prompt_overrides,
         strategy_reference_images=strategy_reference_images,
     )
-    effective_strategy_preview = normalize_strategy_preview(
-        existing_preview,
-        resolved_copy,
-        session.active_platform_id or "temu",
-        db=db,
-        prompt_overrides=prompt_overrides,
-        parameter_snapshot=session.parameter_snapshot or {},
-    )
-    if (
-        effective_strategy_preview.get("reference_manifest")
-        and effective_strategy_preview.get("prompt_plan")
-        and effective_strategy_preview.get("input_hash") == rebuilt.get("input_hash")
-    ):
-        return effective_strategy_preview
-
     session.strategy_preview = rebuilt
     return rebuilt
+
+
+def _planner_stage_for_failure(job: JobModel) -> str | None:
+    stage = str(job.stage or "").strip()
+    if stage != "planning":
+        return None
+    if job.job_type in {"generate_gallery", "regenerate_gallery", "global_edit", "regenerate_asset"}:
+        return "main_planner"
+    if job.job_type in {"generate_detail_page", "regenerate_detail_panel"}:
+        return "detail_planner"
+    return None
+
+
+def _job_failure_payload(exc: AppError, *, planner_stage: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "error_key": exc.key,
+        "error_code": exc.error.code,
+        "upstream_reason": exc.key,
+    }
+    if exc.http_status:
+        payload["upstream_http_status"] = exc.http_status
+    if planner_stage:
+        payload["planner_stage"] = planner_stage
+    return payload
 
 
 def _render_assets_concurrently(
@@ -1246,6 +1286,7 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             raise AppError("missing_required_images", http_status=400)
         style_images = _detail_style_images(db, session.id)
 
+        update_job_status(db, job, status="running", progress=8, stage="planning")
         effective_strategy_preview = _ensure_detail_strategy_preview(db, session, session_images, style_images)
         update_job_status(db, job, status="running", progress=10, stage="planning")
         append_job_event(
@@ -1258,6 +1299,12 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 "panel_count": len(effective_strategy_preview.get("panel_plan") or []),
                 "input_hash": effective_strategy_preview.get("input_hash"),
                 "detail_rule_pack": effective_strategy_preview.get("detail_rule_pack"),
+                "detail_planner_ms": effective_strategy_preview.get("detail_planner_ms"),
+                "detail_reviewer_ms": effective_strategy_preview.get("detail_reviewer_ms"),
+                "planner_primary_model": effective_strategy_preview.get("planner_primary_model"),
+                "planner_fallback_model": effective_strategy_preview.get("planner_fallback_model"),
+                "planner_attempt_count": effective_strategy_preview.get("planner_attempt_count"),
+                "planner_final_source": effective_strategy_preview.get("planner_final_source"),
             },
         )
         loaded_product_images = load_reference_images(session_images, storage=storage)
@@ -1324,6 +1371,12 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             loaded_style_images=loaded_style_images,
             product_grid=product_grid,
             style_grid=style_grid,
+        )
+        detail_render_ms = int(
+            sum(
+                int(((item.get("generation_snapshot") or {}).get("timing") or {}).get("render_total_ms") or 0)
+                for item in rendered_panels
+            )
         )
 
         total_assets = max(len(rendered_panels) + len(carry_forward_sources) + 1, 1)
@@ -1500,6 +1553,7 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 "asset_id": stitched_asset.id,
                 "asset_kind": "stitched",
                 "display_order": stitched_asset.display_order,
+                "detail_render_ms": detail_render_ms,
             },
         )
 
@@ -1520,6 +1574,9 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 "stitched_asset_id": stitched_asset.id,
                 "detail_generation_round": round_no,
                 "version_no": version_no,
+                "detail_render_ms": detail_render_ms,
+                "detail_planner_ms": effective_strategy_preview.get("detail_planner_ms"),
+                "detail_reviewer_ms": effective_strategy_preview.get("detail_reviewer_ms"),
             },
         )
         append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
@@ -1531,6 +1588,31 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 job_type=job.job_type,
                 succeeded=True,
             )
+    except AppError as exc:
+        update_job_status(
+            db,
+            job,
+            status="failed",
+            progress=100,
+            stage="failed",
+            error_code=str(exc.error.code),
+            error_message=exc.message,
+            result_payload=_job_failure_payload(exc, planner_stage=_planner_stage_for_failure(job)),
+        )
+        append_job_event(
+            db,
+            job.id,
+            "job_failed",
+            {
+                "event": "job_failed",
+                "error": exc.message,
+                "error_code": exc.error.code,
+                "upstream_reason": exc.key,
+                "upstream_http_status": exc.http_status,
+                "planner_stage": _planner_stage_for_failure(job),
+            },
+        )
+        raise
     finally:
         release_locks(lock_keys)
 
@@ -1658,17 +1740,32 @@ def _ensure_detail_strategy_preview(
 ) -> dict:
     prompt_overrides = _session_prompt_overrides(db, session.id)
     resolved_copy = _resolved_copy_for_session(db, session)
-    effective_strategy_preview = normalize_detail_strategy_preview(
-        session.detail_strategy_preview,
-        resolved_copy,
-        db=db,
-        product_images=session_images,
-        style_images=style_images,
-        analysis_snapshot=session.analysis_snapshot or {},
-        parameter_snapshot=session.parameter_snapshot or {},
-        active_platform_id=session.active_platform_id,
-        prompt_overrides=prompt_overrides,
-    )
+    existing_preview = session.detail_strategy_preview or {}
+    if isinstance(existing_preview, dict) and existing_preview.get("product_reference_manifest") and existing_preview.get("panel_plan"):
+        product_manifest = build_reference_manifest(load_reference_images(session_images or []))
+        style_manifest = build_reference_manifest(load_reference_images(style_images or []))
+        current_input_hash = detail_strategy_preview_input_hash(
+            resolved_copy,
+            product_manifest=product_manifest,
+            style_manifest=style_manifest,
+            planner_instruction=existing_preview.get("planner_instruction"),
+            panel_preferences={
+                str(item.get("slot_id")): item
+                for item in (existing_preview.get("panel_preferences") or [])
+                if isinstance(item, dict) and item.get("slot_id")
+            },
+            active_platform_id=session.active_platform_id,
+        )
+        if existing_preview.get("input_hash") in {None, "", current_input_hash}:
+            if existing_preview.get("input_hash") != current_input_hash:
+                session.detail_strategy_preview = {**existing_preview, "input_hash": current_input_hash}
+            logger.info(
+                "Reusing persisted detail_strategy_preview during generation: session_id=%s input_hash=%s",
+                session.id,
+                current_input_hash,
+            )
+            return session.detail_strategy_preview or existing_preview
+
     rebuilt = build_detail_strategy_preview(
         resolved_copy,
         db=db,
@@ -1681,13 +1778,8 @@ def _ensure_detail_strategy_preview(
         active_platform_id=session.active_platform_id,
         prompt_overrides=prompt_overrides,
     )
-    if effective_strategy_preview.get("input_hash") == rebuilt.get("input_hash"):
-        session.detail_strategy_preview = effective_strategy_preview
-        return effective_strategy_preview
-
-    effective_strategy_preview = rebuilt
-    session.detail_strategy_preview = effective_strategy_preview
-    return effective_strategy_preview
+    session.detail_strategy_preview = rebuilt
+    return rebuilt
 
 
 def _render_detail_panels_concurrently(

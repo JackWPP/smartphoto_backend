@@ -304,6 +304,7 @@ class WhataiClient:
                     "Each item must contain: panel_id,panel_label,narrative_section,panel_goal,copy_focus,panel_type,layout_template,"
                     "planner_prompt_base,copy_lines,layout_notes,product_reference_ids,style_reference_ids. "
                     "Visible copy should be concise and suitable for ecommerce detail page panels. "
+                    "Do not emit internal planning labels, section names, proof tags, or bracketed wrappers such as Proof, panel_goal, copy_focus, narrative_section, 设计证明, 布局模板, 规则模块, 【...】. "
                     "Do not make all panels feel like horizontal main images; they must form a narrative sequence. "
                     f"Confirmed copy: {json.dumps(confirmed_copy, ensure_ascii=False)}. "
                     f"Parameter snapshot: {json.dumps(parameter_snapshot or {}, ensure_ascii=False)}. "
@@ -398,11 +399,20 @@ class WhataiClient:
         self,
         *,
         confirmed_copy: dict[str, Any],
+        analysis_snapshot: dict[str, Any],
         active_platform_id: str | None,
+        product_images: list[LoadedReferenceImage],
         image_attachments: list[LoadedReferenceImage],
         file_attachments: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        fallback = self._fake_parameter_snapshot(confirmed_copy, active_platform_id, image_attachments, file_attachments)
+        fallback = self._fake_parameter_snapshot(
+            confirmed_copy,
+            analysis_snapshot,
+            active_platform_id,
+            product_images,
+            image_attachments,
+            file_attachments,
+        )
         if not self.llm_router.is_available("parameter"):
             fallback.update(
                 {
@@ -425,23 +435,38 @@ class WhataiClient:
             }
             for item in file_attachments
         ]
+        product_manifest = [image.to_manifest_item() for image in product_images]
+        attachment_image_manifest = [image.to_manifest_item() for image in image_attachments]
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": (
-                    "你是 SmartPhoto 的 Step3 参数抽取器。"
-                "请判断上传内容是否与当前商品相关，并只返回 JSON 对象。"
-                "字段必须包含：relevance_status,rejection_reason,hero_scene,core_selling_points,"
-                "key_parameters,product_advantages,feature_highlights。"
-                "如果内容无关，relevance_status=invalid，并给出 rejection_reason。"
-                "key_parameters 必须是数组，每项都要拆成 key,label,value,unit。"
-                "label 只放参数名，value 只放参数值，不要把“参数名：参数值”整句同时塞进 label 和 value。"
-                "如果可以识别单位就放到 unit，不能识别时 unit 置空字符串。"
-                f"当前平台：{active_platform_id or 'temu'}。"
-                f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
-                f"文件附件摘要：{json.dumps(attachment_manifest, ensure_ascii=False)}。"
+                    "你是 SmartPhoto 的 Step3 商品信息策划 Agent。"
+                    "你的任务不是自由营销，而是把当前 session 已有的商品事实整理成用户在 Step3 页面可以直接编辑的一份最终结果。"
+                    "请只返回 JSON 对象，不要输出解释性段落。"
+                    "字段必须包含：relevance_status,rejection_reason,hero_scene,core_selling_points,"
+                    "key_parameters,product_advantages,feature_highlights,source_mode,evidence_priority,evidence_summary。"
+                    "Step3 需要一次性覆盖 5 块内容：hero_scene、core_selling_points、key_parameters、product_advantages、feature_highlights。"
+                    "这是轻策划，不是自由发挥。你可以整理、归纳、改写得更适合用户编辑，但不能凭空创造 analysis、商品图和附件都没有依据的功能、结构或危险事实。"
+                    "如果没有附件，主要依据 analysis_snapshot、商品图理解和 confirmed_copy 生成可编辑结果。"
+                    "如果有附件，附件是高优先级证据源，默认整页重算，允许覆盖之前仅基于 analysis 得到的内容。"
+                    "当附件明显与当前商品无关时，relevance_status=invalid，并给出 rejection_reason；如果没有附件，则不要因为“缺附件”直接判 invalid。"
+                    "key_parameters 必须是数组，每项都要拆成 key,label,value,unit。"
+                    "label 只放参数名，value 只放参数值，不要把“参数名：参数值”整句同时塞进 label 和 value。"
+                    "如果可以识别单位就放到 unit，不能识别时 unit 置空字符串。"
+                    "core_selling_points、product_advantages、feature_highlights 必须贴近商品事实，不允许输出系统说明句、流程说明句、平台侧说明句。"
+                    "source_mode 只能是 analysis_only 或 attachment_backed。"
+                    "evidence_priority 必须体现附件优先规则：无附件时填 analysis_then_copy；有附件时填 attachments_over_analysis。"
+                    "evidence_summary 必须是数组，每项包含 source_type、summary、priority。"
+                    f"当前平台：{active_platform_id or 'temu'}。"
+                    f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
+                    f"当前 analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
+                    f"商品图摘要：{json.dumps(product_manifest, ensure_ascii=False)}。"
+                    f"图片附件摘要：{json.dumps(attachment_image_manifest, ensure_ascii=False)}。"
+                    f"文件附件摘要：{json.dumps(attachment_manifest, ensure_ascii=False)}。"
                 ),
             },
+            *self._build_chat_image_parts(product_images),
             *self._build_chat_image_parts(image_attachments),
         ]
         outcome = self._run_structured_task(
@@ -612,6 +637,7 @@ class WhataiClient:
                     "visual_truth_mode 只能是 faithful_closeup,mechanism_illustration,scene_reconstruction,parameter_board。"
                     "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释。"
                     "不要让 8 个 panel 的 copy_focus 高度重复。"
+                    "不要输出内部规划标签或带包装的结构词，例如 Proof、panel_goal、copy_focus、narrative_section、设计证明、规则模块、布局模板、【...】。"
                     f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
                     f"parameter_snapshot：{json.dumps(parameter_snapshot or {}, ensure_ascii=False)}。"
                     f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
@@ -995,6 +1021,8 @@ class WhataiClient:
                     response.raise_for_status()
                     return response.json()
             except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    raise AppError("rate_limited", self._format_http_error(exc), 429) from exc
                 raise AppError(error_key, self._format_http_error(exc), 502) from exc
             except self.REQUEST_RETRYABLE_ERRORS as exc:
                 last_error = exc
@@ -1028,6 +1056,8 @@ class WhataiClient:
                     response.raise_for_status()
                     return response.json()
             except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    raise AppError("rate_limited", self._format_http_error(exc), 429) from exc
                 raise AppError(error_key, self._format_http_error(exc), 502) from exc
             except self.REQUEST_RETRYABLE_ERRORS as exc:
                 last_error = exc
@@ -1047,6 +1077,8 @@ class WhataiClient:
                     response.raise_for_status()
                     return response.content
             except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 429:
+                    raise AppError("rate_limited", self._format_http_error(exc), 429) from exc
                 raise AppError(error_key, self._format_http_error(exc), 502) from exc
             except self.REQUEST_RETRYABLE_ERRORS as exc:
                 last_error = exc
@@ -1264,18 +1296,29 @@ class WhataiClient:
             "prompt_version": prompt_version,
             "repair_round": 0,
             "source": "fallback",
+            "planner_primary_provider": None,
+            "planner_primary_model": None,
+            "planner_fallback_provider": None,
+            "planner_fallback_model": None,
+            "planner_attempt_count": 0,
+            "planner_final_source": None,
         }
-        parsed = self.llm_router.complete_json(
+        completion = self.llm_router.complete_json_with_meta(
             task=task,
             messages=messages,
             error_key=error_key,
             temperature=temperature,
             model=model,
         )
+        parsed = completion["result"]
+        meta.update({key: value for key, value in (completion.get("meta") or {}).items() if value is not None})
         errors = validator(parsed)
         if not errors:
             meta["source"] = "primary"
             return {"result": parsed, "meta": meta}
+        if task in {"main_planner", "detail_planner"} and int(meta.get("planner_attempt_count") or 0) > 1:
+            meta["source"] = "fallback"
+            return {"result": fallback_result, "meta": meta}
 
         repair_messages = list(messages)
         repair_messages.append(
@@ -1295,18 +1338,23 @@ class WhataiClient:
                 ),
             }
         )
-        repaired = self.llm_router.complete_json(
+        repaired_completion = self.llm_router.complete_json_with_meta(
             task=task,
             messages=repair_messages,
             error_key=error_key,
             temperature=temperature,
             model=model,
         )
+        repaired = repaired_completion["result"]
+        repaired_meta = {key: value for key, value in (repaired_completion.get("meta") or {}).items() if value is not None}
         repaired_errors = validator(repaired)
         if not repaired_errors:
+            meta.update(repaired_meta)
             meta["repair_round"] = 1
             meta["source"] = "repair"
             return {"result": repaired, "meta": meta}
+        if task in {"main_planner", "detail_planner"} and int(repaired_meta.get("planner_attempt_count") or 0) > 1:
+            meta.update(repaired_meta)
         meta["repair_round"] = 1
         meta["source"] = "fallback"
         return {"result": fallback_result, "meta": meta}
@@ -1501,6 +1549,19 @@ class WhataiClient:
         relevance_status = str(parsed.get("relevance_status") or "").strip().lower()
         if relevance_status not in {"valid", "invalid"}:
             errors.append(self._validation_error("relevance_status", "enum", "relevance_status 只能是 valid 或 invalid", parsed.get("relevance_status")))
+        source_mode = str(parsed.get("source_mode") or "").strip().lower()
+        if source_mode and source_mode not in {"analysis_only", "attachment_backed"}:
+            errors.append(self._validation_error("source_mode", "enum", "source_mode 只能是 analysis_only 或 attachment_backed", parsed.get("source_mode")))
+        evidence_priority = str(parsed.get("evidence_priority") or "").strip()
+        if evidence_priority and evidence_priority not in {"attachments_over_analysis", "analysis_then_copy"}:
+            errors.append(
+                self._validation_error(
+                    "evidence_priority",
+                    "enum",
+                    "evidence_priority 只能是 attachments_over_analysis 或 analysis_then_copy",
+                    parsed.get("evidence_priority"),
+                )
+            )
         key_parameters = parsed.get("key_parameters")
         if not isinstance(key_parameters, list):
             errors.append(self._validation_error("key_parameters", "list", "key_parameters 必须是数组", key_parameters))
@@ -1908,6 +1969,24 @@ class WhataiClient:
             return max(1, min(int(text), 10))
         return max(1, min(default, 10))
 
+    def _normalize_summary_priority(self, value: Any, *, default: int) -> int:
+        if value is None or value == "":
+            return max(1, min(default, 10))
+        if isinstance(value, (int, float)):
+            return max(1, min(int(value), 10))
+        text = str(value).strip().lower()
+        if not text:
+            return max(1, min(default, 10))
+        if text.isdigit():
+            return max(1, min(int(text), 10))
+        mapping = {
+            "high": 1,
+            "medium": 5,
+            "low": 9,
+            "critical": 1,
+        }
+        return mapping.get(text, max(1, min(default, 10)))
+
     def _recommended_extra_image_kinds(self, category: str) -> list[str]:
         normalized = category.strip()
         if normalized in {"除湿机", "加湿器"}:
@@ -2098,38 +2177,86 @@ class WhataiClient:
     def _fake_parameter_snapshot(
         self,
         confirmed_copy: dict[str, Any],
+        analysis_snapshot: dict[str, Any],
         active_platform_id: str | None,
+        product_images: list[LoadedReferenceImage],
         image_attachments: list[LoadedReferenceImage],
         file_attachments: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        selling_points = self._normalize_string_list(
-            confirmed_copy.get("selling_points"),
-            ["高效净化", "低噪运行"],
-        )
-        key_parameters = self._normalize_key_parameters(
-            confirmed_copy.get("key_parameters"),
-            [{"label": "额定功率", "value": "35", "unit": "W"}],
-        )
-        return {
-            "relevance_status": "valid" if image_attachments or file_attachments else "invalid",
-            "rejection_reason": "" if image_attachments or file_attachments else "请上传与产品相关的说明书、参数图或产品图片。",
-            "hero_scene": confirmed_copy.get("usage_scenes") or "客厅净化",
-            "core_selling_points": selling_points[:3] or ["核心卖点待补充"],
-            "key_parameters": key_parameters,
+        normalized_copy = {
+            "hero_scene": str(confirmed_copy.get("hero_scene") or confirmed_copy.get("usage_scenes") or "").strip(),
+            "core_selling_points": self._normalize_string_list(
+                confirmed_copy.get("core_selling_points") or confirmed_copy.get("selling_points"),
+                [],
+            ),
+            "key_parameters": self._normalize_key_parameters(
+                confirmed_copy.get("key_parameters"),
+                [],
+            ),
             "product_advantages": self._normalize_string_list(
                 confirmed_copy.get("product_advantages"),
                 [],
-            )[:6],
-            "feature_highlights": [],
-            "completion_status": "pending",
-            "completion_source": "extract_only",
-            "inferred_core_selling_points": [],
-            "inferred_key_parameters": [],
-            "inferred_advantages": [],
-            "confidence_notes": [],
-            "source_summary": [
-                {"source_type": "image", "count": len(image_attachments)},
-                {"source_type": "file", "count": len(file_attachments)},
+            ),
+            "feature_highlights": self._normalize_string_list(
+                confirmed_copy.get("feature_highlights"),
+                [],
+            ),
+        }
+        analysis_copy = analysis_snapshot.get("copy_draft") if isinstance(analysis_snapshot, dict) else {}
+        analysis_parameters = analysis_snapshot.get("key_parameters") if isinstance(analysis_snapshot, dict) else []
+        reference_summary = analysis_snapshot.get("reference_summary") if isinstance(analysis_snapshot, dict) else {}
+        scene_tags = self._normalize_string_list(analysis_snapshot.get("scene_tags") if isinstance(analysis_snapshot, dict) else [], [])
+        source_mode = "attachment_backed" if image_attachments or file_attachments else "analysis_only"
+        relevance_status = "valid" if product_images or image_attachments or file_attachments else "invalid"
+        hero_scene = normalized_copy["hero_scene"] or str(analysis_copy.get("usage_scenes") or "").strip()
+        if not hero_scene:
+            hero_scene = scene_tags[0] if scene_tags else ""
+        core_selling_points = normalized_copy["core_selling_points"] or self._normalize_string_list(
+            analysis_copy.get("selling_points"),
+            [],
+        )[:4]
+        key_parameters = normalized_copy["key_parameters"] or self._normalize_key_parameters(
+            analysis_parameters,
+            [],
+        )
+        product_advantages = normalized_copy["product_advantages"]
+        feature_highlights = normalized_copy["feature_highlights"]
+        if not product_advantages:
+            product_advantages = self._normalize_string_list(
+                [
+                    repair_broken_text((reference_summary or {}).get("must_keep")),
+                    repair_broken_text((reference_summary or {}).get("structures")),
+                ],
+                [],
+            )[:4]
+        if not feature_highlights:
+            feature_highlights = scene_tags[:3]
+        return {
+            "relevance_status": relevance_status,
+            "rejection_reason": "" if relevance_status == "valid" else "当前 session 缺少可用于 Step3 的商品分析、商品图或附件证据。",
+            "hero_scene": hero_scene,
+            "core_selling_points": core_selling_points[:6],
+            "key_parameters": key_parameters,
+            "product_advantages": product_advantages[:6],
+            "feature_highlights": feature_highlights[:6],
+            "source_mode": source_mode,
+            "evidence_priority": "attachments_over_analysis" if source_mode == "attachment_backed" else "analysis_then_copy",
+            "evidence_summary": [
+                {
+                    "source_type": "analysis",
+                    "summary": "基于当前 analysis_snapshot、商品图摘要和已确认文案整理 Step3 内容。",
+                    "priority": 2 if source_mode == "attachment_backed" else 1,
+                },
+                {
+                    "source_type": "product_images",
+                    "summary": f"当前 session 商品图 {len(product_images)} 张，用于约束商品事实与外观结构。",
+                    "priority": 2,
+                },
+                {
+                    "source_type": "attachments",
+                    "summary": f"参数附件共 {len(image_attachments) + len(file_attachments)} 份，作为高优先级事实证据。",
+                    "priority": 1 if source_mode == "attachment_backed" else 3,
+                },
             ],
         }
 
@@ -2155,39 +2282,38 @@ class WhataiClient:
             parsed.get("feature_highlights"),
             fallback.get("feature_highlights", []),
         )
-        snapshot["completion_status"] = str(parsed.get("completion_status") or fallback.get("completion_status") or "pending").strip() or "pending"
-        snapshot["completion_source"] = str(parsed.get("completion_source") or fallback.get("completion_source") or "extract_only").strip() or "extract_only"
-        snapshot["inferred_core_selling_points"] = self._normalize_string_list(
-            parsed.get("inferred_core_selling_points"),
-            fallback.get("inferred_core_selling_points", []),
+        source_mode = str(parsed.get("source_mode") or fallback.get("source_mode") or "analysis_only").strip().lower()
+        snapshot["source_mode"] = "attachment_backed" if source_mode == "attachment_backed" else "analysis_only"
+        evidence_priority = str(parsed.get("evidence_priority") or fallback.get("evidence_priority") or "").strip()
+        snapshot["evidence_priority"] = (
+            evidence_priority
+            if evidence_priority in {"attachments_over_analysis", "analysis_then_copy"}
+            else fallback.get("evidence_priority", "analysis_then_copy")
         )
-        snapshot["inferred_key_parameters"] = self._normalize_key_parameters(
-            parsed.get("inferred_key_parameters"),
-            fallback.get("inferred_key_parameters", []),
-        )
-        snapshot["inferred_advantages"] = self._normalize_string_list(
-            parsed.get("inferred_advantages"),
-            fallback.get("inferred_advantages", []),
-        )
-        snapshot["confidence_notes"] = self._normalize_string_list(
-            parsed.get("confidence_notes"),
-            fallback.get("confidence_notes", []),
-        )
-        source_summary = parsed.get("source_summary")
-        if isinstance(source_summary, list):
-            snapshot["source_summary"] = [
-                value
-                for value in source_summary
-                if isinstance(value, dict) and (value.get("source_type") or value.get("count") is not None)
+        evidence_summary = parsed.get("evidence_summary")
+        if isinstance(evidence_summary, list):
+            snapshot["evidence_summary"] = [
+                {
+                    "source_type": str(value.get("source_type") or "").strip(),
+                    "summary": repair_broken_text(value.get("summary")),
+                    "priority": self._normalize_summary_priority(
+                        value.get("priority"),
+                        default=index + 1,
+                    ),
+                }
+                for index, value in enumerate(evidence_summary)
+                if isinstance(value, dict)
+                and str(value.get("source_type") or "").strip()
+                and repair_broken_text(value.get("summary"))
             ]
         else:
-            snapshot["source_summary"] = fallback.get("source_summary", [])
+            snapshot["evidence_summary"] = fallback.get("evidence_summary", [])
         if snapshot["relevance_status"] == "invalid" and not snapshot["rejection_reason"]:
-            snapshot["rejection_reason"] = "请上传与当前产品直接相关的说明书、参数图或产品附件。"
+            snapshot["rejection_reason"] = "当前上传内容与商品关联度不足，暂时无法生成可靠的 Step3 结果。"
         return snapshot
 
     def _normalize_completed_parameter_snapshot(self, snapshot: dict[str, Any] | None) -> dict[str, Any]:
-        base = self._merge_parameter_snapshot(self._fake_parameter_snapshot({}, None, [], []), snapshot or {})
+        base = self._merge_parameter_snapshot(self._fake_parameter_snapshot({}, {}, None, [], [], []), snapshot or {})
         base["completion_status"] = str((snapshot or {}).get("completion_status") or base.get("completion_status") or "pending")
         base["completion_source"] = str((snapshot or {}).get("completion_source") or base.get("completion_source") or "extract_only")
         return base
