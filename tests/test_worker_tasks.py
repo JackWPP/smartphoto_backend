@@ -13,6 +13,7 @@ from app.services.pipeline import (
     _render_assets_concurrently,
     _render_single_asset,
     _render_single_detail_panel,
+    _submit_render_specs,
     run_analysis_job,
 )
 from app.services.reference_images import LoadedReferenceImage
@@ -586,6 +587,37 @@ def test_render_assets_concurrently_submits_before_polling(monkeypatch):
     assert call_order.index("submit:main:scene:2") < call_order.index("poll")
     assert call_order.index("poll") < call_order.index("download:main:hero:1")
     assert call_order.index("poll") < call_order.index("download:main:scene:2")
+    assert rendered["poll_initial_delay_ms"] == 45000
+    assert rendered["submit_strategy_version"] == "batched_submit_v1"
+
+
+def test_submit_render_specs_batches_requests_with_interval(monkeypatch):
+    sleep_calls: list[int] = []
+
+    monkeypatch.setattr("app.services.pipeline.time.sleep", lambda delay: sleep_calls.append(delay))
+
+    def fake_submit_single_render_spec(*, client, render_spec):
+        return {
+            **render_spec,
+            "submission": {"submission_id": render_spec["submission_id"], "task_id": f"task:{render_spec['submission_id']}"},
+            "timing": {"submit_ms": 1},
+        }
+
+    monkeypatch.setattr("app.services.pipeline._submit_single_render_spec", fake_submit_single_render_spec)
+
+    bundle = _submit_render_specs(
+        client=object(),
+        render_specs=[{"submission_id": f"spec-{idx}"} for idx in range(8)],
+        max_workers=6,
+        batch_size=5,
+        batch_interval_seconds=5,
+    )
+
+    assert [item["batch_size"] for item in bundle["submit_batches"]] == [5, 3]
+    assert sleep_calls == [5]
+    assert len(bundle["submitted_specs"]) == 8
+    assert {item["submission_batch_no"] for item in bundle["submitted_specs"]} == {1, 2}
+    assert bundle["submit_strategy_version"] == "batched_submit_v1"
 
 
 def test_render_assets_concurrently_marks_missing_slot_after_failed_rescue(monkeypatch):

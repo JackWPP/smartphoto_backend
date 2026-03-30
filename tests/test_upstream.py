@@ -57,6 +57,14 @@ def test_compose_prompt_returns_structured_prompt_payload():
     assert "参考画幅比例 1:1" in prompt["final_prompt"]
 
 
+def test_settings_default_whatai_request_timeout_seconds_is_90():
+    assert Settings(_env_file=None).whatai_request_timeout_seconds == 90
+
+
+def test_settings_default_whatai_image_edit_timeout_seconds_is_120():
+    assert Settings(_env_file=None).whatai_image_edit_timeout_seconds == 120
+
+
 def test_white_bg_prompt_has_strict_background_constraints():
     from app.services.prompts import compose_prompt
 
@@ -816,6 +824,69 @@ def test_request_multipart_json_with_retry_marks_transport_errors_retryable(monk
     assert exc_info.value.retryable is True
 
 
+def test_request_multipart_json_with_retry_uses_configured_timeout(monkeypatch):
+    client = WhataiClient()
+    client.settings.whatai_image_edit_timeout_seconds = 123
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.upstream.httpx.Client", FakeClient)
+
+    result = client._request_multipart_json_with_retry(
+        base_url="https://api.whatai.cc/v1",
+        path="/images/edits",
+        data={"model": "nano-banana-2-2k", "prompt": "test", "aspect_ratio": "1:1"},
+        files=[],
+        headers={"Authorization": "Bearer test"},
+        error_key="upstream_image_error",
+        attempts=1,
+        retryable_on_exhausted=True,
+    )
+
+    assert result == {"ok": "true"}
+    assert captured["kwargs"]["timeout"] == 123
+
+
+def test_poll_image_tasks_respects_initial_delay(monkeypatch):
+    client = WhataiClient()
+    sleep_calls: list[float] = []
+
+    monkeypatch.setattr("app.services.upstream.time.sleep", lambda delay: sleep_calls.append(delay))
+
+    def fake_request_json_with_retry(**_kwargs):
+        return {"data": {"status": "SUCCESS", "url": "https://example.com/out.jpg"}}
+
+    monkeypatch.setattr(client, "_request_json_with_retry", fake_request_json_with_retry)
+
+    results = client.poll_image_tasks(
+        [{"submission_id": "sub-1", "task_id": "task-1"}],
+        "upstream_image_error",
+        initial_delay_seconds=45,
+    )
+
+    assert results["task-1"]["url"] == "https://example.com/out.jpg"
+    assert sleep_calls[0] == 45
+
+
 def test_analyze_images_builds_inline_image_payload(monkeypatch):
     client = WhataiClient()
     monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
@@ -1203,11 +1274,108 @@ def test_compose_detail_panel_prompt_filters_internal_planning_terms():
     )
 
     final_prompt = prompt["final_prompt"]
-    visible_copy = final_prompt.split("图上文案建议：", 1)[1].split(" 风格：", 1)[0]
-    assert "Proof" not in visible_copy
-    assert "panel_goal" not in visible_copy
-    assert "copy_focus" not in visible_copy
-    assert "设计证明" not in visible_copy
-    assert "【高效吸湿结构】" not in visible_copy
-    assert "桌面迷你除湿机" in visible_copy
+    assert "Panel 类型" not in final_prompt
+    assert "布局模板" not in final_prompt
+    assert "内部规划语义仅用于推理" not in final_prompt
+    assert "Proof" not in final_prompt
+    assert "panel_goal" not in final_prompt
+    assert "copy_focus" not in final_prompt
+    assert "设计证明" not in final_prompt
+    assert "【高效吸湿结构】" not in final_prompt
+    assert "桌面迷你除湿机" in final_prompt
     assert "请生成一张适用于电商详情页的单张横向 panel 图片" in final_prompt
+    assert prompt["display_module_title"] == "卖点佐证"
+    assert prompt["display_module_kind"] == "卖点佐证"
+
+
+def test_compose_detail_panel_prompt_enforces_chinese_visible_copy_for_domestic_detail():
+    prompt = compose_detail_panel_prompt(
+        confirmed_copy={
+            "product_name": "桌面迷你除湿机",
+            "hero_scene": "桌面角落防潮更安心",
+            "core_selling_points": ["免插电物理除湿", "可视化水位窗"],
+            "product_advantages": ["小巧不占地", "适合衣柜书柜"],
+            "key_parameters": [{"label": "除湿原理", "value": "物理吸湿"}],
+        },
+        strategy_preview={
+            "style_summary": "clean detail page",
+            "platform_overlay": {"overlay_id": "1688", "copy_language": "zh"},
+            "copy_language": "zh",
+        },
+        panel_id="panel_1",
+        panel_plan_item={
+            "panel_id": "panel_1",
+            "slot_id": "panel_1",
+            "panel_label": "首屏槽位",
+            "display_order": 1,
+            "panel_type": "kv_problem_solution",
+            "panel_type_label": "首屏KV",
+            "layout_template": "hero_kv",
+            "panel_goal": "桌面小型便携式除湿机",
+            "copy_focus": "桌面小型便携式除湿机",
+            "planner_prompt_base": "围绕产品核心卖点展开",
+            "layout_notes": "横版排布",
+            "copy_lines": ["Compact & Space-saving Design", "Portable Top Handle Design"],
+            "copy_blocks": {
+                "headline": "Compact & Space-saving Design",
+                "supporting": "Portable Top Handle Design",
+                "bullet_points": [],
+                "proof_lines": [],
+                "cta_line": "",
+            },
+            "product_reference_ids": ["img-front"],
+            "style_reference_ids": [],
+            "planner_source": "llm",
+        },
+    )
+
+    final_prompt = prompt["final_prompt"]
+    assert "后加的图上文案必须为简体中文短句" in final_prompt
+    assert "保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印" in final_prompt
+    assert "Compact & Space-saving Design" not in final_prompt
+    assert "Panel 类型" not in final_prompt
+    assert "布局模板" not in final_prompt
+    assert prompt["copy_language"] == "zh"
+    assert prompt["platform_overlay"]["overlay_id"] == "1688"
+    assert prompt["display_module_title"] == "首屏亮点"
+
+
+def test_compose_detail_panel_prompt_filters_machine_keys_and_duplicate_copy_lines():
+    prompt = compose_detail_panel_prompt(
+        confirmed_copy={
+            "product_name": "桌面除湿机",
+            "hero_scene": "卧室床头柜也能轻松放下",
+            "core_selling_points": ["物理循环除湿", "免插电设计"],
+            "key_parameters": [{"key": "product_type", "value": "物理循环除湿机"}],
+        },
+        strategy_preview={
+            "style_summary": "clean detail page",
+            "platform_overlay": {"overlay_id": "1688", "copy_language": "zh"},
+            "copy_language": "zh",
+        },
+        panel_id="panel_6",
+        panel_plan_item={
+            "panel_id": "panel_6",
+            "slot_id": "detail_slot_06",
+            "display_order": 6,
+            "panel_type": "feature_process_material",
+            "copy_lines": ["物理循环除湿", "product_type 物理循环除湿机", "物理循环除湿"],
+            "copy_blocks": {
+                "headline": "物理循环除湿",
+                "supporting": "product_type 物理循环除湿机",
+                "bullet_points": ["物理循环除湿"],
+                "proof_lines": [],
+                "cta_line": "",
+            },
+            "product_reference_ids": [],
+            "style_reference_ids": [],
+            "planner_source": "llm",
+        },
+    )
+
+    assert "product_type" not in prompt["final_prompt"]
+    assert "product_type" not in " ".join(prompt["copy_blocks"].get("bullet_points", []))
+    assert prompt["copy_blocks"]["headline"] == "物理循环除湿"
+    assert prompt["copy_blocks"]["supporting"] == "物理循环除湿机"
+    assert prompt["display_tags"]
+    assert all(not tag.startswith("feature_") for tag in prompt["display_tags"])

@@ -175,8 +175,13 @@
   - 当前主图组默认优先走 `/v1/images/edits`，把参考图以 multipart 形式上传到上游
   - 当前默认图片模型为 `gemini-3.1-flash-image-preview-2k`
   - `/images/edits` 当前传 `aspect_ratio`；`/images/generations` 才传 `size`
-  - 主图与详情页都采用“两阶段执行”：先批量提交全部上游异步任务，再集中轮询全部 `task_id`，最后并发下载结果
-  - `/images/edits` 若在提交阶段出现传输层断连，会先做请求级重试；若仍失败，只对当前单张图做内部重试
+  - 主图与详情页都采用“两阶段执行”：先分批提交上游异步任务，再延迟启动轮询全部 `task_id`，最后并发下载结果
+  - 默认提交节奏：
+    - `image_submit_batch_size=5`
+    - `image_submit_batch_interval_seconds=5`
+    - `image_poll_initial_delay_seconds=45`
+  - `/images/edits` 当前使用独立 timeout：`whatai_image_edit_timeout_seconds=120`；文本链路仍继续使用 `whatai_request_timeout_seconds=90`
+  - `/images/edits` 若在提交阶段出现传输层断连或读超时，会先做请求级重试；重试带轻量 jitter，若仍失败，只对当前单张图做内部重试
   - 图片下载遇到传输层异常时，会做请求级重试
   - 生图链路默认不再因为 `upstream_image_error` 进入 Celery 整任务重试，避免重复消费上游额度
 - 参考图选择规则：
@@ -187,7 +192,8 @@
 - 并发规则：
   - 主图默认并发 `main_generation_concurrency=4`
   - 详情页默认并发 `detail_generation_concurrency=6`
-  - 上游任务提交默认并发 `generation_submit_concurrency=6`
+  - 上游任务提交默认单批内部并发上限 `generation_submit_concurrency=6`
+  - 但真正对上游的发包节奏优先由 `image_submit_batch_size/image_submit_batch_interval_seconds` 控制
   - 即使内部并发执行，Asset 最终持久化顺序仍按 `display_order`
 - Prompt 结构：
   - `blocks.goal`
@@ -248,6 +254,24 @@
 - 输出：
   - `detail_strategy_preview`
   - 8 个 panel prompt
+  - 用户侧 display 语义：`display_tags / display_module_title / display_module_kind / display_module_intent`
+- 详情页 Prompt Matrix 已对齐主图的“内部语义与用户语义分层”：
+  - planner 内部仍保留 `panel_type / panel_type_reason / planner_base / planner_source`
+  - 但用户侧预览、prompt preview 与 results 默认新增 `display_module_*`，前端应优先消费这组字段
+  - `panel_label` 已降级为兼容字段，不再建议直接作为前台标题真相源
+- 详情页 render prompt 已去规划化：
+  - `final_prompt` 不再直接出现 `Panel 类型 / 布局模板 / 内部规划语义仅用于推理`
+  - 改为先把 planner 信息归并成 `visual_contract / copy_contract / truth_contract` 后再组装 prompt
+  - `planning_context` 仍保留作内部拼装输入，但不会再以带标签的自然语言直接塞进最终 prompt
+- 详情页文案清洗也继续加严：
+  - 除 `panel_goal/copy_focus/narrative_section/origin_note/visual_truth_mode/Proof/设计证明/规则模块/布局模板/【...】/思考过程`
+  - 还会过滤 `卖点槽位 / 场景卖点 / 产品类型 / 模块 / feature_* / parameter_* / kv_* / icon_*` 等内部模板词
+  - 若用户侧文案像内部标签，优先改写为业务短句；改不稳时直接降级为空，不把规划术语暴露给用户
+- 详情页 preview 自动升级条件：
+  - 命中 `input_hash` 失配、`language_policy_version` 落后、`detail_policy_version` 落后、`display_module_*` 缺失，或中文站仍残留英文营销文案/内部模板词时，会自动重建 `detail_strategy_preview`
+- 详情页中文站用户侧模块命名现统一往业务中文收口，例如：
+  - `首屏亮点 / 核心概览 / 核心卖点 / 场景价值 / 使用收益 / 结构工艺 / 细节参数 / 收尾总结`
+- 详情页用户侧 chip/tag 也不应再直接渲染 `panel_type / narrative_section / visual_truth_mode` 原值，后端已补充 `display_tags` 作为安全展示字段
   - 8 张 `detail_page/panel` 资产
   - 1 张 `detail_page/stitched` 资产
 - 状态责任：
@@ -257,14 +281,17 @@
   - `use_case` 固定为 `amazon_detail`
   - `aspect_ratio` 固定为 `21:9`
   - `panel_count` 固定为 `8`
-  - 同一份输入会按 `input_hash` 直接复用已持久化 `detail_strategy_preview`
-  - `generate_detail_page` 进入 worker 后，也会优先复用已存在且 `input_hash` 未变化的 `detail_strategy_preview`，不再为了正式生成再重跑一次详情页 planner
-  - `detail_strategy_preview` 当前额外带 `detail_story_brief`
+  - 同一份输入会优先复用已持久化 `detail_strategy_preview`
+  - 若 `input_hash` 失配、`language_policy_version` 落后，或中文站 panel 里仍残留英文营销文案，后端会自动重建 `detail_strategy_preview`
+  - `generate_detail_page` 进入 worker 后，也会优先复用仍有效的 `detail_strategy_preview`，不再为了正式生成再重跑一次详情页 planner
+  - `detail_strategy_preview` 当前额外带 `detail_story_brief/platform_overlay/copy_language/language_policy_version`
   - `panel_plan` 当前带 `slot_id/narrative_section/panel_goal/copy_focus/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used/product_reference_ids/style_reference_ids/visual_truth_mode/origin_note`
   - 详情页 planner 会显式复用同一 `session_id` 下的 `analysis_snapshot + 商品图 + parameter_snapshot`
   - 详情页链路保持独立生成，但语义上是 narrative-first，不是主图 5 槽位的复写
   - `detail_planner` 会一次性产出 `copy_focus/panel_goal/visual_truth_mode/origin_note`，不再追加默认 reviewer 二跳
   - 这样做的目的是减少详情页默认 LLM 调用数，避免策略预览为了文案 review 再额外等待一轮
+  - 中文站详情页的新增文案默认走简体中文策略；商品本体原有英文、型号、logo、按钮字样和铭牌丝印属于保真范围，可保留
+  - `use_case = amazon_detail` 继续保留为兼容字段，但不再代表详情页默认输出英文
   - 未上传风格图时，优先使用 `style_preset_id` 解析出的风格摘要，再拼接 `style_custom`；仅兼容回退 `style_choice`
   - 生图默认使用 1 张商品 grid；有风格图时追加 1 张 style/font grid
   - 详情页执行阶段优先消费 panel 级参考图，grid 只作为 fallback/辅助参考，不再让所有 panel 共用同一组主参考输入

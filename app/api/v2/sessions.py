@@ -79,6 +79,7 @@ from app.services.detail_pages import (
     DETAIL_PAGE_USE_CASE,
     build_detail_prompt_previews,
     detail_strategy_preview_input_hash,
+    detail_strategy_preview_needs_rebuild,
     build_detail_strategy_preview,
     normalize_detail_strategy_preview,
 )
@@ -230,7 +231,7 @@ def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> di
     if not session.active_platform_id:
         raise AppError("invalid_platform", "active platform required", 400)
 
-    return normalize_detail_strategy_preview(
+    preview = normalize_detail_strategy_preview(
         session.detail_strategy_preview,
         _resolved_copy_for_session(session, db),
         db=db,
@@ -241,6 +242,11 @@ def _effective_detail_strategy_preview(session: SessionModel, db: Session) -> di
         active_platform_id=session.active_platform_id,
         prompt_overrides=_serialized_session_overrides(db, session.id, asset_family="detail_page", user_id=session.service_id),
     )
+    if preview != (session.detail_strategy_preview or {}):
+        session.detail_strategy_preview = preview
+        db.commit()
+        db.refresh(session)
+    return preview
 
 
 def _main_gallery_assets_query(db: Session, session_id: str, version_no: int):
@@ -1503,7 +1509,12 @@ def build_detail_strategy(
         active_platform_id=session.active_platform_id,
     )
     existing_preview = session.detail_strategy_preview if isinstance(session.detail_strategy_preview, dict) else None
-    if existing_preview and existing_preview.get("input_hash") == input_hash:
+    if existing_preview and not detail_strategy_preview_needs_rebuild(
+        existing_preview,
+        confirmed_copy=resolved_copy,
+        active_platform_id=session.active_platform_id,
+        current_input_hash=input_hash,
+    ):
         db.commit()
         return success_response({"session_id": session.id, "detail_strategy_preview": existing_preview})
 
@@ -1850,6 +1861,7 @@ def preview_detail_prompts(
             "product_reference_manifest": detail_strategy_preview.get("product_reference_manifest", []),
             "style_reference_manifest": detail_strategy_preview.get("style_reference_manifest", []),
             "detail_story_brief": detail_strategy_preview.get("detail_story_brief", {}),
+            "detail_policy_version": detail_strategy_preview.get("detail_policy_version"),
             "prompts": prompts,
             "latest_assets": latest_assets,
         }
@@ -2091,6 +2103,7 @@ def get_detail_page_results(
             "version_summaries": version_summaries,
             "use_case": DETAIL_PAGE_USE_CASE,
             "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+            "detail_policy_version": (session.detail_strategy_preview or {}).get("detail_policy_version"),
             "summary": {
                 "total_count": len(assets),
                 "ready_count": len(assets),
@@ -2102,6 +2115,10 @@ def get_detail_page_results(
                     "panel_id": asset.asset_role,
                     "slot_id": asset.slot_id,
                     "panel_label": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("panel_label"),
+                    "display_tags": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("display_tags") or [],
+                    "display_module_title": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("display_module_title"),
+                    "display_module_kind": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("display_module_kind"),
+                    "display_module_intent": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("display_module_intent"),
                     "narrative_section": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("narrative_section"),
                     "panel_goal": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("panel_goal"),
                     "copy_focus": (panel_plan_by_id.get(asset.slot_id or asset.asset_role) or {}).get("copy_focus"),

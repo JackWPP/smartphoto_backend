@@ -33,6 +33,7 @@ from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
     detail_strategy_preview_input_hash,
+    detail_strategy_preview_needs_rebuild,
     build_detail_reference_grids,
     build_detail_strategy_preview,
     compose_detail_panel_prompt,
@@ -63,6 +64,7 @@ COPY_TARGETS = {
     "product_advantages",
 }
 ASSET_RENDER_ATTEMPTS = 3
+SUBMIT_STRATEGY_VERSION = "batched_submit_v1"
 logger = logging.getLogger(__name__)
 
 
@@ -702,6 +704,28 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
             instruction=instruction,
             loaded_reference_images=loaded_reference_images,
         )
+        for batch in render_bundle.get("submit_batches", []):
+            append_job_event(
+                db,
+                job.id,
+                "job_progress",
+                {
+                    "event": "submit_batch_completed",
+                    "submit_batch_index": int(batch.get("batch_index") or 0),
+                    "submit_batch_size": int(batch.get("batch_size") or 0),
+                    "submit_strategy_version": render_bundle.get("submit_strategy_version"),
+                },
+            )
+        append_job_event(
+            db,
+            job.id,
+            "job_progress",
+            {
+                "event": "poll_delay_applied",
+                "poll_initial_delay_ms": int(render_bundle.get("poll_initial_delay_ms") or 0),
+                "submit_strategy_version": render_bundle.get("submit_strategy_version"),
+            },
+        )
         rendered_assets = list(render_bundle["rendered_assets"])
         missing_slots = list(render_bundle["missing_slots"])
         expected_slot_order = {
@@ -1021,21 +1045,32 @@ def _render_assets_concurrently(
         )
         for plan_item in plan
     ]
-    submitted_specs = _submit_render_specs(
+    submit_bundle = _submit_render_specs(
         client=client,
         render_specs=render_specs,
         max_workers=settings.generation_submit_concurrency,
+        batch_size=settings.image_submit_batch_size,
+        batch_interval_seconds=settings.image_submit_batch_interval_seconds,
     )
+    submitted_specs = submit_bundle["submitted_specs"]
     poll_started = time.perf_counter()
     results_by_submission = client.poll_image_tasks(
         [spec["submission"] for spec in submitted_specs],
         "upstream_image_error",
+        initial_delay_seconds=settings.image_poll_initial_delay_seconds,
     )
     poll_ms = int((time.perf_counter() - poll_started) * 1000)
     rendered_specs = _materialize_render_specs(
         client=client,
         render_specs=[
-            {**spec, "timing": {**dict(spec.get("timing") or {}), "poll_ms": poll_ms}}
+            {
+                **spec,
+                "timing": {
+                    **dict(spec.get("timing") or {}),
+                    "poll_ms": poll_ms,
+                    "poll_started_after_ms": int(settings.image_poll_initial_delay_seconds * 1000),
+                },
+            }
             for spec in submitted_specs
         ],
         results_by_submission=results_by_submission,
@@ -1056,6 +1091,9 @@ def _render_assets_concurrently(
         "rendered_assets": finalized,
         "expected_slot_ids": expected_slot_ids,
         "missing_slots": rendered_specs["failed_specs"],
+        "submit_batches": submit_bundle["submit_batches"],
+        "submit_strategy_version": submit_bundle["submit_strategy_version"],
+        "poll_initial_delay_ms": int(settings.image_poll_initial_delay_seconds * 1000),
     }
 
 
@@ -1100,19 +1138,56 @@ def _submit_render_specs(
     client: WhataiClient,
     render_specs: list[dict[str, Any]],
     max_workers: int,
-) -> list[dict[str, Any]]:
+    batch_size: int,
+    batch_interval_seconds: int,
+) -> dict[str, Any]:
     if not render_specs:
-        return []
+        return {"submitted_specs": [], "submit_batches": [], "submit_strategy_version": SUBMIT_STRATEGY_VERSION}
 
     submitted: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(render_specs)))) as executor:
-        future_map = {
-            executor.submit(_submit_single_render_spec, client=client, render_spec=render_spec): render_spec
-            for render_spec in render_specs
-        }
-        for future in as_completed(future_map):
-            submitted.append(future.result())
-    return submitted
+    submit_batches: list[dict[str, int]] = []
+    normalized_batch_size = max(1, min(batch_size, len(render_specs)))
+    worker_limit = max(1, min(max_workers, normalized_batch_size, len(render_specs)))
+    total_batches = (len(render_specs) + normalized_batch_size - 1) // normalized_batch_size
+    for batch_index, start in enumerate(range(0, len(render_specs), normalized_batch_size), start=1):
+        batch = render_specs[start : start + normalized_batch_size]
+        logger.info(
+            "Submitting render batch: batch=%s/%s batch_size=%s internal_concurrency=%s",
+            batch_index,
+            total_batches,
+            len(batch),
+            min(worker_limit, len(batch)),
+        )
+        with ThreadPoolExecutor(max_workers=max(1, min(worker_limit, len(batch)))) as executor:
+            future_map = {
+                executor.submit(
+                    _submit_single_render_spec,
+                    client=client,
+                    render_spec={
+                        **render_spec,
+                        "submission_batch_no": batch_index,
+                        "submission_batch_size": len(batch),
+                        "submit_strategy_version": SUBMIT_STRATEGY_VERSION,
+                    },
+                ): render_spec
+                for render_spec in batch
+            }
+            for future in as_completed(future_map):
+                submitted.append(future.result())
+        submit_batches.append({"batch_index": batch_index, "batch_size": len(batch)})
+        if batch_index < total_batches and batch_interval_seconds > 0:
+            logger.info(
+                "Sleeping between render batches: completed_batch=%s/%s delay_seconds=%s",
+                batch_index,
+                total_batches,
+                batch_interval_seconds,
+            )
+            time.sleep(batch_interval_seconds)
+    return {
+        "submitted_specs": submitted,
+        "submit_batches": submit_batches,
+        "submit_strategy_version": SUBMIT_STRATEGY_VERSION,
+    }
 
 
 def _submit_single_render_spec(
@@ -1134,6 +1209,9 @@ def _submit_single_render_spec(
     return {
         **render_spec,
         "submission": submission,
+        "submission_batch_no": int(render_spec.get("submission_batch_no") or 1),
+        "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
+        "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
         "timing": {
             "submit_ms": int((time.perf_counter() - submit_started) * 1000),
         },
@@ -1238,6 +1316,9 @@ def _download_single_render_spec(
         **render_spec,
         "image_bytes": image_bytes,
         "timing": timing,
+        "submission_batch_no": int(render_spec.get("submission_batch_no") or 1),
+        "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
+        "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
         "download_retry_count": int(render_spec.get("download_retry_count") or 0),
         "download_rescued": bool(render_spec.get("download_rescued") or False),
         "download_rescue_reason": render_spec.get("download_rescue_reason"),
@@ -1395,6 +1476,9 @@ def _finalize_main_rendered_asset(
         "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
         "platform_overlay": prompt_payload.get("platform_overlay"),
         "timing": dict(render_spec.get("timing") or {}),
+        "submission_batch_no": int(render_spec.get("submission_batch_no") or 1),
+        "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
+        "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
         "download_retry_count": int(render_spec.get("download_retry_count") or 0),
         "download_rescued": bool(render_spec.get("download_rescued") or False),
         "download_rescue_reason": render_spec.get("download_rescue_reason"),
@@ -1600,7 +1684,7 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 },
             )
 
-        rendered_panels = _render_detail_panels_concurrently(
+        detail_render_bundle = _render_detail_panels_concurrently(
             db=db,
             confirmed_copy=_resolved_copy_for_session(db, session),
             strategy_preview=effective_strategy_preview,
@@ -1611,6 +1695,29 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             product_grid=product_grid,
             style_grid=style_grid,
         )
+        for batch in detail_render_bundle.get("submit_batches", []):
+            append_job_event(
+                db,
+                job.id,
+                "job_progress",
+                {
+                    "event": "submit_batch_completed",
+                    "submit_batch_index": int(batch.get("batch_index") or 0),
+                    "submit_batch_size": int(batch.get("batch_size") or 0),
+                    "submit_strategy_version": detail_render_bundle.get("submit_strategy_version"),
+                },
+            )
+        append_job_event(
+            db,
+            job.id,
+            "job_progress",
+            {
+                "event": "poll_delay_applied",
+                "poll_initial_delay_ms": int(detail_render_bundle.get("poll_initial_delay_ms") or 0),
+                "submit_strategy_version": detail_render_bundle.get("submit_strategy_version"),
+            },
+        )
+        rendered_panels = list(detail_render_bundle["rendered_panels"])
         detail_render_ms = int(
             sum(
                 int(((item.get("generation_snapshot") or {}).get("timing") or {}).get("render_total_ms") or 0)
@@ -1995,7 +2102,12 @@ def _ensure_detail_strategy_preview(
             },
             active_platform_id=session.active_platform_id,
         )
-        if existing_preview.get("input_hash") in {None, "", current_input_hash}:
+        if not detail_strategy_preview_needs_rebuild(
+            existing_preview,
+            confirmed_copy=resolved_copy,
+            active_platform_id=session.active_platform_id,
+            current_input_hash=current_input_hash,
+        ):
             if existing_preview.get("input_hash") != current_input_hash:
                 session.detail_strategy_preview = {**existing_preview, "input_hash": current_input_hash}
             logger.info(
@@ -2052,21 +2164,32 @@ def _render_detail_panels_concurrently(
         )
         for plan_item in plan
     ]
-    submitted_specs = _submit_render_specs(
+    submit_bundle = _submit_render_specs(
         client=client,
         render_specs=render_specs,
         max_workers=settings.generation_submit_concurrency,
+        batch_size=settings.image_submit_batch_size,
+        batch_interval_seconds=settings.image_submit_batch_interval_seconds,
     )
+    submitted_specs = submit_bundle["submitted_specs"]
     poll_started = time.perf_counter()
     results_by_submission = client.poll_image_tasks(
         [spec["submission"] for spec in submitted_specs],
         "upstream_image_error",
+        initial_delay_seconds=settings.image_poll_initial_delay_seconds,
     )
     poll_ms = int((time.perf_counter() - poll_started) * 1000)
     rendered_specs = _materialize_render_specs(
         client=client,
         render_specs=[
-            {**spec, "timing": {**dict(spec.get("timing") or {}), "poll_ms": poll_ms}}
+            {
+                **spec,
+                "timing": {
+                    **dict(spec.get("timing") or {}),
+                    "poll_ms": poll_ms,
+                    "poll_started_after_ms": int(settings.image_poll_initial_delay_seconds * 1000),
+                },
+            }
             for spec in submitted_specs
         ],
         results_by_submission=results_by_submission,
@@ -2079,7 +2202,12 @@ def _render_detail_panels_concurrently(
             str(first_failure.get("error_message") or "detail panel download failed"),
             int(first_failure.get("upstream_http_status") or 502),
         )
-    return [_finalize_detail_rendered_panel(render_spec, strategy_preview) for render_spec in rendered_specs["rendered_specs"]]
+    return {
+        "rendered_panels": [_finalize_detail_rendered_panel(render_spec, strategy_preview) for render_spec in rendered_specs["rendered_specs"]],
+        "submit_batches": submit_bundle["submit_batches"],
+        "submit_strategy_version": submit_bundle["submit_strategy_version"],
+        "poll_initial_delay_ms": int(settings.image_poll_initial_delay_seconds * 1000),
+    }
 
 
 def _prepare_detail_render_spec(
@@ -2172,6 +2300,9 @@ def _finalize_detail_rendered_panel(
         "display_order": render_spec["display_order"],
         "layout_template": prompt_payload.get("layout_template"),
         "timing": dict(render_spec.get("timing") or {}),
+        "submission_batch_no": int(render_spec.get("submission_batch_no") or 1),
+        "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
+        "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
     }
     return {
         "panel_id": render_spec["panel_id"],
@@ -2291,6 +2422,9 @@ def _render_single_detail_panel(
         "display_order": display_order,
         "layout_template": prompt_payload.get("layout_template"),
         "timing": {"render_total_ms": int((time.perf_counter() - started_at) * 1000)},
+        "submission_batch_no": 1,
+        "submission_batch_size": 1,
+        "submit_strategy_version": "single_asset_sync",
     }
     return {
         "panel_id": panel_id,

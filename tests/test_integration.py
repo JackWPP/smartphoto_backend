@@ -736,6 +736,11 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
     assert all("copy_focus" in item for item in detail_strategy["panel_plan"])
     assert all("product_reference_ids" in item for item in detail_strategy["panel_plan"])
     assert all("style_reference_ids" in item for item in detail_strategy["panel_plan"])
+    assert detail_strategy["language_policy_version"] == "detail_copy_lang_v1"
+    assert detail_strategy["detail_policy_version"] == "detail_prompt_matrix_v1"
+    assert all("display_module_title" in item for item in detail_strategy["panel_plan"])
+    assert all("display_module_kind" in item for item in detail_strategy["panel_plan"])
+    assert all("display_module_intent" in item for item in detail_strategy["panel_plan"])
 
     prompt_preview = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/prompts/preview",
@@ -748,11 +753,17 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
     assert data["panel_count"] == 8
     assert data["image_size"] == "1792x768"
     assert "detail_story_brief" in data
+    assert data["detail_policy_version"] == "detail_prompt_matrix_v1"
     assert len(data["prompts"]) == 8
     assert data["prompts"][0]["blocks"]["instruction"] == "整体更干净"
     assert "narrative_section" in data["prompts"][0]
     assert "panel_goal" in data["prompts"][0]
     assert "copy_focus" in data["prompts"][0]
+    assert "copy_language" in data["prompts"][0]
+    assert "platform_overlay" in data["prompts"][0]
+    assert "display_module_title" in data["prompts"][0]
+    assert "display_module_kind" in data["prompts"][0]
+    assert "display_module_intent" in data["prompts"][0]
     assert data["prompts"][0]["product_reference_images_used"][0]["slot_type"] == "front"
     assert data["prompts"][0]["style_reference_images_used"] == []
     assert data["latest_assets"] == []
@@ -779,6 +790,9 @@ def test_detail_page_panel_preferences_and_result_metadata(client):
     assert slot_02["narrative_section"]
     assert slot_02["panel_goal"] is not None
     assert slot_02["copy_focus"] is not None
+    assert slot_02["display_module_title"]
+    assert slot_02["display_module_kind"]
+    assert slot_02["display_module_intent"]
     assert "candidate_panel_types" in slot_02
     assert detail_strategy["detail_rule_pack_key"] == "ecommerce_detail_v2"
 
@@ -789,6 +803,10 @@ def test_detail_page_panel_preferences_and_result_metadata(client):
     assert all("narrative_section" in item for item in detail_results["panels"])
     assert all("panel_goal" in item for item in detail_results["panels"])
     assert all("copy_focus" in item for item in detail_results["panels"])
+    assert all(item["display_module_title"] for item in detail_results["panels"])
+    assert all(item["display_module_kind"] for item in detail_results["panels"])
+    assert all(item["display_module_intent"] for item in detail_results["panels"])
+    assert detail_results["detail_policy_version"] == "detail_prompt_matrix_v1"
 
 
 def test_detail_strategy_preview_no_longer_calls_detail_copy_reviewer(client, monkeypatch):
@@ -807,6 +825,118 @@ def test_detail_strategy_preview_no_longer_calls_detail_copy_reviewer(client, mo
     assert all("copy_focus" in item for item in detail_strategy["panel_plan"])
     assert all("visual_truth_mode" in item for item in detail_strategy["panel_plan"])
     assert detail_strategy["detail_reviewer_ms"] == 0
+
+
+def test_detail_strategy_preview_prefers_chinese_structured_copy_for_1688(client, monkeypatch):
+    sid = create_ready_session(client, platform_id="1688")
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    copy_data.update(
+        {
+            "product_name": "桌面小型便携式除湿机",
+            "headline": "桌面小型便携式除湿机",
+            "selling_points": "Compact & Space-saving Design\nVisual Water Level Window\nPortable Top Handle Design",
+            "hero_scene": "桌面角落、衣柜内部或书架格间都能安心放置",
+            "core_selling_points": ["免插电物理除湿", "可视化水位窗", "小巧不占地"],
+            "product_advantages": ["适合衣柜书柜", "移动摆放更灵活"],
+            "key_parameters": [{"key": "principle", "label": "除湿原理", "value": "物理吸湿", "unit": ""}],
+        }
+    )
+    client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
+
+    monkeypatch.setattr("app.services.upstream.WhataiClient.plan_detail_page_narrative", lambda *args, **kwargs: {})
+
+    preview = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert preview.status_code == 200
+    detail_strategy = preview.json()["data"]["detail_strategy_preview"]
+    panel_text = " ".join(
+        text
+        for item in detail_strategy["panel_plan"]
+        for text in item.get("copy_lines", [])
+    )
+    assert "Compact & Space-saving Design" not in panel_text
+    assert "Visual Water Level Window" not in panel_text
+    assert any("免插电物理除湿" in text for item in detail_strategy["panel_plan"] for text in item.get("copy_lines", []))
+    assert detail_strategy["copy_language"] == "zh"
+    assert detail_strategy["platform_overlay"]["overlay_id"] == "1688"
+    assert all("卖点槽位" not in item["display_module_title"] for item in detail_strategy["panel_plan"])
+    assert all("产品类型" not in item["display_module_intent"] for item in detail_strategy["panel_plan"])
+
+
+def test_detail_strategy_preview_auto_rebuilds_stale_english_preview_for_1688(client, monkeypatch):
+    sid = create_ready_session(client, platform_id="1688")
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    copy_data.update(
+        {
+            "product_name": "桌面小型便携式除湿机",
+            "headline": "桌面小型便携式除湿机",
+            "hero_scene": "桌面角落、衣柜内部或书架格间都能安心放置",
+            "core_selling_points": ["免插电物理除湿", "可视化水位窗"],
+            "product_advantages": ["小巧不占地", "适合衣柜书柜"],
+            "key_parameters": [{"key": "principle", "label": "除湿原理", "value": "物理吸湿", "unit": ""}],
+        }
+    )
+    client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
+
+    monkeypatch.setattr("app.services.upstream.WhataiClient.plan_detail_page_narrative", lambda *args, **kwargs: {})
+    first = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert first.status_code == 200
+
+    with db_session.SessionLocal() as db:
+        session = db.get(SessionModel, sid)
+        preview = dict(session.detail_strategy_preview or {})
+        preview["language_policy_version"] = "legacy"
+        preview["copy_language"] = "zh"
+        preview["panel_plan"][0]["copy_lines"] = ["Compact & Space-saving Design"]
+        preview["panel_plan"][0]["copy_blocks"] = {
+            "headline": "Compact & Space-saving Design",
+            "supporting": "",
+            "bullet_points": [],
+            "proof_lines": [],
+            "cta_line": "",
+        }
+        preview["detail_policy_version"] = "legacy"
+        preview["panel_plan"][0]["display_module_title"] = "卖点槽位A"
+        session.detail_strategy_preview = preview
+        db.commit()
+
+    rebuilt = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert rebuilt.status_code == 200
+    detail_strategy = rebuilt.json()["data"]["detail_strategy_preview"]
+    assert detail_strategy["language_policy_version"] == "detail_copy_lang_v1"
+    assert detail_strategy["detail_policy_version"] == "detail_prompt_matrix_v1"
+    rebuilt_text = " ".join(detail_strategy["panel_plan"][0]["copy_lines"])
+    assert "Compact & Space-saving Design" not in rebuilt_text
+    assert detail_strategy["panel_plan"][0]["display_module_title"] != "卖点槽位A"
+
+
+def test_detail_strategy_preview_filters_machine_keys_and_exposes_display_tags(client, monkeypatch):
+    sid = create_ready_session(client, platform_id="1688")
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    copy_data.update(
+        {
+            "product_name": "桌面小型除湿机",
+            "headline": "桌面小型除湿机",
+            "hero_scene": "卧室床头柜、书架角落都能安心摆放",
+            "core_selling_points": ["物理循环除湿", "免插电设计"],
+            "product_advantages": ["小巧不占地", "更适合日常小空间"],
+            "key_parameters": [{"key": "product_type", "value": "物理循环除湿机"}],
+        }
+    )
+    client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
+
+    monkeypatch.setattr("app.services.upstream.WhataiClient.plan_detail_page_narrative", lambda *args, **kwargs: {})
+
+    preview = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert preview.status_code == 200
+    detail_strategy = preview.json()["data"]["detail_strategy_preview"]
+    plan_text = " ".join(
+        text
+        for item in detail_strategy["panel_plan"]
+        for text in item.get("copy_lines", [])
+    )
+    assert "product_type" not in plan_text
+    assert all(item.get("display_tags") for item in detail_strategy["panel_plan"])
+    assert all(all(not tag.startswith("feature_") for tag in item["display_tags"]) for item in detail_strategy["panel_plan"])
 
 
 def test_detail_page_full_pipeline_keeps_main_gallery_untouched(client):

@@ -13,11 +13,23 @@ PROMPT_MATRIX_GUARDRAILS = [
 
 _INTERNAL_PROMPT_TERM_PATTERNS = (
     r"\bproof\b",
+    r"\bproduct_type\b",
     r"\bpanel_goal\b",
     r"\bcopy_focus\b",
     r"\bnarrative_section\b",
     r"\borigin_note\b",
     r"\bvisual_truth_mode\b",
+    r"\bpanel\s*type\b",
+    r"\bfeature_[a-z0-9_]+\b",
+    r"\bparameter_[a-z0-9_]+\b",
+    r"\bkv_[a-z0-9_]+\b",
+    r"\bicon_[a-z0-9_]+\b",
+    r"\btrust_overview\b",
+    r"\bmechanism\b",
+    r"\busage_scene\b",
+    r"\bparameter_proof\b",
+    r"\bdifferentiator\b",
+    r"\bclosing_cta\b",
     r"\bplanning\s+context\b",
     r"\bplanner\s+prompt\s+base\b",
     r"\breviewer\s+note\b",
@@ -29,6 +41,10 @@ _INTERNAL_PROMPT_TERM_PATTERNS = (
     r"\breasoning\b",
     r"\bthink\s+step\s+by\s+step\b",
     r"设计证明",
+    r"产品类型",
+    r"卖点槽位",
+    r"场景卖点",
+    r"细节/参数槽位",
     r"规则模块",
     r"布局模板",
     r"内部规划",
@@ -43,7 +59,7 @@ _LABEL_PREFIX_RE = re.compile(
     r"^(?:"
     r"Suggested copy lines?|On-image copy|Planning context(?: only, not literal on-image copy)?|"
     r"Reviewer note|Additional instruction|Panel type|Layout template|"
-    r"图上文案建议|可见文案建议|规划上下文|内部说明|思考过程|推理过程"
+    r"图上文案建议|可见文案建议|规划上下文|内部说明|思考过程|推理过程|产品类型|product_type|卖点槽位[A-Z一二三四五六七八]?|场景卖点|细节/参数槽位"
     r")\s*[:：]\s*",
     flags=re.IGNORECASE,
 )

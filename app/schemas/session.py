@@ -414,6 +414,10 @@ class DetailPromptPreviewItem(BaseModel):
     panel_id: str = Field(description="详情页 panel ID。")
     slot_id: str | None = Field(default=None, description="详情页固定槽位 ID。")
     panel_label: str = Field(description="panel 中文名。")
+    display_tags: list[str] = Field(default_factory=list, description="用户侧可直接展示的模块标签。")
+    display_module_title: str | None = Field(default=None, description="用户侧可直接展示的模块标题。")
+    display_module_kind: str | None = Field(default=None, description="用户侧模块类型说明。")
+    display_module_intent: str | None = Field(default=None, description="用户侧模块目标说明。")
     narrative_section: str | None = Field(default=None, description="详情页叙事段落。")
     panel_goal: str | None = Field(default=None, description="详情页 panel 目标。")
     copy_focus: str | None = Field(default=None, description="详情页文案重点。")
@@ -436,6 +440,8 @@ class DetailPromptPreviewItem(BaseModel):
     planner_source: str | None = Field(default=None, description="panel planner 来源，rule_based 或 llm。")
     planner_base: str | None = Field(default=None, description="panel 级 planner 基础语义。")
     rule_modules_used: list[str] = Field(default_factory=list, description="详情页规则模块列表。")
+    platform_overlay: dict[str, Any] | None = Field(default=None, description="详情页平台 overlay 元数据。")
+    copy_language: str | None = Field(default=None, description="当前详情页 panel 的图上文案语言策略。")
 
 
 class DetailPromptPreviewLatestAsset(BaseModel):
@@ -468,6 +474,7 @@ class DetailPromptPreviewData(BaseModel):
     product_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用商品参考图清单。")
     style_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用详情页风格图清单。")
     detail_story_brief: dict[str, str] = Field(default_factory=dict, description="详情页 8 段叙事摘要。")
+    detail_policy_version: str | None = Field(default=None, description="详情页语义分层策略版本。")
     prompts: list[DetailPromptPreviewItem] = Field(description="按 panel 顺序生成的 prompt 预览列表。")
     latest_assets: list[DetailPromptPreviewLatestAsset] = Field(description="最近一版详情页结果的执行快照。")
 
