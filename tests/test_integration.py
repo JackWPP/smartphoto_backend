@@ -791,6 +791,24 @@ def test_detail_page_panel_preferences_and_result_metadata(client):
     assert all("copy_focus" in item for item in detail_results["panels"])
 
 
+def test_detail_strategy_preview_no_longer_calls_detail_copy_reviewer(client, monkeypatch):
+    sid = create_ready_session(client)
+
+    def _raise_if_called(*_args, **_kwargs):
+        raise AssertionError("detail_copy_review should not be called")
+
+    monkeypatch.setattr("app.services.upstream.WhataiClient.review_detail_panel_copy", _raise_if_called, raising=False)
+
+    preview = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert preview.status_code == 200
+    detail_strategy = preview.json()["data"]["detail_strategy_preview"]
+    assert len(detail_strategy["panel_plan"]) == 8
+    assert all("panel_goal" in item for item in detail_strategy["panel_plan"])
+    assert all("copy_focus" in item for item in detail_strategy["panel_plan"])
+    assert all("visual_truth_mode" in item for item in detail_strategy["panel_plan"])
+    assert detail_strategy["detail_reviewer_ms"] == 0
+
+
 def test_detail_page_full_pipeline_keeps_main_gallery_untouched(client):
     sid = create_ready_session(client)
     upload_detail_style_image(client, sid, display_order=1)

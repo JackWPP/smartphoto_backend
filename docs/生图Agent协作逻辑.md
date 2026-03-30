@@ -17,8 +17,7 @@
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
 | Strategy Builder | 生成 `strategy_preview`、`reference_manifest`、`prompt_plan` 和可执行 `asset_plan` | `build_strategy_preview` |
 | Main Copy Design Agent | 为主图每个槽位补充更适合上图的短标题、短副文案和参数标签 | `WhataiClient.design_main_copy_blocks` + `build_strategy_preview` |
-| Detail Page Planner | 生成 `detail_strategy_preview`、商品/风格参考 manifest 和 8 个 panel 规划 | `build_detail_strategy_preview` |
-| Detail Copy Reviewer Agent | 审视详情页 panel 文案与图像语义，补充“真实局部图 / 机制示意图”说明 | `WhataiClient.review_detail_panel_copy` + `build_detail_strategy_preview` |
+| Detail Page Planner | 生成 `detail_strategy_preview`、商品/风格参考 manifest 和 8 个 panel 规划，并直接补齐 `copy_focus/panel_goal/visual_truth_mode/origin_note` | `build_detail_strategy_preview` |
 | Prompt Composer | 按主图槽位输出结构化 prompt blocks 与最终 `final_prompt` | `compose_prompt` |
 | Detail Prompt Composer | 按 panel slot 输出带字详情页 prompt blocks 与最终 `final_prompt` | `compose_detail_panel_prompt` |
 | Image Generation Agent | 批量提交上游异步任务、集中轮询、并发下载图片字节 | `WhataiClient.submit_image_request/poll_image_tasks/download_image_bytes` |
@@ -226,6 +225,7 @@
 - 阿里中文平台 visible copy 约束规则：
   - 仅 `1688` / `taobao` 触发；`alibaba_intl` 保持英文语义
   - 当前主链改回纯 prompt-first：先在策略预览和最终 prompt 中前置强化“中文短句、少字、不要英文营销词、不要内部标签”，不再在下载后追加热路径语言验收
+  - 新增海报文案必须中文化，但参考图里商品本体原有英文、型号、logo、按钮字样和铭牌丝印属于保真范围，应尽量保留
   - 默认允许的 visible copy 语义仍只围绕简体中文、阿拉伯数字、必要计量单位，以及用户明确提供的商品事实
   - 若中文文案不稳定，优先少字或无字，不再为了语言审核对单图做额外补跑，避免拖慢整组生成
 - 429 / EOF 鲁棒性：
@@ -263,10 +263,8 @@
   - `panel_plan` 当前带 `slot_id/narrative_section/panel_goal/copy_focus/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used/product_reference_ids/style_reference_ids/visual_truth_mode/origin_note`
   - 详情页 planner 会显式复用同一 `session_id` 下的 `analysis_snapshot + 商品图 + parameter_snapshot`
   - 详情页链路保持独立生成，但语义上是 narrative-first，不是主图 5 槽位的复写
-  - planner 之后会追加一层 `Detail Copy Reviewer Agent`：
-    - 审视 panel 文案和结构解释是否越权
-    - 补充 `visual_truth_mode` 与 `origin_note`
-    - 明确区分“真实局部放大”与“机制示意图”
+  - `detail_planner` 会一次性产出 `copy_focus/panel_goal/visual_truth_mode/origin_note`，不再追加默认 reviewer 二跳
+  - 这样做的目的是减少详情页默认 LLM 调用数，避免策略预览为了文案 review 再额外等待一轮
   - 未上传风格图时，优先使用 `style_preset_id` 解析出的风格摘要，再拼接 `style_custom`；仅兼容回退 `style_choice`
   - 生图默认使用 1 张商品 grid；有风格图时追加 1 张 style/font grid
   - 详情页执行阶段优先消费 panel 级参考图，grid 只作为 fallback/辅助参考，不再让所有 panel 共用同一组主参考输入

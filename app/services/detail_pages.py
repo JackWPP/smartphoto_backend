@@ -208,15 +208,6 @@ def build_detail_strategy_preview(
     detail_planner_ms = int((time.perf_counter() - planner_started) * 1000)
 
     merged_plan = _merge_panel_plan(fallback_plan, llm_result.get("panel_plan") or [])
-    reviewer_started = time.perf_counter()
-    review_plan = client.review_detail_panel_copy(
-        confirmed_copy=normalized_copy,
-        analysis_snapshot=analysis_snapshot or {},
-        parameter_snapshot=parameter_snapshot or {},
-        panel_plan=merged_plan,
-    )
-    detail_reviewer_ms = int((time.perf_counter() - reviewer_started) * 1000)
-    merged_plan = _apply_detail_panel_review(merged_plan, review_plan)
     return {
         "use_case": DETAIL_PAGE_USE_CASE,
         "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
@@ -246,7 +237,7 @@ def build_detail_strategy_preview(
         "repair_round": int(llm_result.get("repair_round") or 0),
         "source": str(llm_result.get("source") or "rule_based"),
         "detail_planner_ms": detail_planner_ms,
-        "detail_reviewer_ms": detail_reviewer_ms,
+        "detail_reviewer_ms": 0,
         "detail_rule_pack": rule_pack.id if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
         "detail_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
         "detail_rule_pack_version": version.version_no if version is not None else 1,
@@ -650,28 +641,6 @@ def _merge_panel_plan(
                 merged_item["layout_template"] = panel_meta["layout_template"]
         merged_item["planner_source"] = "llm"
         merged.append(merged_item)
-    return merged
-
-
-def _apply_detail_panel_review(
-    panel_plan: list[dict[str, Any]],
-    review_plan: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if not review_plan:
-        return panel_plan
-    merged: list[dict[str, Any]] = []
-    for item in panel_plan:
-        panel_id = str(item.get("panel_id") or "")
-        review = review_plan.get(panel_id) or {}
-        merged.append(
-            {
-                **item,
-                "copy_focus": sanitize_surface_text(review.get("copy_focus")) or item.get("copy_focus"),
-                "panel_goal": sanitize_surface_text(review.get("panel_goal")) or item.get("panel_goal"),
-                "visual_truth_mode": review.get("visual_truth_mode") or item.get("visual_truth_mode") or _default_visual_truth_mode(str(item.get("panel_type") or "")),
-                "origin_note": sanitize_surface_text(review.get("origin_note")) or item.get("origin_note") or "",
-            }
-        )
     return merged
 
 

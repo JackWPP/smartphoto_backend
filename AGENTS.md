@@ -352,3 +352,8 @@
   - 主图下载阶段改为“单槽位补救优先”：单张失败先重试该槽位；若仍失败，当前版本允许以 `partial_succeeded` 落库，不再让整组结果归零
   - `GET /api/v2/sessions/{session_id}/results` 新增 `summary.expected_count`、`expected_slot_ids`、`missing_slot_ids`，前端可直接复用 `slot_ids` 补齐缺失槽位
   - 主图 `generation_snapshot` 新增 `download_retry_count / download_rescued / download_rescue_reason`，运行排障手册同步补充 `429` 与缺图排查口径
+- 2026-03-30 Prompt Refinement:
+  - 详情页默认链路移除独立 `detail copy reviewer` 调用，`copy_focus/panel_goal/visual_truth_mode/origin_note` 改为由 `detail_planner` 一次性产出，详情页默认 LLM 调用数减少 1 次
+  - `1688/taobao` visible copy 规则收口为“新增海报文案必须中文化，但商品本体原有英文、型号、logo、按钮字样和铭牌丝印属于保真范围，应尽量保留”
+  - 主图阿里 5 槽位约束进一步强化为“短而有信息密度”：首图强调主利益点，理由图至少 2 个理由维度，佐证图优先参数/部件/结构证据，场景图强调明确收益，尾屏负责总结收口
+  - Prompt Debug 的 `blocks.constraints/final_prompt`、提示词总表、API 联调指南、Agent 协作文档与运行排障手册同步更新到新口径，并补充主图/详情页定向回归测试
