@@ -51,11 +51,10 @@ DETAIL_STORY_BRIEF_KEYS = (
 )
 ANALYSIS_PROMPT_VERSION = "analysis_v3_prompt_first"
 MAIN_PLANNER_PROMPT_VERSION = "main_planner_v3_prompt_first"
-DETAIL_PLANNER_PROMPT_VERSION = "detail_planner_v3_prompt_first"
+DETAIL_PLANNER_PROMPT_VERSION = "detail_planner_v4_prompt_first"
 PARAMETER_PROMPT_VERSION = "parameter_v2_prompt_first"
 PARAMETER_COMPLETION_PROMPT_VERSION = "parameter_completion_v1"
 MAIN_COPY_DESIGN_PROMPT_VERSION = "main_copy_design_v1"
-DETAIL_COPY_REVIEW_PROMPT_VERSION = "detail_copy_review_v1"
 VISIBLE_TEXT_LANGUAGE_PROMPT_VERSION = "visible_text_language_v1"
 
 
@@ -319,8 +318,10 @@ class WhataiClient:
                     "detail_story_brief 必须且只包含 trust_overview,mechanism,feature_a,feature_b,usage_scene,parameter_proof,differentiator,closing_cta 这 8 个键。"
                     "panel_plan 必须是长度为 8 的数组。"
                     "每项必须包含：panel_id,panel_label,narrative_section,panel_goal,copy_focus,panel_type,layout_template,"
-                    "planner_prompt_base,copy_lines,layout_notes,product_reference_ids,style_reference_ids。"
+                    "planner_prompt_base,copy_lines,layout_notes,product_reference_ids,style_reference_ids,visual_truth_mode,origin_note。"
                     "copy_lines 必须是适合直接上图或给用户编辑的最终短文案候选，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                    "visual_truth_mode 只能是 faithful_closeup,mechanism_illustration,scene_reconstruction,parameter_board。"
+                    "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释真实性边界。"
                     "不要把 Proof、panel_goal、copy_focus、narrative_section、设计证明、布局模板、规则模块、【...】等内部标签写进可见文案。"
                     "不要让 8 个 panel 都像横向主图，必须形成清晰的详情页叙事链。"
                     f"{_prompt_matrix_guardrail_text()}"
@@ -380,6 +381,8 @@ class WhataiClient:
                     "planner_prompt_base": str(item.get("planner_prompt_base") or "").strip(),
                     "copy_lines": [str(value).strip() for value in item.get("copy_lines", []) if str(value).strip()],
                     "layout_notes": str(item.get("layout_notes") or "").strip(),
+                    "visual_truth_mode": str(item.get("visual_truth_mode") or "").strip(),
+                    "origin_note": str(item.get("origin_note") or "").strip(),
                     "product_reference_ids": [
                         image_id
                         for image_id in [str(value).strip() for value in item.get("product_reference_ids", [])]
@@ -643,68 +646,6 @@ class WhataiClient:
                 "_meta": outcome["meta"],
             }
         return by_slot
-
-    def review_detail_panel_copy(
-        self,
-        *,
-        confirmed_copy: dict[str, Any],
-        analysis_snapshot: dict[str, Any],
-        parameter_snapshot: dict[str, Any],
-        panel_plan: list[dict[str, Any]],
-    ) -> dict[str, dict[str, Any]]:
-        if not self.llm_router.is_available("detail_copy_review"):
-            return {}
-        content = [
-            {
-                "type": "text",
-                "text": (
-                    "你是 SmartPhoto 的详情页文案 reviewer。"
-                    "你不会重做 panel 规划，只负责补充每个 panel 的文字重点和真实性说明。"
-                    "请返回 JSON 对象，顶层键必须是 panel_review_plan，值为数组。"
-                    "每项必须包含：panel_id,copy_focus,panel_goal,visual_truth_mode,origin_note。"
-                    "visual_truth_mode 只能是 faithful_closeup,mechanism_illustration,scene_reconstruction,parameter_board。"
-                    "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释。"
-                    "不要让 8 个 panel 的 copy_focus 高度重复。"
-                    "不要输出内部规划标签或带包装的结构词，例如 Proof、panel_goal、copy_focus、narrative_section、设计证明、规则模块、布局模板、【...】。"
-                    "copy_focus 和 panel_goal 必须是最终策划结论，不要输出思考过程或中间推理。"
-                    f"{_prompt_matrix_guardrail_text()}"
-                    f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
-                    f"parameter_snapshot：{json.dumps(parameter_snapshot or {}, ensure_ascii=False)}。"
-                    f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
-                    f"panel_plan：{json.dumps(panel_plan or [], ensure_ascii=False)}。"
-                ),
-            }
-        ]
-        outcome = self._run_structured_task(
-            task="detail_copy_review",
-            messages=[{"role": "user", "content": content}],
-            temperature=0.2,
-            error_key="upstream_llm_error",
-            prompt_version=DETAIL_COPY_REVIEW_PROMPT_VERSION,
-            validator=lambda parsed: self._validate_detail_copy_review_result(parsed, panel_plan),
-            fallback_result={},
-        )
-        parsed = outcome["result"]
-        if not isinstance(parsed, dict):
-            return {}
-        items = parsed.get("panel_review_plan")
-        if not isinstance(items, list):
-            return {}
-        by_panel: dict[str, dict[str, Any]] = {}
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            panel_id = str(item.get("panel_id") or "").strip()
-            if not panel_id:
-                continue
-            by_panel[panel_id] = {
-                "copy_focus": repair_broken_text(item.get("copy_focus")),
-                "panel_goal": repair_broken_text(item.get("panel_goal")),
-                "visual_truth_mode": repair_broken_text(item.get("visual_truth_mode")),
-                "origin_note": repair_broken_text(item.get("origin_note")),
-                "_meta": outcome["meta"],
-            }
-        return by_panel
 
     def inspect_visible_text_language(
         self,
@@ -1686,9 +1627,12 @@ class WhataiClient:
             narrative_sections.append(section)
             if section not in DETAIL_STORY_BRIEF_KEYS:
                 errors.append(self._validation_error(f"panel_plan[{index}].narrative_section", "enum", "narrative_section 必须属于 8 段叙事键", section))
-            for field in ("panel_goal", "copy_focus", "panel_type", "layout_template", "planner_prompt_base"):
+            for field in ("panel_goal", "copy_focus", "panel_type", "layout_template", "planner_prompt_base", "visual_truth_mode", "origin_note"):
                 if not repair_broken_text(item.get(field)):
                     errors.append(self._validation_error(f"panel_plan[{index}].{field}", "required", f"{field} 不能为空", item.get(field)))
+            mode = str(item.get("visual_truth_mode") or "").strip()
+            if mode not in {"faithful_closeup", "mechanism_illustration", "scene_reconstruction", "parameter_board"}:
+                errors.append(self._validation_error(f"panel_plan[{index}].visual_truth_mode", "enum", "visual_truth_mode 非法", mode))
             product_ids = item.get("product_reference_ids")
             if not isinstance(product_ids, list):
                 errors.append(self._validation_error(f"panel_plan[{index}].product_reference_ids", "list", "product_reference_ids 必须是数组", product_ids))
@@ -1788,31 +1732,6 @@ class WhataiClient:
                 value = item.get(key)
                 if value is not None and not isinstance(value, list):
                     errors.append(self._validation_error(f"copy_design_plan[{index}].{key}", "list", f"{key} 必须是数组", value))
-        return errors
-
-    def _validate_detail_copy_review_result(
-        self,
-        parsed: Any,
-        panel_plan: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        if not isinstance(parsed, dict):
-            return [self._validation_error("$", "json_object", "detail copy review 必须返回 JSON 对象", parsed)]
-        items = parsed.get("panel_review_plan")
-        if not isinstance(items, list):
-            return [self._validation_error("panel_review_plan", "list", "panel_review_plan 必须是数组", items)]
-        valid_panel_ids = {str(item.get("panel_id") or "") for item in panel_plan if str(item.get("panel_id") or "")}
-        allowed_modes = {"faithful_closeup", "mechanism_illustration", "scene_reconstruction", "parameter_board"}
-        errors: list[dict[str, Any]] = []
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                errors.append(self._validation_error(f"panel_review_plan[{index}]", "object", "panel review 项必须是对象", item))
-                continue
-            panel_id = str(item.get("panel_id") or "").strip()
-            if panel_id not in valid_panel_ids:
-                errors.append(self._validation_error(f"panel_review_plan[{index}].panel_id", "enum", "panel_id 必须命中当前 panel", panel_id))
-            mode = str(item.get("visual_truth_mode") or "").strip()
-            if mode and mode not in allowed_modes:
-                errors.append(self._validation_error(f"panel_review_plan[{index}].visual_truth_mode", "enum", "visual_truth_mode 非法", mode))
         return errors
 
     def _validate_visible_text_language_result(self, parsed: Any) -> list[dict[str, Any]]:

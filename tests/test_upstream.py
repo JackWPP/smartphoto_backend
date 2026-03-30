@@ -168,10 +168,11 @@ def test_alibaba_prompt_exposes_slot_structure_and_copy_policy():
     assert "slot_guardrails" in prompt["prompt_sections_used"]
     assert "标题区 + 产品主体 + 背景结构 + 底部利益点" in prompt["blocks"]["composition"]
     assert prompt["slot_guardrails"]
-    assert "图上可见文字必须为简体中文短句；只允许阿拉伯数字、必要计量单位，以及用户已提供的型号/缩写。" in prompt["blocks"]["constraints"]
+    assert "后加的图上文案必须为简体中文短句；只允许阿拉伯数字、必要计量单位，以及用户已提供的型号/缩写。" in prompt["blocks"]["constraints"]
+    assert "保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印，不要擅自汉化或改字。" in prompt["final_prompt"]
     assert "图上文案和用户可编辑文案都必须是最终表达" in prompt["blocks"]["constraints"]
     assert "Visible copy must stay short" not in prompt["blocks"]["constraints"]
-    assert "如出现英文请改写为简体中文短句" in prompt["final_prompt"]
+    assert "新增图上文案只能使用简体中文短句" in prompt["final_prompt"]
 
 
 def test_alibaba_intl_prompt_keeps_english_visible_copy_constraint():

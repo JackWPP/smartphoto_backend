@@ -667,16 +667,16 @@ def build_copy_blocks(
         allow_placeholder_parameters=False,
     )
 
-    hero_headline = _first_non_empty(headline_candidates, product_name_candidates, benefit_candidates)
-    hero_supporting = _pick_first_distinct(benefit_candidates, hero_headline)
-    hero_matrix = _take_distinct(benefit_candidates, exclude=[hero_headline, hero_supporting], max_items=2)
+    hero_headline = _first_non_empty(headline_candidates, benefit_candidates, product_name_candidates)
+    hero_supporting = _pick_first_distinct(benefit_candidates + scene_candidates + proof_candidates, hero_headline)
+    hero_matrix = _take_distinct(benefit_candidates + proof_candidates, exclude=[hero_headline, hero_supporting], max_items=2)
 
     reason_headline = _first_non_empty(benefit_candidates, headline_candidates, product_name_candidates)
-    reason_supporting = _pick_first_distinct(benefit_candidates + proof_candidates, reason_headline)
-    reason_matrix = _take_distinct(benefit_candidates + proof_candidates, exclude=[reason_headline, reason_supporting], max_items=2)
+    reason_supporting = _pick_first_distinct(proof_candidates + benefit_candidates + scene_candidates, reason_headline)
+    reason_matrix = _take_distinct(benefit_candidates + proof_candidates + scene_candidates, exclude=[reason_headline, reason_supporting], max_items=3)
 
     proof_headline = _first_non_empty(proof_candidates, benefit_candidates, headline_candidates, product_name_candidates)
-    proof_supporting = _pick_first_distinct(benefit_candidates + headline_candidates, proof_headline)
+    proof_supporting = _pick_first_distinct(benefit_candidates + headline_candidates + scene_candidates, proof_headline)
     proof_lines = _take_distinct(proof_candidates, exclude=[proof_headline, proof_supporting], max_items=3)
 
     benefit_headline = _first_non_empty(benefit_candidates, scene_candidates, headline_candidates, product_name_candidates)
@@ -685,7 +685,7 @@ def build_copy_blocks(
 
     closing_headline = _first_non_empty(benefit_candidates, headline_candidates, product_name_candidates)
     closing_scene_candidates = _select_closing_scene_candidates(scene_candidates)
-    closing_supporting = _pick_first_distinct(benefit_candidates + closing_scene_candidates, closing_headline)
+    closing_supporting = _pick_first_distinct(benefit_candidates + closing_scene_candidates + proof_candidates, closing_headline)
     closing_proof = _take_distinct(proof_candidates, exclude=[closing_headline, closing_supporting], max_items=2)
     closing_matrix = _take_distinct(
         benefit_candidates + proof_candidates + closing_scene_candidates,
@@ -845,10 +845,10 @@ def _to_brief_english(text: str) -> str:
 def _normalize_copy_blocks_for_slot(slot_id: str, blocks: dict[str, Any]) -> dict[str, Any]:
     policy = {
         "primary_kv": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 0, "matrix_max": 2},
-        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 0, "matrix_max": 2},
+        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 20, "supporting_ascii": 34, "proof_max": 0, "matrix_max": 3},
         "proof_authority": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 3, "matrix_max": 0},
-        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 0, "matrix_max": 2},
-        "closing_selling_point": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 2, "matrix_max": 2},
+        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 0, "matrix_max": 2},
+        "closing_selling_point": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 2, "matrix_max": 2},
     }.get(slot_id, {"headline_cn": 18, "headline_ascii": 32, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 2, "matrix_max": 2})
 
     headline = _clip_copy_text(blocks.get("headline"), cn_limit=policy["headline_cn"], ascii_limit=policy["headline_ascii"])

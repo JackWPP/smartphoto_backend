@@ -353,8 +353,9 @@
     - `benefit_scene_or_compare`：`颜色强化 + 核心利益点 + 对比/场景二选一`
     - `closing_selling_point`：`优质场景 + 核心卖点 + 1-2 个辅助卖点`
   - `1688` / `taobao` 额外增加 visible copy 语言硬约束：
-    - 图上可见文字必须为简体中文短句
+    - 新增图上文案必须为简体中文短句
     - 只允许阿拉伯数字、必要计量单位，以及用户已明确提供的型号/缩写白名单
+    - 参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印属于保真范围，应尽量保持，不要求翻译
     - `alibaba_intl` 保持英文站点语义，不受该中文约束影响
   - Prompt Matrix / Harness 当前新增一层非阻断式文案安全清洗：
     - analysis / planner / Step3 / render prompt 内部提示默认统一走中文表达
@@ -558,6 +559,7 @@
     - `product_reference_manifest`
     - `style_reference_manifest`
     - `panel_plan`
+  - 当前默认主链已把 reviewer 能力并回 `detail_planner`，因此 `detail_reviewer_ms` 仅作兼容返回，默认固定为 `0`
   - 详情页 planner 当前会显式复用同一 `session_id` 下的：
     - `analysis_snapshot`
     - 商品图

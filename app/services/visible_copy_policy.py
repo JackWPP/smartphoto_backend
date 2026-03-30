@@ -45,8 +45,9 @@ def requires_simplified_chinese_visible_copy(platform_id: str | None) -> bool:
 
 def simplified_chinese_visible_copy_constraints() -> list[str]:
     return [
-        "图上可见文字必须为简体中文短句；只允许阿拉伯数字、必要计量单位，以及用户已提供的型号/缩写。",
-        "不要出现英文标题、英文副文案或自由英文营销词。",
+        "后加的图上文案必须为简体中文短句；只允许阿拉伯数字、必要计量单位，以及用户已提供的型号/缩写。",
+        "保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印，不要擅自汉化或改字。",
+        "不要新增英文标题、英文副文案或自由英文营销词。",
         "如果没有足够好的中文短句，宁可少字，也不要硬塞英文 slogan 或英文卖点。",
     ]
 
@@ -54,8 +55,9 @@ def simplified_chinese_visible_copy_constraints() -> list[str]:
 def strengthen_simplified_chinese_visible_copy_instruction(allowed_tokens: list[str] | None = None) -> str:
     allowed = normalize_visible_text_allowlist(allowed_tokens)
     base = (
-        "图上所有可见文字必须全部改为简体中文短句，只允许阿拉伯数字、必要计量单位，"
-        "以及用户已明确提供的型号或缩写；绝对不要出现英文标题、英文副文案或自由英文营销文案。"
+        "新增的图上文案必须改为简体中文短句，只允许阿拉伯数字、必要计量单位，"
+        "以及用户已明确提供的型号或缩写；绝对不要新增英文标题、英文副文案或自由英文营销文案。"
+        "商品本体原有英文、型号、logo、按钮字样或铭牌丝印属于保真范围，应尽量保持，不要擅自汉化。"
         "如果中文短句不够稳，宁可减少文字密度，也不要硬塞英文。"
     )
     if not allowed:
@@ -66,9 +68,10 @@ def strengthen_simplified_chinese_visible_copy_instruction(allowed_tokens: list[
 def minimize_simplified_chinese_visible_copy_instruction(allowed_tokens: list[str] | None = None) -> str:
     allowed = normalize_visible_text_allowlist(allowed_tokens)
     base = (
-        "当前图上可见文字请进一步收口为极少量简体中文短句。"
-        "除阿拉伯数字、必要计量单位和用户已明确提供的型号/缩写外，尽量不要再放其他文字。"
-        "若中文文案仍不稳定，优先只保留必要参数或型号，必要时直接无字，不要出现英文营销词。"
+        "当前请进一步收口后加图上文案，只保留极少量简体中文短句。"
+        "商品本体原有英文、型号、logo、按钮字样或铭牌丝印保持保真，不视为需要翻译的海报文案。"
+        "除阿拉伯数字、必要计量单位和用户已明确提供的型号/缩写外，尽量不要再放其他新增文字。"
+        "若中文文案仍不稳定，优先只保留必要参数或型号，必要时直接无字，不要新增英文营销词。"
     )
     if not allowed:
         return base

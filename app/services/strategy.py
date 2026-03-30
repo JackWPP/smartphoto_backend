@@ -630,18 +630,25 @@ def _build_default_prompt_plan_item(
     if plan_item.get("text_policy") == "no_text":
         resolved_constraints.append("不要生成海报文字、标题字、角标、贴纸或说明文案。")
     elif requires_simplified_chinese_visible_copy(platform_overlay.get("overlay_id")):
-        resolved_constraints.append("图上可见文字必须保持简体中文短句、高对比且与版式融合。")
-        resolved_constraints.append("如果没有足够好的中文短句，宁可少字，也不要硬塞英文 slogan、英文副文案或英文卖点。")
+        resolved_constraints.append("后加图上文案必须保持简体中文短句、高对比且与版式融合。")
+        resolved_constraints.append("商品本体原有英文、型号、logo、按钮字样或铭牌丝印属于保真范围，应尽量保持，不要擅自汉化。")
+        resolved_constraints.append("如果没有足够好的中文短句，宁可少字，也不要新增英文 slogan、英文副文案或英文卖点。")
     else:
         resolved_constraints.append("Visible copy must stay short, high-contrast and integrated into the layout.")
     if slot_id == "proof_authority":
         resolved_constraints.append("没有真实证书素材时，优先参数标签、面板特写或结构放大，不伪造权威认证。")
     if slot_id == "primary_kv":
-        resolved_constraints.append("首图只允许 0-2 个短利益点，不要再叠长副标题或大段解释。")
+        resolved_constraints.append("首图优先形成一句明确中文主利益点，并搭配 0-2 个短辅助利益点；不要再叠长副标题或大段解释。")
         if requires_simplified_chinese_visible_copy(platform_overlay.get("overlay_id")):
-            resolved_constraints.append("首图标题优先一句中文主利益点；若标题不稳，优先少字，不要把英文口号直接铺到图上。")
+            resolved_constraints.append("首图标题要先说明产品是什么、解决什么问题；若标题不稳，优先少字，但不要退化成只有空泛产品名。")
+    if slot_id == "reason_why":
+        resolved_constraints.append("理由图至少要讲清 2 个不同理由点，优先理由卡、机制卡或证据化分镜，不要只喊泛口号。")
+    if slot_id == "proof_authority":
+        resolved_constraints.append("佐证图优先参数、部件、认证、结构和实验式证据，文案允许更短更硬，不做空氛围图。")
     if slot_id == "benefit_scene_or_compare":
-        resolved_constraints.append("画面必须有明确视觉强化区域，不允许做平淡白底陈列图。")
+        resolved_constraints.append("利益图必须明确讲出用户收益，并做强视觉强化区域，不允许做平淡白底陈列图。")
+    if slot_id == "closing_selling_point":
+        resolved_constraints.append("尾屏要承担总结收口，强调记忆点和购买理由，不要只是重复首图。")
     if global_consistency_note:
         resolved_constraints.append(f"全局一致性锚点：{global_consistency_note}")
     if slot_id in {"detail", "proof_authority"}:
