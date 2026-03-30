@@ -5,7 +5,7 @@ from typing import Any
 
 from app.services.copy_normalization import key_parameter_strings, normalize_copy_payload, repair_broken_text
 
-SIMPLIFIED_CHINESE_VISIBLE_COPY_PLATFORM_IDS = {"1688", "taobao"}
+SIMPLIFIED_CHINESE_VISIBLE_COPY_PLATFORM_IDS = {"1688", "taobao", "jd", "pdd", "douyin", "xiaohongshu", "custom"}
 LATIN_TOKEN_RE = re.compile(r"(?=[A-Za-z0-9./+-]*[A-Za-z])[A-Za-z0-9][A-Za-z0-9./+-]*")
 COMMON_ALLOWED_UNIT_TOKENS = {
     "db",
@@ -41,6 +41,10 @@ COMMON_ALLOWED_UNIT_TOKENS = {
 
 def requires_simplified_chinese_visible_copy(platform_id: str | None) -> bool:
     return str(platform_id or "").strip().lower() in SIMPLIFIED_CHINESE_VISIBLE_COPY_PLATFORM_IDS
+
+
+def visible_copy_language_for_platform(platform_id: str | None) -> str:
+    return "zh" if requires_simplified_chinese_visible_copy(platform_id) else "en"
 
 
 def simplified_chinese_visible_copy_constraints() -> list[str]:

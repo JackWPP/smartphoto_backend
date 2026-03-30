@@ -547,14 +547,19 @@
     - `planner_instruction: string | null`
     - `panel_preferences: [{slot_id, panel_type, display_order, locked}]`
   - 同步落库到 `session.detail_strategy_preview`
-  - 对同一份输入再次调用时，会按 `input_hash` 直接复用已持久化的 `detail_strategy_preview`
-  - `POST /sessions/{session_id}/detail-pages/generations` 现在也会优先复用已持久化且 `input_hash` 未变化的 `detail_strategy_preview`，不会在 worker 里再次补跑详情页 planner
+  - 对同一份输入再次调用时，会优先复用已持久化的 `detail_strategy_preview`
+  - 但若 `input_hash` 失配、`language_policy_version` 落后、`detail_policy_version` 落后、用户侧 `display_module_*` 字段缺失，或中文站 panel 中仍残留英文营销文案/内部规划标签，后端会自动重建 `detail_strategy_preview`
+  - `POST /sessions/{session_id}/detail-pages/generations` 现在也会优先复用已持久化且仍有效的 `detail_strategy_preview`，不会在 worker 里无意义地再次补跑详情页 planner
   - 固定返回：
     - `use_case = amazon_detail`
     - `aspect_ratio = 21:9`
     - `panel_count = 8`
     - `input_hash`
     - `detail_story_brief`
+    - `platform_overlay`
+    - `copy_language`
+    - `language_policy_version`
+    - `detail_policy_version`
     - `detail_rule_pack`
     - `product_reference_manifest`
     - `style_reference_manifest`
@@ -564,6 +569,10 @@
     - `analysis_snapshot`
     - 商品图
     - `parameter_snapshot`
+  - 详情页当前也接入平台语言策略：
+    - `1688/淘宝/京东/拼多多/抖音/小红书/自定义中文站` 的新增 panel 文案必须为简体中文
+    - 商品本体原有英文、型号、logo、按钮字样和铭牌丝印允许保留，不要求汉化
+    - `use_case = amazon_detail` 仅为兼容字段，不再代表详情页默认走英文语义
   - 但主图与详情页仍保持分链：
     - 主图是 `5` 槽位、conversion-first
     - 详情页是 `8` panel、narrative-first
@@ -571,6 +580,10 @@
     - `slot_id`
     - `panel_id`
     - `panel_label`
+    - `display_tags`
+    - `display_module_title`
+    - `display_module_kind`
+    - `display_module_intent`
     - `display_order`
     - `narrative_section`
     - `panel_goal`
@@ -607,12 +620,17 @@
     - `image_size = 1792x768`
     - `product_reference_manifest`
     - `style_reference_manifest`
+    - `detail_policy_version`
     - `prompts`
     - `latest_assets`
   - `prompts` 固定按 8 个 panel 顺序返回，每项包含：
     - `panel_id`
     - `slot_id`
     - `panel_label`
+    - `display_tags`
+    - `display_module_title`
+    - `display_module_kind`
+    - `display_module_intent`
     - `display_order`
     - `narrative_section`
     - `panel_goal`
@@ -631,7 +649,13 @@
     - `planner_source`
     - `planner_base`
     - `rule_modules_used`
+    - `platform_overlay`
+    - `copy_language`
     - `final_prompt`
+  - 详情页 prompt 现已收口为业务语义合同：
+    - `final_prompt` 不再显式拼入 `Panel 类型 / 布局模板 / 内部规划语义仅用于推理`
+    - 内部 planner 字段会先归并成 `visual_contract / copy_contract / truth_contract` 再参与 prompt 组装
+    - 用户侧可见标题默认应优先消费 `display_module_title`，不要再直接渲染旧 `panel_label`
 - 详情页生成/结果/下载：
   - 首次生成：`POST /sessions/{session_id}/detail-pages/generations`
   - 结果查询：`GET /sessions/{session_id}/detail-pages/results`
@@ -649,12 +673,18 @@
     - 8 张 `panel`
     - 1 张竖向拼接长图 `stitched`
   - 结果里的每个 panel 当前会额外回传：
+    - `display_tags`
+    - `display_module_title`
+    - `display_module_kind`
+    - `display_module_intent`
     - `narrative_section`
     - `panel_goal`
     - `copy_focus`
     - `panel_type`
     - `visual_truth_mode`
     - `origin_note`
+  - 结果顶层还会回传：
+    - `detail_policy_version`
   - `visual_truth_mode` 用于区分：
     - 真实局部放大
     - 机制示意
@@ -712,7 +742,7 @@
 - 当前实现补充：
   - 任何 `version_no` 都按不可变快照保留，历史版本允许回看与下载
   - `regenerate_asset` 会物化成完整新版本：新图 + `parent_asset.version_no` 对应版本的其余图
-  - 主图组会先批量提交全部上游异步任务，再集中轮询，再并发下载结果
+  - 主图组与详情页当前会先按批次提交上游异步任务，再延迟启动轮询，再并发下载结果
   - 默认平台按 `hero -> white_bg -> selling_point -> scene -> detail` 生成
   - 阿里系平台按 `primary_kv -> reason_why -> proof_authority -> benefit_scene_or_compare -> closing_selling_point` 生成
   - 每个槽位默认会从 session 图片中选最多 2 张参考图，并优先走 `/v1/images/edits`
@@ -722,8 +752,12 @@
     - `generation_submit_concurrency`
     - `main_generation_concurrency`
     - `detail_generation_concurrency`
+    - `image_submit_batch_size`
+    - `image_submit_batch_interval_seconds`
+    - `image_poll_initial_delay_seconds`
     - `image_poll_profile`
     - `image_task_timeout_seconds`
+    - `whatai_image_edit_timeout_seconds`
   - `429` 不再默认直接把整条文本链路打挂：
     - `analysis / main_planner / detail_planner / parameters / copy regenerate` 会先在单请求内做短退避重试
     - planner 若本地短重试后仍失败，会直接回退 rule-based/fallback，不再触发 `30/60/120s` 的整 job 级长等待
@@ -742,6 +776,10 @@
     - `download_retry_count`
     - `download_rescued`
     - `download_rescue_reason`
+    - `submission_batch_no`
+    - `submission_batch_size`
+    - `submit_strategy_version`
+    - `timing.poll_started_after_ms`
   - 实际提交给上游的快照会落到 `assets.generation_snapshot`
 - 并发保护：
   - 同 session 同时只允许 1 个运行中生图任务
@@ -777,7 +815,11 @@ data: {"event":"job_succeeded","job_id":"..."}
 ```
 - 补充说明：
   - 生图链路当前改为异步提交 WhatAI 任务后轮询结果，因此单次接口抖动不一定意味着上游未生成
-  - 图片任务结果当前按 `image_poll_profile` 自适应轮询，默认是 `5s x 6 + 10s x 12 + 15s x 20`，总窗口约 7.5 分钟
+  - 图片任务结果当前按“批次提交 + 首轮延迟 + `image_poll_profile`”执行：
+    - 默认每批最多 `5` 个
+    - 批间隔 `5s`
+    - 首轮轮询延迟 `45s`
+    - 默认轮询节奏为 `10s x 6 + 15s x 8 + 20s x 10`
   - 主图与详情页分别走 `q.generation.main` / `q.generation.detail`
   - Prompt 预览建议走独立的 `POST /sessions/{id}/prompts/preview`，不要从 `GET /results` 推导 prompt
 

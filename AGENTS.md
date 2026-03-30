@@ -357,3 +357,26 @@
   - `1688/taobao` visible copy 规则收口为“新增海报文案必须中文化，但商品本体原有英文、型号、logo、按钮字样和铭牌丝印属于保真范围，应尽量保留”
   - 主图阿里 5 槽位约束进一步强化为“短而有信息密度”：首图强调主利益点，理由图至少 2 个理由维度，佐证图优先参数/部件/结构证据，场景图强调明确收益，尾屏负责总结收口
   - Prompt Debug 的 `blocks.constraints/final_prompt`、提示词总表、API 联调指南、Agent 协作文档与运行排障手册同步更新到新口径，并补充主图/详情页定向回归测试
+- 2026-03-30 Detail Chinese Fix:
+  - 详情页中文站链路正式接入平台语言策略：`1688/淘宝/京东/拼多多/抖音/小红书/自定义中文站` 的新增 panel 文案、可编辑文案和 prompt 可见文案默认收口为简体中文
+  - 详情页 rule-based fallback 不再优先透传 legacy `selling_points/usage_scenes/specs`；改为优先消费 `hero_scene/core_selling_points/product_advantages/key_parameters`，并对 legacy 英文营销文案做过滤与降级
+  - `detail_strategy_preview` 新增 `platform_overlay/copy_language/language_policy_version` 元数据；旧英文 preview 若命中语言策略版本落后或中文站仍残留英文营销文案，会在再次预览或正式生成时自动重建
+  - `detail-pages/prompts/preview.prompts[*]` 新增 `platform_overlay/copy_language`，同步更新 API 联调指南、运行排障手册、Agent 协作文档、提示词总表与详情页中英文回归测试
+- 2026-03-30 Timeout Tuning:
+  - `WHATAI_REQUEST_TIMEOUT_SECONDS` 默认值从 `180s` 收紧到 `90s`，并让 `/v1/images/edits` 的 multipart 请求同样走该配置
+  - 保持 `IMAGE_EDIT_REQUEST_ATTEMPTS=4` 和现有 1/2/4s 短退避不变，仅缩短单次同步阻塞时间，降低 `read operation timed out` 的单次等待成本
+  - 同步更新 `.env.example`、`.env.prod.example`、`Readme.md`、`docs/运行与排障手册.md`、`docs/生图流程文档.md`、`docs/生图提速优化报告_客户版.md` 与相关回归测试
+- 2026-03-30 Detail Prompt Matrix:
+  - 详情页 render prompt 去规划化：`final_prompt` 不再直接暴露 `Panel 类型 / 布局模板 / 内部规划语义仅用于推理`，改为先归并为 `visual_contract / copy_contract / truth_contract`
+  - `detail_strategy_preview`、`detail-pages/prompts/preview` 与 `detail-pages/results` 新增 `detail_policy_version` 与 `display_module_title/display_module_kind/display_module_intent`，作为用户侧详情模块展示真相源
+  - 详情页进一步补充 `display_tags`，供前端直接展示中文 chip，不再渲染 `panel_type / narrative_section / visual_truth_mode` 原始内部值
+  - 详情页 `copy_lines/copy_blocks` 的 sanitize 进一步增强，额外过滤 `卖点槽位 / 场景卖点 / 产品类型 / 模块 / product_type / feature_* / parameter_* / kv_* / icon_*` 等内部模板词，优先重写为业务短句，无法稳定重写时直接降级为空
+  - `key_parameters` 若只有机器 key 没有正式 label，不再把 `product_type` 这类 schema key 直接拼进详情页可见文案；同时 `copy_lines` 会做去重与低信息降级，减少重复短句
+  - 旧详情页 preview 的自动重建判定扩展到 `detail_policy_version`、`display_module_*` 缺失和内部模板词残留；再次访问 preview 或正式生成时会自动升级并持久化
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、`docs/提示词汇总.md` 与详情页定向回归测试
+- 2026-03-30 Submit Cadence Hotfix:
+  - 主图与详情页的 `/images/edits` 链路改为“每批最多 5 个、批间隔 5 秒、提交后约 45 秒再开始轮询”，避免一次性把所有同步长请求同时打到上游
+  - 新增 `WHATAI_IMAGE_EDIT_TIMEOUT_SECONDS=120`，图片编辑请求不再与文本链路共用 `WHATAI_REQUEST_TIMEOUT_SECONDS=90`
+  - `IMAGE_POLL_PROFILE` 默认节奏改为 `10s x 6 + 15s x 8 + 20s x 10`；`generation_submit_concurrency` 收口为单批内部并发上限
+  - `generation_snapshot` 与 `job_progress` 新增 `submission_batch_no/submission_batch_size/submit_strategy_version/poll_started_after_ms` 等留痕，便于验收和排障确认后端已按新节奏执行
+  - 同步更新 `.env.example`、`.env.prod.example`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与提交节奏相关回归测试

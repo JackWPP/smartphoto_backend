@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import logging
+import random
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -27,6 +28,8 @@ from app.services.visible_copy_policy import (
     extract_latin_tokens,
     filter_disallowed_latin_tokens,
     normalize_visible_text_allowlist,
+    simplified_chinese_visible_copy_constraints,
+    visible_copy_language_for_platform,
 )
 
 logger = logging.getLogger(__name__)
@@ -304,10 +307,20 @@ class WhataiClient:
         planner_instruction: str | None,
         analysis_snapshot: dict[str, Any],
         parameter_snapshot: dict[str, Any],
+        active_platform_id: str | None,
     ) -> dict[str, Any]:
         if not self.llm_router.is_available("detail_planner"):
             return {}
 
+        copy_language = visible_copy_language_for_platform(active_platform_id)
+        platform_copy_instruction = (
+            "当前平台属于中文电商站点。"
+            f"{' '.join(simplified_chinese_visible_copy_constraints())}"
+            "panel 的 copy_lines、panel_goal、copy_focus 必须是适合直接上图或给用户编辑的简体中文终稿候选。"
+            "保留商品本体原始英文、型号、logo，不要新增英文营销文案、英文 supporting 长句或中英混排卖点。"
+            if copy_language == "zh"
+            else "当前平台允许英文站点语义，copy_lines 可以是简洁英文，但仍必须是最终上图文案候选。"
+        )
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
@@ -324,6 +337,7 @@ class WhataiClient:
                     "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释真实性边界。"
                     "不要把 Proof、panel_goal、copy_focus、narrative_section、设计证明、布局模板、规则模块、【...】等内部标签写进可见文案。"
                     "不要让 8 个 panel 都像横向主图，必须形成清晰的详情页叙事链。"
+                    f"{platform_copy_instruction}"
                     f"{_prompt_matrix_guardrail_text()}"
                     f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
                     f"当前 parameter_snapshot：{json.dumps(parameter_snapshot or {}, ensure_ascii=False)}。"
@@ -840,6 +854,8 @@ class WhataiClient:
         self,
         submissions: list[dict[str, Any]],
         error_key: str,
+        *,
+        initial_delay_seconds: int | float | None = None,
     ) -> dict[str, dict[str, Any]]:
         completed: dict[str, dict[str, Any]] = {}
         pending: dict[str, dict[str, Any]] = {}
@@ -861,6 +877,14 @@ class WhataiClient:
         headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
         last_status: dict[str, str] = {task_id: "UNKNOWN" for task_id in pending}
         deadline = time.monotonic() + max(int(self.settings.image_task_timeout_seconds), 1)
+        initial_delay = max(float(initial_delay_seconds if initial_delay_seconds is not None else self.settings.image_poll_initial_delay_seconds), 0.0)
+        if initial_delay > 0:
+            logger.info(
+                "Delaying image task polling: pending=%s initial_delay_seconds=%s",
+                len(pending),
+                int(initial_delay),
+            )
+            time.sleep(initial_delay)
         for interval_seconds, attempts in self._image_poll_schedule():
             for _ in range(attempts):
                 if time.monotonic() >= deadline:
@@ -1034,6 +1058,7 @@ class WhataiClient:
             error_key=error_key,
             attempts=self.IMAGE_EDIT_REQUEST_ATTEMPTS,
             retryable_on_exhausted=True,
+            timeout_seconds=self.settings.whatai_image_edit_timeout_seconds,
         )
 
     def _poll_image_generation_task(self, task_id: str, error_key: str) -> dict[str, Any]:
@@ -1103,11 +1128,13 @@ class WhataiClient:
         error_key: str,
         attempts: int,
         retryable_on_exhausted: bool = True,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         last_error: Exception | None = None
+        request_timeout = max(int(timeout_seconds or self.settings.whatai_image_edit_timeout_seconds), 1)
         for attempt in range(1, attempts + 1):
             try:
-                with httpx.Client(base_url=base_url, timeout=180) as client:
+                with httpx.Client(base_url=base_url, timeout=request_timeout) as client:
                     response = client.post(path, data=data, files=files, headers=headers)
                     response.raise_for_status()
                     return response.json()
@@ -1122,7 +1149,7 @@ class WhataiClient:
                 last_error = exc
                 if attempt == attempts:
                     break
-                self._sleep_before_retry(path, attempt, attempts, exc)
+                self._sleep_before_retry(path, attempt, attempts, exc, jitter_seconds=0.8)
             except Exception as exc:  # noqa: BLE001
                 raise AppError(error_key, str(exc), 502) from exc
         raise AppError(error_key, str(last_error), 502, retryable=retryable_on_exhausted) from last_error
@@ -1204,8 +1231,10 @@ class WhataiClient:
             return data
         return response_json
 
-    def _sleep_before_retry(self, target: str, attempt: int, attempts: int, exc: Exception) -> None:
+    def _sleep_before_retry(self, target: str, attempt: int, attempts: int, exc: Exception, *, jitter_seconds: float = 0.0) -> None:
         delay = min(2 ** (attempt - 1), 8)
+        if jitter_seconds > 0:
+            delay += random.uniform(0, jitter_seconds)
         logger.warning(
             "Retrying upstream request after transient error: target=%s attempt=%s/%s error=%s",
             target,
