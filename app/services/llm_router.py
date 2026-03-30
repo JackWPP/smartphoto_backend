@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -10,6 +11,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 
 logger = logging.getLogger(__name__)
+RATE_LIMIT_BACKOFF_SECONDS = (5, 12, 25)
 
 
 class LLMRouter:
@@ -21,6 +23,7 @@ class LLMRouter:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self._last_retry_meta = {"rate_limit_retry_count": 0, "rate_limit_final_source": None}
 
     def route_for_task(self, task: str) -> str:
         if task in {"main_planner", "detail_planner"} and self.settings.planner_profile == "light_model":
@@ -141,6 +144,8 @@ class LLMRouter:
             "planner_fallback_model": None,
             "planner_attempt_count": 0,
             "planner_final_source": "primary" if task in {"main_planner", "detail_planner"} else None,
+            "rate_limit_retry_count": 0,
+            "rate_limit_final_source": None,
         }
         if not primary_model or not self.is_available_for_route(primary_route):
             if task in {"main_planner", "detail_planner"}:
@@ -173,14 +178,17 @@ class LLMRouter:
         try:
             response = self._post_chat_json(payload, error_key, route=primary_route)
             text = self._extract_text(response)
+            retry_meta = self._consume_retry_meta()
             return {
                 "result": self._parse_json_object(text),
                 "meta": {
                     **base_meta,
                     "planner_attempt_count": 1 if task in {"main_planner", "detail_planner"} else 0,
+                    **retry_meta,
                 },
             }
         except AppError as exc:
+            retry_meta = self._consume_retry_meta()
             if task in {"main_planner", "detail_planner"} and self._should_fallback_planner(exc):
                 fallback_attempt = self._complete_planner_fallback(
                     task=task,
@@ -192,6 +200,11 @@ class LLMRouter:
                     original_error=exc,
                 )
                 if fallback_attempt is not None:
+                    fallback_attempt["meta"]["rate_limit_retry_count"] = int(fallback_attempt["meta"].get("rate_limit_retry_count") or 0) + int(
+                        retry_meta.get("rate_limit_retry_count") or 0
+                    )
+                    if retry_meta.get("rate_limit_final_source") and not fallback_attempt["meta"].get("rate_limit_final_source"):
+                        fallback_attempt["meta"]["rate_limit_final_source"] = retry_meta.get("rate_limit_final_source")
                     return fallback_attempt
             raise
 
@@ -209,7 +222,8 @@ class LLMRouter:
                 payload=request_payload,
                 headers={"Authorization": f"Bearer {self.settings.openrouter_api_key}"},
                 error_key=error_key,
-                attempts=2,
+                attempts=3,
+                retryable_on_exhausted=True,
             )
         if model.startswith("gemini-"):
             return self._post_gemini_json(model, payload, error_key)
@@ -223,7 +237,8 @@ class LLMRouter:
             payload=request_payload,
             headers={"Authorization": f"Bearer {self.settings.whatai_api_key}"},
             error_key=error_key,
-            attempts=2,
+            attempts=3,
+            retryable_on_exhausted=True,
         )
 
     def _complete_planner_fallback(
@@ -264,6 +279,7 @@ class LLMRouter:
         }
         response = self._post_chat_json(payload, error_key, route=fallback_route)
         text = self._extract_text(response)
+        retry_meta = self._consume_retry_meta()
         return {
             "result": self._parse_json_object(text),
             "meta": {
@@ -276,6 +292,7 @@ class LLMRouter:
                 "planner_fallback_model": fallback_model,
                 "planner_attempt_count": 2,
                 "planner_final_source": "fallback",
+                **retry_meta,
             },
         }
 
@@ -311,7 +328,7 @@ class LLMRouter:
             payload=gemini_payload,
             headers={"Authorization": f"Bearer {self.settings.whatai_api_key}"},
             error_key=error_key,
-            attempts=1,
+            attempts=3,
             retryable_on_exhausted=True,
         )
 
@@ -330,6 +347,7 @@ class LLMRouter:
         timeout = max(int(self.settings.whatai_request_timeout_seconds), 1)
         last_error: AppError | None = None
         url = f"{base_url.rstrip('/')}{path}"
+        rate_limit_retry_count = 0
         for attempt in range(1, max(attempts, 1) + 1):
             try:
                 with httpx.Client(timeout=timeout) as client:
@@ -340,6 +358,10 @@ class LLMRouter:
                         json=payload,
                     )
                 response.raise_for_status()
+                self._last_retry_meta = {
+                    "rate_limit_retry_count": rate_limit_retry_count,
+                    "rate_limit_final_source": "retried_primary" if rate_limit_retry_count else None,
+                }
                 return response.json()
             except self.RETRYABLE_ERRORS as exc:
                 message = str(exc)
@@ -349,11 +371,20 @@ class LLMRouter:
                     break
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429:
+                    rate_limit_retry_count += 1
+                    if attempt < attempts:
+                        self._sleep_before_rate_limit_retry(url, attempt, attempts, exc.response)
+                        continue
                     body = exc.response.text.strip()
+                    self._last_retry_meta = {
+                        "rate_limit_retry_count": rate_limit_retry_count,
+                        "rate_limit_final_source": "exhausted",
+                    }
                     raise AppError(
-                        "rate_limited",
+                        error_key,
                         body or f"{exc.response.status_code} {exc.response.reason_phrase}",
                         429,
+                        retryable=retryable_on_exhausted,
                     ) from exc
                 body = exc.response.text.strip()
                 raise AppError(
@@ -363,9 +394,31 @@ class LLMRouter:
                 ) from exc
             except Exception as exc:  # pragma: no cover
                 raise AppError(error_key, str(exc), 502) from exc
+        self._last_retry_meta = {
+            "rate_limit_retry_count": rate_limit_retry_count,
+            "rate_limit_final_source": "retried_primary" if rate_limit_retry_count else None,
+        }
         if last_error is not None:
             raise last_error
         raise AppError(error_key, "unknown llm request failure", 502)
+
+    def _consume_retry_meta(self) -> dict[str, Any]:
+        meta = dict(self._last_retry_meta)
+        self._last_retry_meta = {"rate_limit_retry_count": 0, "rate_limit_final_source": None}
+        return meta
+
+    def _sleep_before_rate_limit_retry(self, target: str, attempt: int, attempts: int, response: httpx.Response) -> None:
+        retry_after = str(response.headers.get("Retry-After") or "").strip()
+        delay = int(retry_after) if retry_after.isdigit() else RATE_LIMIT_BACKOFF_SECONDS[min(attempt - 1, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
+        logger.warning(
+            "Retrying LLM request after rate limit: target=%s attempt=%s/%s delay=%ss status=%s",
+            target,
+            attempt,
+            attempts,
+            delay,
+            response.status_code,
+        )
+        time.sleep(delay)
 
     def _normalized_whatai_base_url(self) -> str:
         base = str(self.settings.whatai_api_base or "").strip().rstrip("/")

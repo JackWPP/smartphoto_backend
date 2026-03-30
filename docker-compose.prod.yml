@@ -44,7 +44,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["./scripts/docker-migrate.sh"]
+    command: ["bash", "./scripts/docker-migrate.sh"]
 
   api:
     <<: *app-common
@@ -53,7 +53,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["./scripts/docker-api.sh"]
+    command: ["bash", "./scripts/docker-api.sh"]
     ports:
       - "8000:8000"
     healthcheck:
@@ -70,7 +70,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["./scripts/docker-worker.sh"]
+    command: ["bash", "./scripts/docker-worker.sh"]
 
 volumes:
   postgres_data:

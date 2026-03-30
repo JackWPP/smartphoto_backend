@@ -41,7 +41,7 @@ from .sessions import (
     MAX_DETAIL_STYLE_IMAGES,
     MAX_IMAGE_BYTES,
     MAX_SESSION_IMAGES,
-    _invalidate_strategy_inputs,
+    _invalidate_analysis_outputs,
 )
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
@@ -221,7 +221,7 @@ def complete_upload(
             session.status = "images_uploaded"
             session.current_step = 1
         else:
-            _invalidate_strategy_inputs(session)
+            _invalidate_analysis_outputs(session)
         db.flush()
         resource_id = model.id
         resource = _resource_summary(model.id, model.display_order, public_url_for(model.source_url), slot_type=model.slot_type)

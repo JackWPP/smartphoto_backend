@@ -6,8 +6,10 @@ from app.services.copy_normalization import (
     is_placeholder_copy_text,
     repair_broken_text,
 )
+from app.services.prompt_safety import prompt_matrix_guardrails, sanitize_main_copy_blocks
 from app.services.prompt_specs import get_prompt_role_spec
 from app.services.strategy import find_prompt_plan_item
+from app.services.visible_copy_policy import requires_simplified_chinese_visible_copy, simplified_chinese_visible_copy_constraints
 
 PROMPT_BLOCK_ORDER = [
     "goal",
@@ -47,7 +49,11 @@ def compose_prompt(
         or confirmed_copy.get("style_choice"),
         "简洁高级的电商摄影风格",
     )
-    copy_blocks = dict(prompt_plan.get("copy_blocks") or plan.get("copy_blocks") or {})
+    raw_copy_blocks = dict(prompt_plan.get("copy_blocks") or plan.get("copy_blocks") or {})
+    copy_blocks, sanitized_fields, copy_safety_notes = sanitize_main_copy_blocks(
+        raw_copy_blocks,
+        product_name=confirmed_copy.get("product_name", ""),
+    )
     text_policy = str(plan.get("text_policy") or role_spec["text_policy"])
     raw_prompt_override = _clean_text(prompt_plan.get("raw_prompt_override") or plan.get("raw_prompt_override"))
 
@@ -76,6 +82,7 @@ def compose_prompt(
             fidelity_rule=_clean_text(prompt_plan.get("fidelity_rule")),
             copy_blocks=copy_blocks,
             text_policy=text_policy,
+            platform_overlay=prompt_plan.get("platform_overlay"),
         )
     )
     strategy_fields_used = _collect_strategy_fields_used(
@@ -121,6 +128,8 @@ def compose_prompt(
         "rule_modules_used": [str(item) for item in prompt_plan.get("rule_modules_used", []) if str(item).strip()],
         "platform_overlay": prompt_plan.get("platform_overlay"),
         "resolved_constraints": _normalized_text_entries(prompt_plan.get("resolved_constraints")),
+        "copy_safety_notes": copy_safety_notes,
+        "sanitized_fields": sanitized_fields,
         "final_prompt": final_prompt,
     }
 
@@ -133,6 +142,7 @@ def format_prompt_blocks(
     fidelity_rule: str,
     copy_blocks: dict[str, Any],
     text_policy: str,
+    platform_overlay: dict[str, Any] | None = None,
 ) -> str:
     parts = [f"请生成一张适用于电商主图组的商品图片，参考画幅比例 {aspect_ratio}。"]
     if final_prompt_base:
@@ -140,10 +150,22 @@ def format_prompt_blocks(
     if fidelity_rule:
         parts.append(f"保真要求：{fidelity_rule}")
     visible_copy = _copy_blocks_to_text(copy_blocks)
+    domestic_chinese_copy = requires_simplified_chinese_visible_copy((platform_overlay or {}).get("overlay_id"))
     if text_policy != "no_text" and visible_copy:
-        parts.append(f"允许图上短文案，文案草案：{visible_copy}")
+        if domestic_chinese_copy:
+            parts.append("国内中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
+            parts.append(
+                "如果图上出现可见文字，只能使用简体中文短句；不要英文标题、不要英文副文案、不要英文营销词，也不要思考过程或内部规划标签。"
+            )
+            parts.append(f"可见文案候选仅作为中文终稿语义参考，可改写但必须保持少字且为简体中文：{visible_copy}")
+        else:
+            parts.append(f"允许图上短文案，文案草案：{visible_copy}")
     elif text_policy != "no_text":
-        parts.append("允许极少量图上短文案；若没有足够高质量的短句，宁可不显示文字。")
+        if domestic_chinese_copy:
+            parts.append("国内中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
+            parts.append("如果没有足够稳定的中文终稿，宁可少字或无字，也不要出现英文文案、英文营销词或内部术语。")
+        else:
+            parts.append("允许极少量图上短文案；若没有足够高质量的短句，宁可不显示文字。")
     else:
         parts.append("默认不要生成图上文案。")
 
@@ -333,6 +355,17 @@ def _compose_selling_points_block(slot_id: str, prompt_plan: dict[str, Any], cop
 
 def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[str, Any], text_policy: str) -> str:
     role_constraints = list(BASE_CONSTRAINTS)
+    role_constraints.extend(prompt_matrix_guardrails())
+    resolved_constraints = _normalized_text_entries(prompt_plan.get("resolved_constraints"))
+    priority_resolved_constraints = [
+        item
+        for item in resolved_constraints
+        if item.startswith("图上可见文字必须")
+        or item.startswith("Visible copy must stay short")
+        or item.startswith("如果没有足够好的中文短句")
+        or item.startswith("首图只允许")
+    ]
+    trailing_resolved_constraints = [item for item in resolved_constraints if item not in priority_resolved_constraints]
     if text_policy == "no_text":
         role_constraints.append("不要生成海报文字、标题字、角标、贴纸或说明文案")
     else:
@@ -356,9 +389,10 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
         role_constraints.append("不要堆砌虚假证书、虚构实验或不存在的机构背书")
     if slot_id == "benefit_scene_or_compare":
         role_constraints.append("不能做平铺直叙的白底陈列图，必须有明显视觉强化区")
+    role_constraints.extend(priority_resolved_constraints)
     role_constraints.extend(_normalized_text_entries(prompt_plan.get("slot_guardrails")))
     role_constraints.extend(_normalized_text_entries(prompt_plan.get("must_avoid")))
-    role_constraints.extend(_normalized_text_entries(prompt_plan.get("resolved_constraints")))
+    role_constraints.extend(trailing_resolved_constraints)
     return "；".join(_unique_texts(role_constraints)[:8])
 
 

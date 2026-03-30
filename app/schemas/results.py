@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class ResultsSummary(BaseModel):
     total_count: int = Field(description="当前版本资产总数。")
     ready_count: int = Field(description="ready 状态资产数。")
+    expected_count: int = Field(description="当前版本理论应有的主图槽位数。")
 
 
 class VersionSummary(BaseModel):
@@ -39,6 +40,8 @@ class ResultsData(BaseModel):
     available_versions: list[int] = Field(description="当前 session 可查看的所有主图结果版本。")
     version_summaries: list[VersionSummary] = Field(description="各版本的聚合统计。")
     summary: ResultsSummary = Field(description="当前版本统计信息。")
+    expected_slot_ids: list[str] = Field(description="当前版本理论应覆盖的槽位 ID 列表。")
+    missing_slot_ids: list[str] = Field(description="当前版本仍缺失的槽位 ID 列表。")
     assets: list[AssetItem] = Field(description="当前版本 ready 资产列表。")
 
 

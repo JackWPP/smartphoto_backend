@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.session_image import SessionImageModel
-from app.services.copy_normalization import normalize_copy_payload, normalize_phrase_list, repair_broken_text
+from app.services.copy_normalization import normalize_phrase_list, repair_broken_text
 from app.services.main_gallery_rules import (
     build_copy_blocks,
     expression_metadata,
@@ -30,6 +30,7 @@ from app.services.reference_images import (
 )
 from app.services.upstream import WhataiClient
 from app.services.strategy_overrides import resolve_session_overrides
+from app.services.visible_copy_policy import requires_simplified_chinese_visible_copy
 
 
 def strategy_preview_input_hash(
@@ -628,10 +629,17 @@ def _build_default_prompt_plan_item(
         resolved_constraints.append("背景必须是纯白无缝，禁止人物、道具、场景元素。")
     if plan_item.get("text_policy") == "no_text":
         resolved_constraints.append("不要生成海报文字、标题字、角标、贴纸或说明文案。")
+    elif requires_simplified_chinese_visible_copy(platform_overlay.get("overlay_id")):
+        resolved_constraints.append("图上可见文字必须保持简体中文短句、高对比且与版式融合。")
+        resolved_constraints.append("如果没有足够好的中文短句，宁可少字，也不要硬塞英文 slogan、英文副文案或英文卖点。")
     else:
         resolved_constraints.append("Visible copy must stay short, high-contrast and integrated into the layout.")
     if slot_id == "proof_authority":
         resolved_constraints.append("没有真实证书素材时，优先参数标签、面板特写或结构放大，不伪造权威认证。")
+    if slot_id == "primary_kv":
+        resolved_constraints.append("首图只允许 0-2 个短利益点，不要再叠长副标题或大段解释。")
+        if requires_simplified_chinese_visible_copy(platform_overlay.get("overlay_id")):
+            resolved_constraints.append("首图标题优先一句中文主利益点；若标题不稳，优先少字，不要把英文口号直接铺到图上。")
     if slot_id == "benefit_scene_or_compare":
         resolved_constraints.append("画面必须有明确视觉强化区域，不允许做平淡白底陈列图。")
     if global_consistency_note:

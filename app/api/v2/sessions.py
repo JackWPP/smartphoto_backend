@@ -1,3 +1,6 @@
+from datetime import timezone
+from typing import Any
+
 from fastapi import APIRouter, Depends, File, Form, Header, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import and_
@@ -11,6 +14,7 @@ from app.core.response import success_response
 from app.db.session import get_db
 from app.models.asset import AssetModel
 from app.models.detail_style_image import DetailStyleImageModel
+from app.models.job import JobModel
 from app.models.parameter_attachment import ParameterAttachmentModel
 from app.models.prompt_preset import PromptPresetModel
 from app.models.session import SessionModel
@@ -93,6 +97,7 @@ from app.services.parameter_snapshot import (
 from app.services.platforms import get_platform_or_none
 from app.services.prompts import build_prompt_previews
 from app.services.prompt_repo import list_prompt_presets
+from app.services.prompt_safety import sanitize_copy_blocks_override, sanitize_copy_form_payload, sanitize_generated_copy_fields
 from app.services.reference_images import build_reference_manifest, load_reference_images
 from app.services.repo import (
     get_prompt_preset_or_404,
@@ -147,6 +152,40 @@ def _session_scope_kwargs(principal: ServicePrincipal) -> dict[str, str]:
     return {"service_id": principal.app_id}
 
 
+def _analysis_freshness_payload(session: SessionModel) -> dict:
+    analysis_updated_at = session.analysis_updated_at
+    if analysis_updated_at is not None and analysis_updated_at.tzinfo is None:
+        analysis_updated_at = analysis_updated_at.replace(tzinfo=timezone.utc)
+    elif analysis_updated_at is not None:
+        analysis_updated_at = analysis_updated_at.astimezone(timezone.utc)
+    return {
+        "analysis_version": session.analysis_version,
+        "analysis_updated_at": analysis_updated_at,
+        "latest_analysis_job_id": session.latest_analysis_job_id,
+    }
+
+
+def _clear_analysis_downstream_outputs(session: SessionModel) -> None:
+    if session.parameter_snapshot:
+        confirmed_copy = sanitize_copy_form_payload(session.confirmed_copy or {})
+        stale_fields = parameter_snapshot_to_copy_fields(session.parameter_snapshot)
+        if confirmed_copy.get("hero_scene") == stale_fields.get("hero_scene"):
+            confirmed_copy["hero_scene"] = ""
+            confirmed_copy["usage_scenes"] = ""
+        if confirmed_copy.get("core_selling_points") == stale_fields.get("core_selling_points"):
+            confirmed_copy["core_selling_points"] = []
+            confirmed_copy["selling_points"] = ""
+        if confirmed_copy.get("key_parameters") == stale_fields.get("key_parameters"):
+            confirmed_copy["key_parameters"] = []
+            confirmed_copy["specs"] = ""
+        if confirmed_copy.get("product_advantages") == stale_fields.get("product_advantages"):
+            confirmed_copy["product_advantages"] = []
+        session.confirmed_copy = sanitize_copy_form_payload(confirmed_copy)
+    session.parameter_snapshot = None
+    session.strategy_preview = None
+    session.detail_strategy_preview = None
+
+
 def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:
     return {
         "session_id": session.id,
@@ -155,6 +194,7 @@ def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:
         "selected_platform_ids": session.selected_platform_ids,
         "active_platform_id": session.active_platform_id,
         "analysis_snapshot": session.analysis_snapshot,
+        **_analysis_freshness_payload(session),
         "parameter_snapshot": session.parameter_snapshot,
         "confirmed_copy": session.confirmed_copy,
         "strategy_preview": session.strategy_preview,
@@ -271,6 +311,38 @@ def _version_summaries(db: Session, session_id: str, *, asset_family: str) -> li
     return summaries
 
 
+def _main_gallery_version_expectation(
+    db: Session,
+    assets: list[AssetModel],
+) -> tuple[list[str], list[str], int]:
+    if not assets:
+        return [], [], 0
+    job_id = str(assets[0].job_id or "").strip()
+    result_payload: dict[str, Any] = {}
+    if job_id:
+        job = db.query(JobModel).filter(JobModel.id == job_id).one_or_none()
+        if job is not None and isinstance(job.result_payload, dict):
+            result_payload = dict(job.result_payload)
+    expected_slot_ids = [
+        str(item).strip()
+        for item in result_payload.get("expected_slot_ids", [])
+        if str(item).strip()
+    ]
+    if not expected_slot_ids:
+        expected_slot_ids = [
+            str(asset.slot_id or asset.asset_role or "").strip()
+            for asset in sorted(assets, key=lambda item: item.display_order)
+            if str(asset.slot_id or asset.asset_role or "").strip()
+        ]
+    missing_slot_ids = [
+        str(item).strip()
+        for item in result_payload.get("missing_slot_ids", [])
+        if str(item).strip()
+    ]
+    expected_count = int(result_payload.get("expected_count") or len(expected_slot_ids))
+    return expected_slot_ids, missing_slot_ids, expected_count
+
+
 def _serialized_session_overrides(db: Session, session_id: str, *, asset_family: str = "main_gallery", user_id: str | None = None) -> list[dict]:
     overrides = list_session_prompt_overrides(db, session_id, asset_family=asset_family)
     preset_ids = [override.applied_preset_id for override in overrides if override.applied_preset_id]
@@ -303,7 +375,7 @@ def _copy_response_payload(session: SessionModel, db: Session) -> dict:
 
 
 def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
-    copy_data = normalize_copy_payload(session.confirmed_copy)
+    copy_data = sanitize_copy_form_payload(session.confirmed_copy)
     if session.parameter_snapshot:
         copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
     preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"), session.service_id)
@@ -312,16 +384,19 @@ def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
         copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
         if not copy_data.get("style_choice"):
             copy_data["style_choice"] = preset.name
-    return normalize_copy_payload(copy_data)
+    return sanitize_copy_form_payload(copy_data)
 
 
-def _invalidate_strategy_inputs(session: SessionModel) -> None:
+def _invalidate_analysis_outputs(session: SessionModel) -> None:
     if isinstance(session.analysis_snapshot, dict):
         session.analysis_snapshot = {**session.analysis_snapshot, "reanalysis_required": True}
     else:
         session.analysis_snapshot = {"reanalysis_required": True}
-    session.strategy_preview = None
-    session.detail_strategy_preview = None
+    _clear_analysis_downstream_outputs(session)
+
+
+def _invalidate_strategy_inputs(session: SessionModel) -> None:
+    _invalidate_analysis_outputs(session)
 
 
 def _auto_trigger_reanalysis(db: Session, session: SessionModel, service_id: str) -> str | None:
@@ -438,7 +513,7 @@ async def upload_session_image(
         session.status = "images_uploaded"
         session.current_step = 1
     else:
-        _invalidate_strategy_inputs(session)
+        _invalidate_analysis_outputs(session)
 
     db.commit()
     images = list_active_session_images(db, session_id)
@@ -485,7 +560,7 @@ def delete_session_image(
 
     image.is_deleted = True
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    _invalidate_strategy_inputs(session)
+    _invalidate_analysis_outputs(session)
     db.commit()
     return success_response({"image_id": image_id, "deleted": True})
 
@@ -913,6 +988,7 @@ def trigger_analysis(
         ensure_session_transition("created", "images_uploaded")
         session.status = "images_uploaded"
         session.current_step = max(session.current_step, 1)
+    _clear_analysis_downstream_outputs(session)
     ensure_session_transition(session.status, "analyzing")
     session.status = "analyzing"
     session.current_step = max(session.current_step, 2)
@@ -964,7 +1040,13 @@ def trigger_analysis(
 )
 def get_analysis(session_id: str, db: Session = Depends(get_db), principal: ServicePrincipal = Depends(get_service_principal)) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    return success_response({"status": session.status, "analysis_snapshot": session.analysis_snapshot or {}})
+    return success_response(
+        {
+            "status": session.status,
+            "analysis_snapshot": session.analysis_snapshot or {},
+            **_analysis_freshness_payload(session),
+        }
+    )
 
 
 @router.post(
@@ -1115,6 +1197,7 @@ def put_platform_selection(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    previous_active_platform_id = session.active_platform_id
 
     if req.active_platform_id not in req.selected_platform_ids:
         raise AppError("invalid_platform", "active_platform_id must exist in selected list", 400)
@@ -1123,6 +1206,8 @@ def put_platform_selection(
 
     session.selected_platform_ids = req.selected_platform_ids
     session.active_platform_id = req.active_platform_id
+    if previous_active_platform_id and previous_active_platform_id != req.active_platform_id:
+        _invalidate_analysis_outputs(session)
 
     if session.status in {"images_uploaded", "analyzed", "platform_selected"}:
         session.status = "platform_selected"
@@ -1167,14 +1252,14 @@ def put_copy_form(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    payload = normalize_copy_payload(req.model_dump())
+    payload = sanitize_copy_form_payload(req.model_dump())
     preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"), principal.app_id)
     if payload.get("style_preset_id") and preset is None:
         raise AppError("invalid_request", "style preset not found", 404)
     payload["resolved_style_preset"] = serialize_prompt_preset(preset) if preset is not None else None
     if preset is not None and not payload.get("style_choice"):
         payload["style_choice"] = preset.name
-    session.confirmed_copy = normalize_copy_payload(payload)
+    session.confirmed_copy = sanitize_copy_form_payload(payload)
     refresh_session_search_cache(session)
     session.strategy_preview = None
     session.detail_strategy_preview = None
@@ -1258,7 +1343,7 @@ def get_copy_regenerate_result(
         {
             "job_id": job.id,
             "status": job.status,
-            "generated_fields": (job.result_payload or {}).get("generated_fields", {}),
+            "generated_fields": sanitize_generated_copy_fields((job.result_payload or {}).get("generated_fields", {})),
         }
     )
 
@@ -1493,7 +1578,10 @@ def put_strategy_overrides(
             db.add(record)
         if override.applied_preset_id:
             get_prompt_preset_or_404(db, override.applied_preset_id, session.service_id)
-        record.copy_blocks_override = override.copy_blocks_override or {}
+        record.copy_blocks_override = sanitize_copy_blocks_override(
+            override.copy_blocks_override or {},
+            asset_family="main_gallery",
+        )
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
         record.applied_preset_id = override.applied_preset_id
@@ -1582,7 +1670,10 @@ def put_detail_strategy_overrides(
             db.add(record)
         if override.applied_preset_id:
             get_prompt_preset_or_404(db, override.applied_preset_id, principal.app_id)
-        record.copy_blocks_override = override.copy_blocks_override or {}
+        record.copy_blocks_override = sanitize_copy_blocks_override(
+            override.copy_blocks_override or {},
+            asset_family="detail_page",
+        )
         record.raw_prompt_override = override.raw_prompt_override
         record.expression_mode_override = override.expression_mode_override
         record.applied_preset_id = override.applied_preset_id
@@ -1927,6 +2018,7 @@ def get_results(
     available_versions = _available_versions(db, session.id, asset_family="main_gallery")
     version_summaries = _version_summaries(db, session.id, asset_family="main_gallery")
     assets = _main_gallery_assets_query(db, session.id, target_version).all()
+    expected_slot_ids, missing_slot_ids, expected_count = _main_gallery_version_expectation(db, assets)
     return success_response(
         {
             "session_id": session.id,
@@ -1936,7 +2028,9 @@ def get_results(
             "requested_version": target_version,
             "available_versions": available_versions,
             "version_summaries": version_summaries,
-            "summary": {"total_count": len(assets), "ready_count": len(assets)},
+            "summary": {"total_count": len(assets), "ready_count": len(assets), "expected_count": expected_count},
+            "expected_slot_ids": expected_slot_ids,
+            "missing_slot_ids": missing_slot_ids,
             "assets": [
                 {
                     "asset_id": asset.id,

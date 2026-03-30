@@ -166,6 +166,8 @@ def test_local_presign_upload_complete_invalidates_analysis_without_auto_requeue
     after = client.get(f"/api/v2/sessions/{session_id}").json()["data"]
     assert after["analysis_snapshot"]["reanalysis_required"] is True
     assert after["latest_analysis_job_id"] is not None
+    assert after["analysis_version"] == before["analysis_version"]
+    assert after["analysis_updated_at"] == before["analysis_updated_at"]
     assert after["strategy_preview"] is None
     assert after["detail_strategy_preview"] is None
 

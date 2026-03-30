@@ -13,6 +13,7 @@ from app.services.copy_normalization import (
 )
 from app.services.platforms import PlatformProfile, get_platform_or_none
 from app.services.rule_packs import load_published_rule_pack_config
+from app.services.visible_copy_policy import simplified_chinese_visible_copy_constraints
 
 
 DEFAULT_MAIN_RULE_PACK_ID = "default_main_gallery_v2"
@@ -445,7 +446,11 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": True,
         "allow_certificate_elements": True,
         "allow_compare_overlay": True,
-        "constraints": ["中文短句允许更密，但每屏只保留1个核心主标题和少量佐证信息", "允许认证、参数、证书、对比优势等导购型元素"],
+        "constraints": [
+            "中文短句允许更密，但每屏只保留1个核心主标题和少量佐证信息",
+            "允许认证、参数、证书、对比优势等导购型元素",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
     },
     "taobao": {
         "id": "taobao",
@@ -454,7 +459,11 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": True,
         "allow_certificate_elements": True,
         "allow_compare_overlay": True,
-        "constraints": ["中文短句允许较密集，强调点击率和利益点承接", "允许理由卡、能力卡和适度的销售导向文案"],
+        "constraints": [
+            "中文短句允许较密集，强调点击率和利益点承接",
+            "允许理由卡、能力卡和适度的销售导向文案",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
     },
     "alibaba_intl": {
         "id": "alibaba_intl",

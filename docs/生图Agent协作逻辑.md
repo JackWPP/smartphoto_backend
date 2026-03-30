@@ -64,6 +64,16 @@
   - 上传商品图会以内联图像内容的方式发给上游，不再依赖 `localhost` URL
   - 分析输入当前会优先走受控尺寸图片（`max_edge` 缩边），避免大图全量进内存
   - analysis / planner / parameter extraction 现在统一走 `validator -> 同模型 repair 1 次 -> fallback`，worker 不再因为轻微格式漂移直接崩溃
+  - analysis freshness 现在显式落到 session：
+    - `analysis_version`
+    - `analysis_updated_at`
+    - `latest_analysis_job_id`
+  - 同一轮 analysis 的完成条件已经收口为：
+    - 新 `analysis_snapshot` 落库完成
+    - `reanalysis_required=false`
+    - `confirmed_copy` 默认值补齐完成
+    - `analysis_version / analysis_updated_at / latest_analysis_job_id` 更新完成
+    - 然后 job 才允许写 `succeeded`
   - `analysis_snapshot` 包含 `reference_summary`，至少提炼主体形态、颜色、材质、结构与不可漂移点
   - `analysis_snapshot` 额外包含：
     - `analysis_source`
@@ -81,6 +91,13 @@
     - `example_caption` 只作为补图意图示例
     - `extra.image_kind` 当前支持 `detail_closeup / water_tank / filter_structure / size_in_hand / use_scene_real`
   - fallback 不再把 `家居用品` 当成默认结论；推不出时返回 `其他` + 弱候选列表
+  - 商品图 upload/delete、`/uploads/complete` 与“切换 active_platform_id”都只会把当前分析标脏：
+    - 保留旧 `analysis_snapshot`
+    - 设置 `reanalysis_required=true`
+    - 清空 `parameter_snapshot`
+    - 清空 `strategy_preview/detail_strategy_preview`
+    - 不会递增 `analysis_version`
+  - 显式重跑 `POST /sessions/{id}/analysis` 时，也会先清空上一轮 `parameter_snapshot`
 
 ### 3.3 Copy Regen Agent
 - 输入：`targets` + `instruction` + 当前 copy
@@ -182,8 +199,14 @@
   - `blocks.selling_points`
   - `blocks.constraints`
   - `blocks.instruction`
+- Prompt Matrix / Harness 加固：
+  - prompt 现按 `Agent Prompt / Planner Prompt / Render Prompt / Sanitize/Validation Prompt` 四层收口
+  - analysis / 主图 planner / 详情页 planner / Step3 / copy regenerate 的内部提示默认统一走中文表述
+  - 所有可见文案在真正进入 render prompt 前，会先经过统一 `prompt_safety` 清洗：去掉思考过程、推理标签、内部规划字段、流程说明和内部包装词
+  - 当前优先策略是“清洗 / 降级 / 软补救”，而不是整链路硬拦截
 - 主图 visible copy 质量门禁：
   - `copy_blocks` 在进入 `final_prompt` 前会过滤占位词、弱信息短句和假参数占位，不再把 `核心功能突出/视觉清爽/参数A 100unit` 直接透传到单图 prompt
+  - 还会额外过滤 `panel_goal/copy_focus/narrative_section/origin_note/visual_truth_mode/Proof/设计证明/规则模块/布局模板/【...】/思考过程` 等内部词
   - 当高质量事实不足时，单图允许退化为少文案或仅保留产品识别标题，不强行堆砌泛口号
   - `must_keep/must_avoid` 与 planner 自由文本会先做字符拆分修复，避免 `整；体；圆；柱...` 这类异常文本继续污染 prompt
 - Analysis fallback 约束：
@@ -200,11 +223,25 @@
   - `proof_authority`：最强卖点 + 参数/证书/面板特写/结构放大；没有真实证书素材时不伪造权威认证
   - `benefit_scene_or_compare`：消费者利益场景或对比优势；必须有颜色/光区强化视觉重点，不能做平淡白底陈列图
   - `closing_selling_point`：优质场景 + 核心卖点 + 1-2 个辅助卖点；承担尾屏总结，不是简单换背景重拍
+- 阿里中文平台 visible copy 约束规则：
+  - 仅 `1688` / `taobao` 触发；`alibaba_intl` 保持英文语义
+  - 当前主链改回纯 prompt-first：先在策略预览和最终 prompt 中前置强化“中文短句、少字、不要英文营销词、不要内部标签”，不再在下载后追加热路径语言验收
+  - 默认允许的 visible copy 语义仍只围绕简体中文、阿拉伯数字、必要计量单位，以及用户明确提供的商品事实
+  - 若中文文案不稳定，优先少字或无字，不再为了语言审核对单图做额外补跑，避免拖慢整组生成
+- 429 / EOF 鲁棒性：
+  - `analysis / main_planner / detail_planner / Step3` 命中 `429` 时，先在单请求内做短退避重试，不直接进入 Celery 长退避
+  - planner 若短退避后仍失败，直接回退到 rule-based/fallback，不再为了一次上游拥塞把整组主图时延拖长
+  - 主图下载阶段若只有个别槽位失败，会先尝试单槽位补救；补救后仍失败时，允许当前版本以 `partial_succeeded` 落库
+  - `partial_succeeded` 版本会显式记录 `missing_slot_ids`，前端可继续复用 `slot_ids` 只补缺失槽位
+- 用户可编辑文案口径：
+  - Step3/Step4 默认继续沿用现有编辑结构，不新增前台编辑器能力
+  - 但默认可编辑值必须来自清洗后的最终候选文案，不再把内部 planning 字段直接暴露给前台
+  - `copy/regenerate` 返回值同样会走文案清洗，不把思考过程或内部规划词直接回传给用户
 - 白底分支额外规则：
   - 生成后执行轻量白底校验：边缘白色占比、外环白色占比、主体连通域数量
   - 白底校验不再依赖 `role == white_bg`，而依赖 `requires_white_bg_validation=true`
   - 若校验失败，只对当前槽位内部追加更强白底约束再尝试 1 次
-  - 若二次仍失败，整 job 直接 `job_failed`，不产出 `partial_succeeded`
+  - 若二次仍失败，当前只做 `soft_failed` 标记，不整组打挂
 
 ### 3.5.1 Detail Page Planner + Detail Prompt Composer
 - 输入：copy、商品图、可选风格图、可选 `planner_instruction`、可选本轮 `instruction`

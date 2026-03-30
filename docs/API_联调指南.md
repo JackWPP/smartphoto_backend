@@ -127,6 +127,7 @@
 - 已进入后续步骤的 session 在商品图 upload/delete 后：
   - 不再自动触发 `analysis` job
   - 只会把 `analysis_snapshot.reanalysis_required=true`
+  - 保留旧 `analysis_snapshot` 内容供排障，但不会递增 `analysis_version`，也不会改写 `analysis_updated_at`
   - 同时清空 `strategy_preview/detail_strategy_preview`
   - 需要前端显式再次调用 `POST /sessions/{session_id}/analysis`
 - 常见错误：`40005` `40006` `40007`
@@ -143,8 +144,16 @@
 - 成功后：
   - 生成 `analysis` job（队列 `q.analysis`）
   - session 状态：`analyzing -> analyzed`
+  - 触发新一轮 `analysis` 时，后端会先清空旧 `parameter_snapshot`，避免 Step 3 继续读取上一轮参数结果
   - 若历史脏数据导致 session 仍停留在 `created`，当前实现会在触发分析时自动补正为 `images_uploaded -> analyzing`，避免 worker 侧再报 `cannot transition created -> analyzing`
+  - 只有当新的 `analysis_snapshot` 已成功落库后，job 才会进入 `succeeded`
   - 自动写入 `analysis_snapshot`
+  - `GET /sessions/{session_id}/analysis` 与 `GET /sessions/{session_id}` 现在都会同步返回 freshness 字段：
+    - `analysis_version`
+    - `analysis_updated_at`
+    - `latest_analysis_job_id`
+  - `analysis_version` 只在 analysis job 成功落库新结果时递增
+  - `analysis_updated_at` 只在 analysis job 成功落库新结果时更新
   - 当前实现会把 session 上传图片以内联图像内容的方式发给上游分析模型，不再只传文本
   - 当前默认路由为：`analysis / 主图 planner / 详情页 planner / 参数提取 = WhatAI + Gemini`；OpenRouter 只保留给文本辅助任务或显式试模型
   - `analysis_snapshot` 额外包含：
@@ -189,6 +198,12 @@
   - `selected_platform_ids`（至少一个）
   - `active_platform_id`（必须在选中列表内）
 - 成功后：状态写为 `platform_selected`
+- 若 `active_platform_id` 相比之前发生变化：
+  - 后端会把旧 `analysis_snapshot` 标记为 `reanalysis_required=true`
+  - 保留旧分析内容供前端/后台对比排障
+  - 清空 `parameter_snapshot`
+  - 清空 `strategy_preview/detail_strategy_preview`
+  - 不会递增 `analysis_version`，也不会改写 `analysis_updated_at`
 - 常见错误：`40003`
 - 并发/幂等：无 Idempotency-Key
 
@@ -232,6 +247,7 @@
 - 当前实现行为：
   - 提取 job_type 为 `extract_parameters`
   - Step 3 已收口为“单次调用的小型文案策划 Agent”，默认一次 `extract` 直接产出用户可编辑整页结果
+  - 若刚刚重跑过 `analysis`，旧 `parameter_snapshot` 会先被清空；前端应重新调用一次 `POST /parameters/extract`
   - 参数提取模型默认由 `whatai_parameter_model` 控制，当前默认值为 `gemini-3-flash-preview`
   - 没有附件时：
     - 仍允许调用 `POST /parameters/extract`
@@ -336,6 +352,14 @@
     - `proof_authority`：`参数佐证 / 证书资质 / 屏幕特写 / 局部结构放大`
     - `benefit_scene_or_compare`：`颜色强化 + 核心利益点 + 对比/场景二选一`
     - `closing_selling_point`：`优质场景 + 核心卖点 + 1-2 个辅助卖点`
+  - `1688` / `taobao` 额外增加 visible copy 语言硬约束：
+    - 图上可见文字必须为简体中文短句
+    - 只允许阿拉伯数字、必要计量单位，以及用户已明确提供的型号/缩写白名单
+    - `alibaba_intl` 保持英文站点语义，不受该中文约束影响
+  - Prompt Matrix / Harness 当前新增一层非阻断式文案安全清洗：
+    - analysis / planner / Step3 / render prompt 内部提示默认统一走中文表达
+    - `copy_blocks/copy_lines` 会在 render 前过滤思考过程、推理标签、内部规划字段和流程说明
+    - 前台可编辑默认值继续沿用现有 Step4/Step3 结构，但默认只暴露清洗后的最终候选文案
   - 同步返回并落库：
     - `platform_rule_pack`
     - `platform_overlay`
@@ -698,7 +722,24 @@
     - `detail_generation_concurrency`
     - `image_poll_profile`
     - `image_task_timeout_seconds`
+  - `429` 不再默认直接把整条文本链路打挂：
+    - `analysis / main_planner / detail_planner / parameters / copy regenerate` 会先在单请求内做短退避重试
+    - planner 若本地短重试后仍失败，会直接回退 rule-based/fallback，不再触发 `30/60/120s` 的整 job 级长等待
   - 白底校验改为能力标记驱动：仅 `requires_white_bg_validation=true` 的槽位会触发白底校验与单槽位补提
+  - `1688` / `taobao` 当前改回 prompt-first：国内站中文 visible copy 主要依赖策略预览、规则包和最终 render prompt 的前置约束，不再在主图下载后追加热路径语言验收或补救重生
+    - 默认要求图上若出现文字，只能是简体中文短句；不要出现英文标题、英文副文案、自由英文营销词、思考过程或内部规划标签
+    - 若中文短句不稳，宁可少字或无字，不再为了语言审核额外串行补跑单图
+  - 主图下载阶段若只有部分槽位失败：
+    - 当前版本允许先落 ready 资产，不再让 1 张失败拖垮整组
+    - job 状态会写成 `partial_succeeded`
+    - `GET /sessions/{id}/results` 会返回 `expected_slot_ids / missing_slot_ids / summary.expected_count`
+    - 前端后续可直接复用 `POST /sessions/{id}/generations` 的 `slot_ids` 补齐缺失槽位
+  - 主图与详情页 `generation_snapshot` 现在还会补充：
+    - `sanitized_fields`
+    - `copy_safety_notes`
+    - `download_retry_count`
+    - `download_rescued`
+    - `download_rescue_reason`
   - 实际提交给上游的快照会落到 `assets.generation_snapshot`
 - 并发保护：
   - 同 session 同时只允许 1 个运行中生图任务
@@ -847,7 +888,7 @@ data: {"event":"job_succeeded","job_id":"..."}
 4. 当前已实现“风格参考图单独上传 + 详情页独立首次生成 + 动态 panel_type 推荐/覆盖”，但未实现详情页 `global_edit`、单 panel 重生成、ComfyUI 节点级调试信息。
 5. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
 6. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
-7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，不包含画布级文字编辑器。
+7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，并已为 `1688/taobao` 增加更强的中文 visible copy 前置约束；当前仍不包含画布级文字编辑器。
 8. `adminfront/` 已升级为可运营、可排障、可配置的后台控制台；当前仍未做 RBAC、多级审批流、运行时敏感配置在线编辑和任务强制取消。
 9. 当前实现已从“用户产品后端”收口为“纯图片 SaaS 后端”：`/api/v2/auth/*`、`/api/v2/account/*`、`/api/v2/guest/*` 已下线并返回 `41001 feature_removed`。
 10. 当前图片主链路统一使用 `X-App-Key` 鉴权，并按 `service_id` 隔离 session/job/upload/download；旧 SPEC 中的 `user_id/guest_id/claim` 语义已失效。
