@@ -21,9 +21,16 @@ from app.services.copy_normalization import (
     repair_broken_text,
 )
 from app.services.llm_router import LLMRouter
+from app.services.prompt_safety import prompt_matrix_guardrails, sanitize_generated_copy_fields, sanitize_parameter_snapshot
 from app.services.reference_images import LoadedReferenceImage
+from app.services.visible_copy_policy import (
+    extract_latin_tokens,
+    filter_disallowed_latin_tokens,
+    normalize_visible_text_allowlist,
+)
 
 logger = logging.getLogger(__name__)
+RATE_LIMIT_BACKOFF_SECONDS = (5, 12, 25)
 ALLOWED_VIEW_SLOTS = ("front", "angle45", "side", "extra")
 ALLOWED_EXTRA_IMAGE_KINDS = (
     "detail_closeup",
@@ -49,6 +56,7 @@ PARAMETER_PROMPT_VERSION = "parameter_v2_prompt_first"
 PARAMETER_COMPLETION_PROMPT_VERSION = "parameter_completion_v1"
 MAIN_COPY_DESIGN_PROMPT_VERSION = "main_copy_design_v1"
 DETAIL_COPY_REVIEW_PROMPT_VERSION = "detail_copy_review_v1"
+VISIBLE_TEXT_LANGUAGE_PROMPT_VERSION = "visible_text_language_v1"
 
 
 def _sanitize_planner_freeform_text(value: Any) -> str:
@@ -63,6 +71,10 @@ def _normalize_planner_text_entries(value: Any) -> list[str]:
         return [_sanitize_planner_freeform_text(item) for item in value if _sanitize_planner_freeform_text(item)]
     cleaned = _sanitize_planner_freeform_text(value)
     return [cleaned] if cleaned else []
+
+
+def _prompt_matrix_guardrail_text() -> str:
+    return " ".join(prompt_matrix_guardrails())
 
 
 class WhataiClient:
@@ -148,6 +160,9 @@ class WhataiClient:
                         "missing_views 和 detected_view_slots 只能使用 front,angle45,side,extra 这 4 个槽位。"
                         "reference_summary 至少包含 shape,colors,materials,structures,must_keep。"
                         "如果某个候选品类置信度低，请在 reason 中明确指出不确定原因。"
+                        "不要输出思考过程、推理过程、内部规划标签或流程说明。"
+                        "copy_draft 和 example_caption 必须像可直接交给用户编辑或继续生成的最终候选，不要输出中间想法。"
+                        f"{_prompt_matrix_guardrail_text()}"
                         f"当前平台：{active_platform_id or 'temu'}。"
                         f"当前全局品类库：{json.dumps(catalog_prompt, ensure_ascii=False)}。"
                     ),
@@ -217,6 +232,9 @@ class WhataiClient:
                         "不要把同一个卖点重复铺满全部槽位，不要把详情页叙事写法搬进主图。"
                         "需要白底的槽位必须严格强调纯白无缝背景、单主体、不要人物和道具。"
                         "所有角色都必须以商品保真为最高优先级。"
+                        "不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                        "copy_focus、focus_selling_point、must_keep、must_avoid 都只写最终策略结论。"
+                        f"{_prompt_matrix_guardrail_text()}"
                         f"平台：{active_platform_id}。"
                         f"商品 copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
                         f"角色定义：{json.dumps(defaults, ensure_ascii=False)}。"
@@ -295,32 +313,32 @@ class WhataiClient:
             {
                 "type": "text",
                 "text": (
-                    "You are SmartPhoto's detail-page narrative planner. "
-                    "Image 1 is the product multi-angle grid. "
-                    "Image 2 is the optional style/font reference grid. "
-                    "Return JSON only with top-level keys detail_story_brief and panel_plan. "
-                    "detail_story_brief must contain exactly these keys: trust_overview,mechanism,feature_a,feature_b,usage_scene,parameter_proof,differentiator,closing_cta. "
-                    "panel_plan must be an array of exactly 8 items. "
-                    "Each item must contain: panel_id,panel_label,narrative_section,panel_goal,copy_focus,panel_type,layout_template,"
-                    "planner_prompt_base,copy_lines,layout_notes,product_reference_ids,style_reference_ids. "
-                    "Visible copy should be concise and suitable for ecommerce detail page panels. "
-                    "Do not emit internal planning labels, section names, proof tags, or bracketed wrappers such as Proof, panel_goal, copy_focus, narrative_section, 设计证明, 布局模板, 规则模块, 【...】. "
-                    "Do not make all panels feel like horizontal main images; they must form a narrative sequence. "
-                    f"Confirmed copy: {json.dumps(confirmed_copy, ensure_ascii=False)}. "
-                    f"Parameter snapshot: {json.dumps(parameter_snapshot or {}, ensure_ascii=False)}. "
-                    f"Product manifest: {json.dumps(product_manifest, ensure_ascii=False)}. "
-                    f"Style manifest: {json.dumps(style_manifest, ensure_ascii=False)}. "
-                    f"Reference summary: {json.dumps((analysis_snapshot or {}).get('reference_summary') or {}, ensure_ascii=False)}. "
-                    f"Extra planner instruction: {planner_instruction or 'None'}."
+                    "你是 SmartPhoto 的详情页叙事规划 Agent。"
+                    "图片 1 是商品多视角参考图拼板，图片 2 是可选的风格/字体参考图拼板。"
+                    "只能返回 JSON 对象，顶层字段必须是 detail_story_brief 和 panel_plan。"
+                    "detail_story_brief 必须且只包含 trust_overview,mechanism,feature_a,feature_b,usage_scene,parameter_proof,differentiator,closing_cta 这 8 个键。"
+                    "panel_plan 必须是长度为 8 的数组。"
+                    "每项必须包含：panel_id,panel_label,narrative_section,panel_goal,copy_focus,panel_type,layout_template,"
+                    "planner_prompt_base,copy_lines,layout_notes,product_reference_ids,style_reference_ids。"
+                    "copy_lines 必须是适合直接上图或给用户编辑的最终短文案候选，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                    "不要把 Proof、panel_goal、copy_focus、narrative_section、设计证明、布局模板、规则模块、【...】等内部标签写进可见文案。"
+                    "不要让 8 个 panel 都像横向主图，必须形成清晰的详情页叙事链。"
+                    f"{_prompt_matrix_guardrail_text()}"
+                    f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
+                    f"当前 parameter_snapshot：{json.dumps(parameter_snapshot or {}, ensure_ascii=False)}。"
+                    f"商品参考图 manifest：{json.dumps(product_manifest, ensure_ascii=False)}。"
+                    f"风格参考图 manifest：{json.dumps(style_manifest, ensure_ascii=False)}。"
+                    f"参考图摘要：{json.dumps((analysis_snapshot or {}).get('reference_summary') or {}, ensure_ascii=False)}。"
+                    f"额外策略指令：{planner_instruction or '无'}。"
                 ),
             },
-            {"type": "text", "text": "Image 1 is the product multi-angle grid."},
+            {"type": "text", "text": "图片 1 是商品多视角参考图拼板。"},
             {"type": "image_url", "image_url": {"url": self._optimized_data_uri(product_grid)}},
         ]
         if style_grid is not None:
             content.extend(
                 [
-                    {"type": "text", "text": "Image 2 is the style/font reference grid."},
+                    {"type": "text", "text": "图片 2 是风格/字体参考图拼板。"},
                     {"type": "image_url", "image_url": {"url": self._optimized_data_uri(style_grid)}},
                 ]
             )
@@ -414,6 +432,7 @@ class WhataiClient:
             file_attachments,
         )
         if not self.llm_router.is_available("parameter"):
+            fallback = sanitize_parameter_snapshot(fallback)
             fallback.update(
                 {
                     "provider": self.llm_router.provider_for_task("parameter"),
@@ -458,6 +477,8 @@ class WhataiClient:
                     "source_mode 只能是 analysis_only 或 attachment_backed。"
                     "evidence_priority 必须体现附件优先规则：无附件时填 analysis_then_copy；有附件时填 attachments_over_analysis。"
                     "evidence_summary 必须是数组，每项包含 source_type、summary、priority。"
+                    "给用户可编辑的字段必须是最终候选文案，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                    f"{_prompt_matrix_guardrail_text()}"
                     f"当前平台：{active_platform_id or 'temu'}。"
                     f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
                     f"当前 analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
@@ -480,6 +501,7 @@ class WhataiClient:
         )
         parsed = outcome["result"]
         snapshot = self._merge_parameter_snapshot(fallback, parsed) if isinstance(parsed, dict) else fallback
+        snapshot = sanitize_parameter_snapshot(snapshot)
         snapshot.update(outcome["meta"])
         return snapshot
 
@@ -503,6 +525,7 @@ class WhataiClient:
             "confidence_notes": ["未启用参数补全模型，保留首轮提取结果。"],
         }
         if not self.llm_router.is_available("parameter_completion"):
+            fallback = sanitize_parameter_snapshot(fallback)
             fallback.update(
                 {
                     "provider": self.llm_router.provider_for_task("parameter_completion"),
@@ -527,6 +550,8 @@ class WhataiClient:
                     "inferred_key_parameters 必须是数组，每项都包含 key,label,value,unit。"
                     "补全必须严格基于已识别到的商品结构、analysis 与首轮 parameter_snapshot，不能凭空杜撰危险事实。"
                     "若缺乏依据，请返回 no_change，并在 confidence_notes 说明原因。"
+                    "返回内容必须像最终可编辑候选，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                    f"{_prompt_matrix_guardrail_text()}"
                     f"当前平台：{active_platform_id or 'temu'}。"
                     f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
                     f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
@@ -550,6 +575,7 @@ class WhataiClient:
             if isinstance(parsed, dict)
             else fallback
         )
+        snapshot = sanitize_parameter_snapshot(snapshot)
         snapshot.update(outcome["meta"])
         return snapshot
 
@@ -575,6 +601,8 @@ class WhataiClient:
                     "proof_lines 和 matrix_lines 必须是短标签数组。"
                     "global_consistency_note 需要指出本商品哪些结构细节绝对不能画错，尤其适用于局部图。"
                     "不要改写商品事实，不要替代视觉识别。"
+                    "headline、supporting、proof_lines、matrix_lines 必须像最终上图文案，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                    f"{_prompt_matrix_guardrail_text()}"
                     f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
                     f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
                     f"asset_plan：{json.dumps(strategy_asset_plan or [], ensure_ascii=False)}。"
@@ -638,6 +666,8 @@ class WhataiClient:
                     "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释。"
                     "不要让 8 个 panel 的 copy_focus 高度重复。"
                     "不要输出内部规划标签或带包装的结构词，例如 Proof、panel_goal、copy_focus、narrative_section、设计证明、规则模块、布局模板、【...】。"
+                    "copy_focus 和 panel_goal 必须是最终策划结论，不要输出思考过程或中间推理。"
+                    f"{_prompt_matrix_guardrail_text()}"
                     f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
                     f"parameter_snapshot：{json.dumps(parameter_snapshot or {}, ensure_ascii=False)}。"
                     f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
@@ -676,6 +706,79 @@ class WhataiClient:
             }
         return by_panel
 
+    def inspect_visible_text_language(
+        self,
+        *,
+        image_bytes: bytes,
+        platform_id: str,
+        allowed_abbreviations: list[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_allowlist = normalize_visible_text_allowlist(allowed_abbreviations)
+        fallback = {
+            "status": "unknown",
+            "passed": True,
+            "has_readable_text": False,
+            "detected_text_lines": [],
+            "latin_tokens": [],
+            "disallowed_latin_tokens": [],
+            "allowed_latin_tokens": normalized_allowlist,
+            "reason": "validator_unavailable",
+        }
+        if not image_bytes or not self.llm_router.is_available("analysis"):
+            fallback.update(
+                {
+                    "provider": self.llm_router.provider_for_task("analysis"),
+                    "model": self.llm_router.model_for_task("analysis"),
+                    "prompt_version": VISIBLE_TEXT_LANGUAGE_PROMPT_VERSION,
+                    "repair_round": 0,
+                    "source": "fallback",
+                }
+            )
+            return fallback
+
+        allowlist_text = "、".join(normalized_allowlist[:16]) if normalized_allowlist else "无"
+        messages = [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "你是 SmartPhoto 的图中文字语言验收器。"
+                        "请读取图片里真正清晰可见的文字，只返回 JSON 对象。"
+                        "顶层字段必须包含：status,has_readable_text,detected_text_lines,latin_tokens,reason。"
+                        "status 只能是 passed、failed、unknown。"
+                        "detected_text_lines 只记录图片里肉眼可辨识的真实文字，不要臆造。"
+                        "latin_tokens 只收集真正看得清的拉丁字母 token，可包含缩写、型号、单位，但不要包含纯数字。"
+                        "如果图片没有可读文字，status=unknown，has_readable_text=false。"
+                        "当前平台要求：图上可见文字默认必须是简体中文；允许阿拉伯数字、必要计量单位，以及白名单型号/缩写。"
+                        "不要把思考过程、内部规划标签、UI 元素说明或想象中的字误判成可见文案。"
+                        f"{_prompt_matrix_guardrail_text()}"
+                        f"当前平台：{platform_id}。"
+                        f"当前允许保留的型号/缩写白名单：{allowlist_text}。"
+                        "不要把模糊背景纹理、装饰图形或想象中的字当成文字。"
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": self._optimized_data_uri_from_bytes(image_bytes, "image/jpeg")}},
+            ],
+        }]
+        outcome = self._run_structured_task(
+            task="analysis",
+            messages=messages,
+            temperature=0.0,
+            error_key="upstream_llm_error",
+            prompt_version=VISIBLE_TEXT_LANGUAGE_PROMPT_VERSION,
+            validator=self._validate_visible_text_language_result,
+            fallback_result=fallback,
+        )
+        parsed = outcome["result"]
+        result = (
+            self._merge_visible_text_language_result(fallback, parsed, allowed_latin_tokens=normalized_allowlist)
+            if isinstance(parsed, dict)
+            else fallback
+        )
+        result.update(outcome["meta"])
+        return result
+
     def regenerate_copy(
         self,
         current_copy: dict[str, Any],
@@ -683,16 +786,25 @@ class WhataiClient:
         instruction: str | None,
     ) -> dict[str, str]:
         if not self.settings.whatai_api_key:
-            return {key: self._regenerated_text(current_copy.get(key, ""), instruction) for key in targets}
+            return sanitize_generated_copy_fields(
+                {key: self._regenerated_text(current_copy.get(key, ""), instruction) for key in targets}
+            )
 
-        prompt = f"基于现有文案，重写字段 {targets}，要求：{instruction or '保持电商风格'}"
+        prompt = (
+            f"你是 SmartPhoto 的文案重写器。请基于现有文案，只重写字段 {targets}。"
+            f"要求：{instruction or '保持电商风格'}。"
+            "返回结果必须是可直接给用户编辑或给生图参考的最终候选，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+            f"{_prompt_matrix_guardrail_text()}"
+        )
         payload = {
             "model": self.settings.whatai_chat_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.5,
         }
         self._post_chat_json(payload, "upstream_llm_error")
-        return {key: self._regenerated_text(current_copy.get(key, ""), instruction) for key in targets}
+        return sanitize_generated_copy_fields(
+            {key: self._regenerated_text(current_copy.get(key, ""), instruction) for key in targets}
+        )
 
     def generate_image(
         self,
@@ -889,7 +1001,7 @@ class WhataiClient:
             payload=payload,
             headers=headers,
             error_key=error_key,
-            attempts=2,
+            attempts=3,
         )
 
     def _post_chat_json(self, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
@@ -918,7 +1030,7 @@ class WhataiClient:
             payload=payload,
             headers=headers,
             error_key=error_key,
-            attempts=1,
+            attempts=3,
             retryable_on_exhausted=True,
         )
 
@@ -931,7 +1043,7 @@ class WhataiClient:
             payload=payload,
             headers=headers,
             error_key=error_key,
-            attempts=1,
+            attempts=3,
             params={"async": "true"},
             retryable_on_exhausted=False,
         )
@@ -1022,7 +1134,10 @@ class WhataiClient:
                     return response.json()
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429:
-                    raise AppError("rate_limited", self._format_http_error(exc), 429) from exc
+                    if attempt < attempts:
+                        self._sleep_before_rate_limit_retry(path, attempt, attempts, exc.response)
+                        continue
+                    raise AppError(error_key, self._format_http_error(exc), 429, retryable=retryable_on_exhausted) from exc
                 raise AppError(error_key, self._format_http_error(exc), 502) from exc
             except self.REQUEST_RETRYABLE_ERRORS as exc:
                 last_error = exc
@@ -1057,7 +1172,10 @@ class WhataiClient:
                     return response.json()
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429:
-                    raise AppError("rate_limited", self._format_http_error(exc), 429) from exc
+                    if attempt < attempts:
+                        self._sleep_before_rate_limit_retry(path, attempt, attempts, exc.response)
+                        continue
+                    raise AppError(error_key, self._format_http_error(exc), 429, retryable=retryable_on_exhausted) from exc
                 raise AppError(error_key, self._format_http_error(exc), 502) from exc
             except self.REQUEST_RETRYABLE_ERRORS as exc:
                 last_error = exc
@@ -1078,7 +1196,10 @@ class WhataiClient:
                     return response.content
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429:
-                    raise AppError("rate_limited", self._format_http_error(exc), 429) from exc
+                    if attempt < attempts:
+                        self._sleep_before_rate_limit_retry(url, attempt, attempts, exc.response)
+                        continue
+                    raise AppError(error_key, self._format_http_error(exc), 429, retryable=False) from exc
                 raise AppError(error_key, self._format_http_error(exc), 502) from exc
             except self.REQUEST_RETRYABLE_ERRORS as exc:
                 last_error = exc
@@ -1150,6 +1271,19 @@ class WhataiClient:
             attempt,
             attempts,
             exc,
+        )
+        time.sleep(delay)
+
+    def _sleep_before_rate_limit_retry(self, target: str, attempt: int, attempts: int, response: httpx.Response) -> None:
+        retry_after = str(response.headers.get("Retry-After") or "").strip()
+        delay = int(retry_after) if retry_after.isdigit() else RATE_LIMIT_BACKOFF_SECONDS[min(attempt - 1, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
+        logger.warning(
+            "Retrying upstream request after rate limit: target=%s attempt=%s/%s delay=%ss status=%s",
+            target,
+            attempt,
+            attempts,
+            delay,
+            response.status_code,
         )
         time.sleep(delay)
 
@@ -1225,8 +1359,11 @@ class WhataiClient:
         return content
 
     def _optimized_data_uri(self, image: LoadedReferenceImage) -> str:
+        return self._optimized_data_uri_from_bytes(image.content, image.mime_type)
+
+    def _optimized_data_uri_from_bytes(self, content: bytes, mime_type: str) -> str:
         try:
-            with Image.open(io.BytesIO(image.content)) as img:
+            with Image.open(io.BytesIO(content)) as img:
                 if img.mode not in {"RGB", "L"}:
                     base = Image.new("RGB", img.size, (255, 255, 255))
                     base.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
@@ -1244,7 +1381,8 @@ class WhataiClient:
                 encoded = base64.b64encode(buf.getvalue()).decode("ascii")
                 return f"data:image/jpeg;base64,{encoded}"
         except Exception:  # noqa: BLE001
-            return image.to_data_uri()
+            encoded = base64.b64encode(content).decode("ascii")
+            return f"data:{mime_type};base64,{encoded}"
 
     def _parse_json_object(self, text: str) -> dict[str, Any] | None:
         stripped = text.strip()
@@ -1302,14 +1440,28 @@ class WhataiClient:
             "planner_fallback_model": None,
             "planner_attempt_count": 0,
             "planner_final_source": None,
+            "planner_transport_fallback": False,
+            "planner_transport_fallback_reason": None,
+            "rate_limit_retry_count": 0,
+            "rate_limit_final_source": None,
         }
-        completion = self.llm_router.complete_json_with_meta(
-            task=task,
-            messages=messages,
-            error_key=error_key,
-            temperature=temperature,
-            model=model,
-        )
+        try:
+            completion = self.llm_router.complete_json_with_meta(
+                task=task,
+                messages=messages,
+                error_key=error_key,
+                temperature=temperature,
+                model=model,
+            )
+        except AppError as exc:
+            if task in {"main_planner", "detail_planner"} and self._should_use_planner_transport_fallback(exc):
+                meta["source"] = "fallback"
+                meta["planner_attempt_count"] = 1
+                meta["planner_final_source"] = "transport_fallback"
+                meta["planner_transport_fallback"] = True
+                meta["planner_transport_fallback_reason"] = exc.key
+                return {"result": fallback_result, "meta": meta}
+            raise
         parsed = completion["result"]
         meta.update({key: value for key, value in (completion.get("meta") or {}).items() if value is not None})
         errors = validator(parsed)
@@ -1338,13 +1490,23 @@ class WhataiClient:
                 ),
             }
         )
-        repaired_completion = self.llm_router.complete_json_with_meta(
-            task=task,
-            messages=repair_messages,
-            error_key=error_key,
-            temperature=temperature,
-            model=model,
-        )
+        try:
+            repaired_completion = self.llm_router.complete_json_with_meta(
+                task=task,
+                messages=repair_messages,
+                error_key=error_key,
+                temperature=temperature,
+                model=model,
+            )
+        except AppError as exc:
+            if task in {"main_planner", "detail_planner"} and self._should_use_planner_transport_fallback(exc):
+                meta["repair_round"] = 1
+                meta["source"] = "fallback"
+                meta["planner_final_source"] = "transport_fallback"
+                meta["planner_transport_fallback"] = True
+                meta["planner_transport_fallback_reason"] = exc.key
+                return {"result": fallback_result, "meta": meta}
+            raise
         repaired = repaired_completion["result"]
         repaired_meta = {key: value for key, value in (repaired_completion.get("meta") or {}).items() if value is not None}
         repaired_errors = validator(repaired)
@@ -1358,6 +1520,9 @@ class WhataiClient:
         meta["repair_round"] = 1
         meta["source"] = "fallback"
         return {"result": fallback_result, "meta": meta}
+
+    def _should_use_planner_transport_fallback(self, exc: AppError) -> bool:
+        return bool(exc.retryable or exc.http_status in {429, 502, 503, 504})
 
     def _validation_error(self, field: str, rule: str, message: str, actual_value: Any = None) -> dict[str, Any]:
         return {
@@ -1650,6 +1815,22 @@ class WhataiClient:
                 errors.append(self._validation_error(f"panel_review_plan[{index}].visual_truth_mode", "enum", "visual_truth_mode 非法", mode))
         return errors
 
+    def _validate_visible_text_language_result(self, parsed: Any) -> list[dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return [self._validation_error("$", "json_object", "visible text validation 必须返回 JSON 对象", parsed)]
+        errors: list[dict[str, Any]] = []
+        status = str(parsed.get("status") or "").strip().lower()
+        if status not in {"passed", "failed", "unknown"}:
+            errors.append(self._validation_error("status", "enum", "status 只能是 passed/failed/unknown", parsed.get("status")))
+        for key in ("detected_text_lines", "latin_tokens"):
+            value = parsed.get(key)
+            if not isinstance(value, list):
+                errors.append(self._validation_error(key, "list", f"{key} 必须是数组", value))
+        has_readable_text = parsed.get("has_readable_text")
+        if not isinstance(has_readable_text, bool):
+            errors.append(self._validation_error("has_readable_text", "bool", "has_readable_text 必须是布尔值", has_readable_text))
+        return errors
+
     def _merge_analysis_result(
         self,
         fallback: dict[str, Any],
@@ -1747,6 +1928,42 @@ class WhataiClient:
             ]
         return merged
 
+    def _merge_visible_text_language_result(
+        self,
+        fallback: dict[str, Any],
+        parsed: dict[str, Any],
+        *,
+        allowed_latin_tokens: list[str],
+    ) -> dict[str, Any]:
+        merged = {**fallback}
+        detected_text_lines = self._normalize_flat_text_list(parsed.get("detected_text_lines"))
+        latin_tokens = self._normalize_flat_text_list(parsed.get("latin_tokens"))
+        if not latin_tokens:
+            latin_tokens = []
+            for line in detected_text_lines:
+                latin_tokens.extend(extract_latin_tokens(line))
+        disallowed = filter_disallowed_latin_tokens(latin_tokens, allowed_latin_tokens)
+        has_readable_text = bool(parsed.get("has_readable_text")) or bool(detected_text_lines) or bool(latin_tokens)
+        if not has_readable_text:
+            status = "unknown"
+        elif disallowed:
+            status = "failed"
+        else:
+            status = "passed"
+        merged.update(
+            {
+                "status": status,
+                "passed": status != "failed",
+                "has_readable_text": has_readable_text,
+                "detected_text_lines": detected_text_lines,
+                "latin_tokens": self._normalize_flat_text_list(latin_tokens),
+                "disallowed_latin_tokens": disallowed,
+                "allowed_latin_tokens": normalize_visible_text_allowlist(allowed_latin_tokens),
+                "reason": repair_broken_text(parsed.get("reason")) or fallback.get("reason") or "",
+            }
+        )
+        return merged
+
     def _normalize_analysis_dict(
         self,
         value: Any,
@@ -1791,6 +2008,19 @@ class WhataiClient:
             parts = normalize_phrase_list(parsed)
             return parts or [repair_broken_text(parsed)]
         return normalize_phrase_list(fallback)
+
+    def _normalize_flat_text_list(self, value: Any) -> list[str]:
+        parsed = self._decode_json_like(value)
+        items = parsed if isinstance(parsed, list) else value if isinstance(value, list) else []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            text = repair_broken_text(item)
+            if not text or text in seen:
+                continue
+            normalized.append(text)
+            seen.add(text)
+        return normalized
 
     def _normalize_key_parameters(self, value: Any, fallback: list[Any]) -> list[dict[str, Any]]:
         parsed = self._decode_json_like(value)

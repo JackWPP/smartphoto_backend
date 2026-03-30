@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -9,6 +9,7 @@ from app.models.job import JobModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
 from app.services.pipeline import (
+    _inspect_visible_text_language,
     _render_assets_concurrently,
     _render_single_asset,
     _render_single_detail_panel,
@@ -235,14 +236,18 @@ def test_run_analysis_job_backfills_existing_empty_copy(monkeypatch, setup_datab
         assert session.confirmed_copy["style_choice"] == "科技感"
 
 
-def test_run_analysis_job_allows_rerun_from_analyzed(monkeypatch, setup_database):
+@pytest.mark.parametrize("initial_status", ["analyzed", "platform_selected", "completed"])
+def test_run_analysis_job_increments_freshness_on_rerun(monkeypatch, setup_database, initial_status):
+    previous_updated_at = datetime.now(timezone.utc) - timedelta(days=1)
     with db_session.SessionLocal() as db:
         session = SessionModel(
             user_id="u1",
-            status="analyzed",
+            status=initial_status,
             current_step=2,
             selected_platform_ids=["temu"],
             analysis_snapshot={"recognized_product": {"product_name": "旧结果"}},
+            analysis_version=2,
+            analysis_updated_at=previous_updated_at,
         )
         db.add(session)
         db.flush()
@@ -308,10 +313,23 @@ def test_run_analysis_job_allows_rerun_from_analyzed(monkeypatch, setup_database
         run_analysis_job(db, job_id)
         session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
         job = db.query(JobModel).filter(JobModel.id == job_id).one()
+        normalized_updated_at = (
+            session.analysis_updated_at.replace(tzinfo=timezone.utc)
+            if session.analysis_updated_at and session.analysis_updated_at.tzinfo is None
+            else session.analysis_updated_at
+        )
 
         assert session.status == "analyzed"
         assert session.analysis_snapshot["recognized_product"]["product_name"] == "新结果"
+        assert session.analysis_version == 3
+        assert normalized_updated_at is not None
+        assert normalized_updated_at > previous_updated_at
+        assert session.latest_analysis_job_id == job.id
         assert job.status == "succeeded"
+        assert job.result_payload["analysis_snapshot"]["recognized_product"]["product_name"] == "新结果"
+        assert job.result_payload["analysis_version"] == 3
+        assert job.result_payload["latest_analysis_job_id"] == job.id
+        assert job.result_payload["analysis_updated_at"] == normalized_updated_at.isoformat()
 
 
 def test_render_single_asset_retries_retryable_upstream_image_error(monkeypatch):
@@ -562,11 +580,160 @@ def test_render_assets_concurrently_submits_before_polling(monkeypatch):
         ],
     )
 
-    assert len(rendered) == 2
+    assert len(rendered["rendered_assets"]) == 2
+    assert rendered["missing_slots"] == []
     assert call_order.index("submit:main:hero:1") < call_order.index("poll")
     assert call_order.index("submit:main:scene:2") < call_order.index("poll")
     assert call_order.index("poll") < call_order.index("download:main:hero:1")
     assert call_order.index("poll") < call_order.index("download:main:scene:2")
+
+
+def test_render_assets_concurrently_marks_missing_slot_after_failed_rescue(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_prompt",
+        lambda **kwargs: {
+            "final_prompt": f"prompt-{kwargs['plan_item']['slot_id']}",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+            "copy_blocks": {},
+            "expression_mode": kwargs["plan_item"].get("expression_mode"),
+            "rule_modules_used": ["rule.module"],
+            "resolved_constraints": ["keep clean"],
+        },
+    )
+
+    class DummyClient:
+        def __init__(self):
+            self.settings = SimpleNamespace(whatai_api_key="test-key")
+
+        def submit_image_request(self, **kwargs):
+            submission_id = "main:hero:1" if "prompt-hero" in kwargs["prompt"] else "main:scene:2"
+            return {
+                "submission_id": submission_id,
+                "task_id": f"task:{submission_id}",
+                "upstream_endpoint": "/v1/images/edits",
+            }
+
+        def poll_image_tasks(self, submissions, *_args, **_kwargs):
+            return {
+                submission["submission_id"]: {"b64_json": "ZmFrZS1pbWFnZQ=="}
+                for submission in submissions
+            }
+
+        def download_image_bytes(self, submission, *_args, **_kwargs):
+            if submission["submission_id"] == "main:scene:2":
+                raise AppError("upstream_image_error", "download failed", 502)
+            return b"fake-image"
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    rendered = _render_assets_concurrently(
+        confirmed_copy={"product_name": "空气净化器"},
+        strategy_preview={"planner_instruction": "更干净"},
+        plan=[
+            {
+                "role": "hero",
+                "slot_id": "hero",
+                "display_order": 1,
+                "aspect_ratio": "1:1",
+                "platform_rule_pack": "default_main_gallery_v2",
+                "expression_mode": "clean_packshot",
+                "requires_white_bg_validation": False,
+            },
+            {
+                "role": "scene",
+                "slot_id": "scene",
+                "display_order": 2,
+                "aspect_ratio": "1:1",
+                "platform_rule_pack": "default_main_gallery_v2",
+                "expression_mode": "scene_story",
+                "requires_white_bg_validation": False,
+            },
+        ],
+        instruction="构图更稳",
+        loaded_reference_images=[],
+    )
+
+    assert [item["slot_id"] for item in rendered["rendered_assets"]] == ["hero"]
+    assert rendered["expected_slot_ids"] == ["hero", "scene"]
+    assert rendered["missing_slots"][0]["slot_id"] == "scene"
+    assert rendered["missing_slots"][0]["retry_count"] == 1
+
+
+def test_render_assets_concurrently_rescues_failed_slot_once(monkeypatch):
+    download_attempts = {"main:scene:2": 0}
+
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_prompt",
+        lambda **kwargs: {
+            "final_prompt": f"prompt-{kwargs['plan_item']['slot_id']}",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+            "copy_blocks": {},
+            "expression_mode": kwargs["plan_item"].get("expression_mode"),
+            "rule_modules_used": ["rule.module"],
+            "resolved_constraints": ["keep clean"],
+        },
+    )
+
+    class DummyClient:
+        def __init__(self):
+            self.settings = SimpleNamespace(whatai_api_key="test-key")
+
+        def submit_image_request(self, **kwargs):
+            submission_id = "main:hero:1" if "prompt-hero" in kwargs["prompt"] else "main:scene:2"
+            return {
+                "submission_id": submission_id,
+                "task_id": f"task:{submission_id}",
+                "upstream_endpoint": "/v1/images/edits",
+            }
+
+        def poll_image_tasks(self, submissions, *_args, **_kwargs):
+            return {
+                submission["submission_id"]: {"b64_json": "ZmFrZS1pbWFnZQ=="}
+                for submission in submissions
+            }
+
+        def download_image_bytes(self, submission, *_args, **_kwargs):
+            if submission["submission_id"] == "main:scene:2":
+                download_attempts["main:scene:2"] += 1
+                if download_attempts["main:scene:2"] == 1:
+                    raise AppError("upstream_image_error", "download failed", 502)
+            return b"fake-image"
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    rendered = _render_assets_concurrently(
+        confirmed_copy={"product_name": "空气净化器"},
+        strategy_preview={"planner_instruction": "更干净"},
+        plan=[
+            {
+                "role": "hero",
+                "slot_id": "hero",
+                "display_order": 1,
+                "aspect_ratio": "1:1",
+                "platform_rule_pack": "default_main_gallery_v2",
+                "expression_mode": "clean_packshot",
+                "requires_white_bg_validation": False,
+            },
+            {
+                "role": "scene",
+                "slot_id": "scene",
+                "display_order": 2,
+                "aspect_ratio": "1:1",
+                "platform_rule_pack": "default_main_gallery_v2",
+                "expression_mode": "scene_story",
+                "requires_white_bg_validation": False,
+            },
+        ],
+        instruction="构图更稳",
+        loaded_reference_images=[],
+    )
+
+    assert rendered["missing_slots"] == []
+    by_slot = {item["slot_id"]: item for item in rendered["rendered_assets"]}
+    assert by_slot["scene"]["generation_snapshot"]["download_rescued"] is True
+    assert by_slot["scene"]["generation_snapshot"]["download_retry_count"] == 1
 
 
 def test_render_single_asset_white_bg_validation_uses_capability_flag(monkeypatch):
@@ -678,3 +845,119 @@ def test_render_single_asset_white_bg_validation_soft_fails_after_retry(monkeypa
     assert validate_calls["count"] == 2
     assert rendered["generation_snapshot"]["white_bg_validation"]["retry_applied"] is True
     assert rendered["generation_snapshot"]["white_bg_validation"]["soft_failed"] is True
+
+
+def test_render_single_asset_does_not_run_language_validator_in_hot_path(monkeypatch):
+    generate_calls = {"count": 0}
+    validate_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_prompt",
+        lambda **kwargs: {
+            "final_prompt": f"prompt-{kwargs['instruction'] or 'base'}",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+            "copy_blocks": {},
+            "expression_mode": "click_through_headline",
+            "rule_modules_used": ["rule.module"],
+            "resolved_constraints": ["中文短句"],
+            "platform_overlay": {"overlay_id": "1688"},
+        },
+    )
+
+    def fake_language_validate(**_kwargs):
+        validate_calls["count"] += 1
+
+    monkeypatch.setattr("app.services.pipeline._inspect_visible_text_language", fake_language_validate)
+
+    class DummyClient:
+        def __init__(self):
+            self.settings = SimpleNamespace(whatai_api_key="test-key")
+
+        def generate_image(self, *_args, **_kwargs):
+            generate_calls["count"] += 1
+            return f"image-{generate_calls['count']}".encode("utf-8")
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    rendered = _render_single_asset(
+        confirmed_copy={"product_name": "空气净化器", "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}]},
+        strategy_preview={"planner_instruction": None},
+        plan_item={
+            "role": "primary_kv",
+            "slot_id": "primary_kv",
+            "display_order": 1,
+            "aspect_ratio": "1:1",
+            "platform_rule_pack": "alibaba_core_5_slot",
+            "requires_white_bg_validation": False,
+        },
+        instruction="保持高级感",
+        loaded_reference_images=[],
+    )
+
+    assert generate_calls["count"] == 1
+    assert validate_calls["count"] == 0
+    assert rendered["generation_snapshot"]["language_validation"] is None
+
+
+def test_inspect_visible_text_language_marks_validator_errors_as_unknown():
+    class DummyClient:
+        def inspect_visible_text_language(self, **_kwargs):
+            raise AppError("upstream_llm_error", "rate limited", 429)
+
+    result = _inspect_visible_text_language(
+        client=DummyClient(),
+        image_bytes=b"image",
+        platform_id="1688",
+        allowed_tokens=["CADR"],
+    )
+
+    assert result["status"] == "unknown"
+    assert result["passed"] is True
+    assert result["reason"] == "validator_error"
+
+
+def test_render_single_asset_language_validator_errors_no_longer_affect_hot_path(monkeypatch):
+    generate_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_prompt",
+        lambda **kwargs: {
+            "final_prompt": f"prompt-{kwargs['instruction'] or 'base'}",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+            "copy_blocks": {},
+            "expression_mode": "click_through_headline",
+            "rule_modules_used": ["rule.module"],
+            "resolved_constraints": ["中文短句"],
+            "platform_overlay": {"overlay_id": "1688"},
+        },
+    )
+
+    class DummyClient:
+        def __init__(self):
+            self.settings = SimpleNamespace(whatai_api_key="test-key")
+
+        def generate_image(self, *_args, **_kwargs):
+            generate_calls["count"] += 1
+            return f"image-{generate_calls['count']}".encode("utf-8")
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    rendered = _render_single_asset(
+        confirmed_copy={"product_name": "空气净化器", "core_selling_points": ["USB-C 快充"]},
+        strategy_preview={"planner_instruction": None},
+        plan_item={
+            "role": "primary_kv",
+            "slot_id": "primary_kv",
+            "display_order": 1,
+            "aspect_ratio": "1:1",
+            "platform_rule_pack": "alibaba_core_5_slot",
+            "requires_white_bg_validation": False,
+        },
+        instruction="保持高级感",
+        loaded_reference_images=[],
+    )
+
+    assert generate_calls["count"] == 1
+    assert rendered["generation_snapshot"]["language_validation"] is None

@@ -15,6 +15,7 @@ from app.services.pipeline import _apply_analysis_defaults_to_copy
 from app.services.reference_images import LoadedReferenceImage, select_reference_images_for_role
 from app.services.strategy import build_strategy_preview
 from app.services.upstream import WhataiClient
+from app.services.visible_copy_policy import build_visible_text_allowlist, filter_disallowed_latin_tokens
 from app.services.white_bg import validate_white_background
 
 
@@ -167,6 +168,119 @@ def test_alibaba_prompt_exposes_slot_structure_and_copy_policy():
     assert "slot_guardrails" in prompt["prompt_sections_used"]
     assert "标题区 + 产品主体 + 背景结构 + 底部利益点" in prompt["blocks"]["composition"]
     assert prompt["slot_guardrails"]
+    assert "图上可见文字必须为简体中文短句；只允许阿拉伯数字、必要计量单位，以及用户已提供的型号/缩写。" in prompt["blocks"]["constraints"]
+    assert "图上文案和用户可编辑文案都必须是最终表达" in prompt["blocks"]["constraints"]
+    assert "Visible copy must stay short" not in prompt["blocks"]["constraints"]
+    assert "如出现英文请改写为简体中文短句" in prompt["final_prompt"]
+
+
+def test_alibaba_intl_prompt_keeps_english_visible_copy_constraint():
+    from app.services.prompts import compose_prompt
+
+    strategy_preview = build_strategy_preview(
+        {
+            "product_name": "Air Purifier",
+            "headline": "Quiet Purification",
+            "core_selling_points": ["Quiet Sleep", "Fast Cleanup"],
+            "hero_scene": "Bedroom",
+            "product_advantages": ["Compact Body"],
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "style_choice": "Clean Studio",
+            "style_custom": "",
+        },
+        "alibaba_intl",
+    )
+
+    prompt = compose_prompt(
+        {
+            "product_name": "Air Purifier",
+            "headline": "Quiet Purification",
+            "core_selling_points": ["Quiet Sleep", "Fast Cleanup"],
+            "hero_scene": "Bedroom",
+            "product_advantages": ["Compact Body"],
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "style_choice": "Clean Studio",
+            "style_custom": "",
+        },
+        strategy_preview,
+        "primary_kv",
+    )
+
+    assert "Visible copy must stay short" in prompt["blocks"]["constraints"]
+    assert "图上可见文字必须保持简体中文短句" not in prompt["blocks"]["constraints"]
+
+
+def test_visible_text_allowlist_only_keeps_explicit_model_or_abbreviation_tokens():
+    allowlist = build_visible_text_allowlist(
+        {
+            "product_name": "空气净化器 H13",
+            "headline": "FAST CLEAN",
+            "core_selling_points": ["USB-C 快充", "IPX7 防水", "LIGHT MODE"],
+            "key_parameters": [
+                {"label": "CADR", "value": "500", "unit": "m3/h"},
+                {"label": "滤芯等级", "value": "HEPA", "unit": ""},
+            ],
+            "product_advantages": ["HEPA 过滤", "母婴可用"],
+        }
+    )
+
+    assert "H13" in allowlist
+    assert "HEPA" in allowlist
+    assert "CADR" in allowlist
+    assert "USB-C" in allowlist
+    assert "IPX7" in allowlist
+    assert "FAST" not in allowlist
+    assert "CLEAN" not in allowlist
+    assert "LIGHT" not in allowlist
+    assert filter_disallowed_latin_tokens(["CADR", "Night", "m3/h", "H13", "USB-C", "IPX7", "HEPA"], allowlist) == ["Night"]
+
+
+def test_visible_text_filter_rejects_mixed_alphanumeric_marketing_tokens_when_not_allowlisted():
+    assert filter_disallowed_latin_tokens(["24H", "360PROTECT", "5-Speed", "CADR"], ["CADR"]) == [
+        "24H",
+        "360PROTECT",
+        "5-Speed",
+    ]
+
+
+def test_inspect_visible_text_language_flags_only_non_whitelisted_english(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.llm_router, "is_available", lambda task: task == "analysis")
+    monkeypatch.setattr(
+        client,
+        "_run_structured_task",
+        lambda **kwargs: {
+            "result": {
+                "status": "failed",
+                "has_readable_text": True,
+                "detected_text_lines": ["HIGH EFFICIENCY", "CADR 150 m3/h"],
+                "latin_tokens": ["HIGH", "EFFICIENCY", "CADR", "m3/h"],
+                "reason": "detected english tokens",
+            },
+            "meta": {
+                "provider": "whatai",
+                "model": "gemini-3-flash-preview",
+                "prompt_version": "visible_text_language_v1",
+                "repair_round": 0,
+                "source": "primary",
+            },
+        },
+    )
+
+    image = Image.new("RGB", (320, 320), (255, 255, 255))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG")
+
+    result = client.inspect_visible_text_language(
+        image_bytes=buffer.getvalue(),
+        platform_id="1688",
+        allowed_abbreviations=["CADR"],
+    )
+
+    assert result["status"] == "failed"
+    assert result["passed"] is False
+    assert result["disallowed_latin_tokens"] == ["HIGH", "EFFICIENCY"]
+    assert result["allowed_latin_tokens"] == ["CADR"]
 
 
 def test_proof_authority_prompt_prefers_proof_elements_and_blocks_fake_certificates():
@@ -422,6 +536,60 @@ def test_request_json_with_retry_retries_remote_protocol_error(monkeypatch):
 
     assert result == {"ok": "true"}
     assert calls["count"] == 2
+
+
+def test_llm_router_request_json_retries_rate_limit(monkeypatch):
+    router = LLMRouter(Settings(whatai_api_key="test-key"))
+    calls = {"count": 0}
+
+    class FakeResponse:
+        def __init__(self, status_code: int, *, text: str = "", headers: dict[str, str] | None = None):
+            self.status_code = status_code
+            self.text = text
+            self.headers = headers or {}
+            self.reason_phrase = "Too Many Requests" if status_code == 429 else "OK"
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                request = httpx.Request("POST", "https://api.whatai.cc/v1beta/models/gemini-3-flash-preview:generateContent")
+                raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=self)
+
+        def json(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, *_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                return FakeResponse(429, text="busy", headers={"Retry-After": "1"})
+            return FakeResponse(200)
+
+    monkeypatch.setattr("app.services.llm_router.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.services.llm_router.time.sleep", lambda *_args: None)
+
+    result = router._request_json_with_retry(
+        base_url="https://api.whatai.cc",
+        method="POST",
+        path="/v1beta/models/gemini-3-flash-preview:generateContent",
+        payload={"contents": []},
+        headers={"Authorization": "Bearer test"},
+        error_key="upstream_llm_error",
+        attempts=3,
+        retryable_on_exhausted=True,
+    )
+
+    assert result == {"ok": "true"}
+    assert calls["count"] == 3
+    assert router._consume_retry_meta()["rate_limit_retry_count"] == 2
 
 
 def test_extract_image_result_supports_nested_async_payload():
@@ -1034,10 +1202,11 @@ def test_compose_detail_panel_prompt_filters_internal_planning_terms():
     )
 
     final_prompt = prompt["final_prompt"]
-    visible_copy = final_prompt.split("On-image copy: ", 1)[1].split(" Style:", 1)[0]
+    visible_copy = final_prompt.split("图上文案建议：", 1)[1].split(" 风格：", 1)[0]
     assert "Proof" not in visible_copy
     assert "panel_goal" not in visible_copy
     assert "copy_focus" not in visible_copy
     assert "设计证明" not in visible_copy
     assert "【高效吸湿结构】" not in visible_copy
     assert "桌面迷你除湿机" in visible_copy
+    assert "请生成一张适用于电商详情页的单张横向 panel 图片" in final_prompt

@@ -20,6 +20,8 @@ class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     active_platform_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     analysis_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    analysis_version: Mapped[int] = mapped_column(Integer, default=0)
+    analysis_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     parameter_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     confirmed_copy: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     strategy_preview: Mapped[dict | None] = mapped_column(JSON, nullable=True)

@@ -7,6 +7,7 @@ from app.db import session as db_session
 from app.admin_db import session as admin_db_session
 from app.admin_models.admin_user import AdminUserModel
 from app.core.admin_auth import hash_password
+from app.core.errors import AppError
 from app.models.asset import AssetModel
 from app.models.job import JobModel
 from app.models.job_event import JobEventModel
@@ -124,11 +125,160 @@ def test_trigger_analysis_recovers_created_session_with_uploaded_images(client):
     status = client.get(f"/api/v2/sessions/{sid}/analysis").json()["data"]
     assert status["status"] == "analyzed"
     assert status["analysis_snapshot"]["recognized_product"]["product_name"]
+    assert status["analysis_version"] == 1
+    assert status["analysis_updated_at"] is not None
+    assert status["latest_analysis_job_id"] == analysis.json()["data"]["job_id"]
     assert isinstance(status["analysis_snapshot"]["category_candidates"], list)
     assert len(status["analysis_snapshot"]["category_candidates"]) >= 3
     assert isinstance(status["analysis_snapshot"]["scene_tags"], list)
     assert isinstance(status["analysis_snapshot"]["supplement_image_recommendations"], list)
     assert status["analysis_snapshot"]["reanalysis_required"] is False
+
+    session_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert session_snapshot["analysis_snapshot"] == status["analysis_snapshot"]
+    assert session_snapshot["analysis_version"] == status["analysis_version"]
+    assert session_snapshot["analysis_updated_at"] == status["analysis_updated_at"]
+    assert session_snapshot["latest_analysis_job_id"] == status["latest_analysis_job_id"]
+
+
+def test_rerun_analysis_returns_latest_freshness_contract(client, monkeypatch):
+    snapshots = iter(
+        [
+            {
+                "recognized_product": {"product_name": "旧结果", "category": "家电"},
+                "copy_draft": {"headline": "第一次"},
+                "suggested_styles": ["科技感"],
+                "key_parameters": [],
+                "reference_summary": {"must_keep": "old"},
+            },
+            {
+                "recognized_product": {"product_name": "新结果", "category": "家电"},
+                "copy_draft": {"headline": "第二次"},
+                "suggested_styles": ["科技感"],
+                "key_parameters": [],
+                "reference_summary": {"must_keep": "new"},
+            },
+        ]
+    )
+
+    class DummyClient:
+        def analyze_images(self, *_args, **_kwargs):
+            return next(snapshots)
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    sid = client.post("/api/v2/sessions").json()["data"]["session_id"]
+    files = {"file": ("p.jpg", make_image_bytes(), "image/jpeg")}
+    client.post(f"/api/v2/sessions/{sid}/images", files=files, data={"slot_type": "front", "display_order": "1"})
+    client.put(
+        f"/api/v2/sessions/{sid}/platform-selection",
+        json={"selected_platform_ids": ["temu"], "active_platform_id": "temu"},
+    )
+
+    first_job = client.post(f"/api/v2/sessions/{sid}/analysis").json()["data"]["job_id"]
+    first_analysis = client.get(f"/api/v2/sessions/{sid}/analysis").json()["data"]
+    second_job = client.post(f"/api/v2/sessions/{sid}/analysis").json()["data"]["job_id"]
+    second_analysis = client.get(f"/api/v2/sessions/{sid}/analysis").json()["data"]
+    second_analysis_repeat = client.get(f"/api/v2/sessions/{sid}/analysis").json()["data"]
+    session_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    job_snapshot = client.get(f"/api/v2/jobs/{second_job}").json()["data"]
+
+    assert first_analysis["analysis_snapshot"]["recognized_product"]["product_name"] == "旧结果"
+    assert first_analysis["analysis_version"] == 1
+    assert first_analysis["latest_analysis_job_id"] == first_job
+    assert second_analysis["analysis_snapshot"]["recognized_product"]["product_name"] == "新结果"
+    assert second_analysis["analysis_version"] == 2
+    assert second_analysis["latest_analysis_job_id"] == second_job
+    assert second_analysis["analysis_updated_at"] is not None
+    assert second_analysis["analysis_updated_at"] != first_analysis["analysis_updated_at"]
+    assert second_analysis_repeat == second_analysis
+    assert session_snapshot["analysis_snapshot"] == second_analysis["analysis_snapshot"]
+    assert session_snapshot["analysis_version"] == second_analysis["analysis_version"]
+    assert session_snapshot["analysis_updated_at"] == second_analysis["analysis_updated_at"]
+    assert session_snapshot["latest_analysis_job_id"] == second_analysis["latest_analysis_job_id"]
+    assert job_snapshot["status"] == "succeeded"
+    assert job_snapshot["result_payload"]["analysis_version"] == 2
+    assert job_snapshot["result_payload"]["analysis_updated_at"].replace("+00:00", "Z") == second_analysis["analysis_updated_at"]
+    assert job_snapshot["result_payload"]["latest_analysis_job_id"] == second_job
+
+
+def test_platform_change_invalidates_analysis_and_cached_strategy(client):
+    sid = create_ready_session(client, platform_id="temu")
+    before = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+
+    response = client.put(
+        f"/api/v2/sessions/{sid}/platform-selection",
+        json={"selected_platform_ids": ["temu", "1688"], "active_platform_id": "1688"},
+    )
+    assert response.status_code == 200, response.text
+
+    after = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert after["active_platform_id"] == "1688"
+    assert after["analysis_snapshot"]["reanalysis_required"] is True
+    assert after["analysis_version"] == before["analysis_version"]
+    assert after["analysis_updated_at"] == before["analysis_updated_at"]
+    assert after["latest_analysis_job_id"] == before["latest_analysis_job_id"]
+    assert after["strategy_preview"] is None
+    assert after["detail_strategy_preview"] is None
+
+
+def test_reanalysis_clears_stale_parameter_snapshot_and_extract_uses_fresh_copy(client, monkeypatch):
+    state = {"analysis_calls": 0, "extract_confirmed_copies": []}
+
+    class DummyClient:
+        def analyze_images(self, *_args, **_kwargs):
+            state["analysis_calls"] += 1
+            hero_scene = "旧分析场景" if state["analysis_calls"] == 1 else "新分析场景"
+            return {
+                "recognized_product": {"product_name": f"除湿机-{state['analysis_calls']}", "category": "家电"},
+                "copy_draft": {"usage_scenes": hero_scene},
+                "suggested_styles": ["科技感"],
+                "key_parameters": [],
+                "reference_summary": {"must_keep": "保持结构一致"},
+            }
+
+        def extract_parameters(self, **kwargs):
+            state["extract_confirmed_copies"].append(dict(kwargs["confirmed_copy"]))
+            return {
+                "relevance_status": "valid",
+                "hero_scene": kwargs["confirmed_copy"].get("hero_scene", ""),
+                "core_selling_points": ["旧参数卖点" if len(state["extract_confirmed_copies"]) == 1 else "新参数卖点"],
+                "key_parameters": [],
+                "product_advantages": ["旧参数优势" if len(state["extract_confirmed_copies"]) == 1 else "新参数优势"],
+                "feature_highlights": [],
+                "source_mode": "analysis_only",
+                "evidence_priority": "analysis_then_copy",
+                "evidence_summary": [],
+            }
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    sid = client.post("/api/v2/sessions").json()["data"]["session_id"]
+    files = {"file": ("p.jpg", make_image_bytes(), "image/jpeg")}
+    client.post(f"/api/v2/sessions/{sid}/images", files=files, data={"slot_type": "front", "display_order": "1"})
+    client.put(
+        f"/api/v2/sessions/{sid}/platform-selection",
+        json={"selected_platform_ids": ["temu"], "active_platform_id": "temu"},
+    )
+
+    client.post(f"/api/v2/sessions/{sid}/analysis")
+    client.post(f"/api/v2/sessions/{sid}/parameters/extract")
+    first_parameters = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]["parameter_snapshot"]
+    assert first_parameters["hero_scene"] == "旧分析场景"
+
+    client.post(f"/api/v2/sessions/{sid}/analysis")
+
+    after_reanalysis = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]["parameter_snapshot"]
+    copy_after_reanalysis = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    assert after_reanalysis == {}
+    assert copy_after_reanalysis["hero_scene"] == "新分析场景"
+
+    client.post(f"/api/v2/sessions/{sid}/parameters/extract")
+    second_parameters = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]["parameter_snapshot"]
+
+    assert second_parameters["hero_scene"] == "新分析场景"
+    assert state["extract_confirmed_copies"][0]["hero_scene"] == "旧分析场景"
+    assert state["extract_confirmed_copies"][1]["hero_scene"] == "新分析场景"
 
 
 def test_complete_parameters_enriches_snapshot_and_copy_fields(client, monkeypatch):
@@ -314,12 +464,22 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
     assert prompt_preview["prompts"][0]["copy_policy_applied"]["headline_max_chars"] == 16
     assert prompt_preview["prompts"][0]["slot_guardrails"]
     assert "slot_guardrails" in prompt_preview["prompts"][0]["prompt_sections_used"]
+    assert "图上可见文字必须保持简体中文短句、高对比且与版式融合。" in prompt_preview["prompts"][0]["blocks"]["constraints"]
+    assert "如果没有足够好的中文短句，宁可少字" in prompt_preview["prompts"][0]["blocks"]["constraints"]
+    assert "Visible copy must stay short" not in prompt_preview["prompts"][0]["blocks"]["constraints"]
     assert "不要堆砌虚假证书" in prompt_preview["prompts"][2]["blocks"]["constraints"]
 
 
 def test_alibaba_intl_generation_results_include_slot_metadata(client):
     sid = create_ready_session(client, platform_id="alibaba_intl")
     client.post(f"/api/v2/sessions/{sid}/strategy/preview")
+
+    prompt_preview = client.post(
+        f"/api/v2/sessions/{sid}/prompts/preview",
+        json={"instruction": "keep it cleaner", "include_latest_assets": False},
+    ).json()["data"]["prompts"]
+    assert "Visible copy must stay short" in prompt_preview[0]["blocks"]["constraints"]
+    assert "图上可见文字必须保持简体中文短句" not in prompt_preview[0]["blocks"]["constraints"]
 
     gen = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "构图更干净"})
     assert gen.status_code == 200
@@ -385,6 +545,43 @@ def test_generate_gallery_with_slot_ids_only_outputs_requested_slot(client):
         json={"instruction": "先试一张", "slot_ids": ["proof_authority"]},
     )
     assert gen.status_code == 200
+
+
+def test_partial_gallery_results_expose_missing_slot_ids_and_slot_fill_carries_forward(client, monkeypatch):
+    sid = create_ready_session(client)
+
+    def broken_download(self, submission, *_args, **_kwargs):
+        if submission["submission_id"] == "main:scene:4":
+            raise AppError("upstream_image_error", "download failed", 502)
+        return b"fake-image"
+
+    monkeypatch.setattr("app.services.upstream.WhataiClient.download_image_bytes", broken_download)
+
+    gen = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": None}).json()["data"]
+    job = client.get(f"/api/v2/jobs/{gen['job_id']}").json()["data"]
+    assert job["status"] == "partial_succeeded"
+    assert job["result_payload"]["missing_slot_ids"] == ["scene"]
+
+    results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
+    assert results["summary"]["expected_count"] == 5
+    assert results["summary"]["ready_count"] == 4
+    assert results["missing_slot_ids"] == ["scene"]
+    assert len(results["assets"]) == 4
+
+    monkeypatch.setattr("app.services.upstream.WhataiClient.download_image_bytes", lambda self, *_args, **_kwargs: b"fake-image")
+
+    fill = client.post(
+        f"/api/v2/sessions/{sid}/generations",
+        json={"instruction": "补齐缺失槽位", "slot_ids": ["scene"]},
+    ).json()["data"]
+    fill_job = client.get(f"/api/v2/jobs/{fill['job_id']}").json()["data"]
+    assert fill_job["status"] == "succeeded"
+
+    latest_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
+    assert latest_results["missing_slot_ids"] == []
+    assert latest_results["summary"]["expected_count"] == 5
+    assert latest_results["summary"]["ready_count"] == 5
+    assert len(latest_results["assets"]) == 5
 
 
 def test_admin_login_and_asset_archive_hides_public_results(client):
@@ -717,6 +914,35 @@ def test_copy_regenerate_accepts_current_step4_fields(client):
     assert isinstance(detail["generated_fields"]["key_parameters"], str)
 
 
+def test_copy_form_sanitizes_internal_prompt_terms(client):
+    sid = create_ready_session(client)
+
+    client.put(
+        f"/api/v2/sessions/{sid}/copy",
+        json={
+            "product_name": "桌面除湿机",
+            "category": "家电",
+            "hero_scene": "narrative_section 客厅桌面",
+            "core_selling_points": ["设计证明", "低噪运行"],
+            "key_parameters": [{"key": "tank", "label": "panel_goal", "value": "500ml"}],
+            "product_advantages": ["copy_focus", "小巧好放"],
+            "style_preset_id": None,
+            "style_custom": "planning context 极简风",
+            "style_choice": "",
+            "headline": "思考过程：高效除湿",
+            "selling_points": "panel_goal｜静音除湿",
+            "usage_scenes": "Proof｜卧室",
+            "specs": "layout template｜500ml",
+        },
+    )
+
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    assert copy_data["hero_scene"] == "客厅桌面"
+    assert copy_data["core_selling_points"] == ["低噪运行"]
+    assert copy_data["product_advantages"] == ["小巧好放"]
+    assert copy_data["style_custom"] == "极简风"
+
+
 def test_regenerate_family_and_parent_asset(client):
     sid = create_ready_session(client)
 
@@ -887,8 +1113,8 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
                     "slot_id": "hero",
                     "copy_blocks_override": {
                         "headline": "新的主标题",
-                        "supporting": "新的副标题",
-                        "proof_lines": ["证明1"],
+                        "supporting": "设计证明 (Proof)",
+                        "proof_lines": ["panel_goal", "证明1"],
                         "matrix_lines": [],
                     },
                     "raw_prompt_override": "请生成一张带强点击主标题的主图",
@@ -907,6 +1133,8 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
     ).json()["data"]
     hero_prompt = next(item for item in prompt_preview["prompts"] if (item["slot_id"] or item["role"]) == "hero")
     assert hero_prompt["copy_blocks"]["headline"] == "新的主标题"
+    assert hero_prompt["copy_blocks"]["supporting"] == ""
+    assert hero_prompt["copy_blocks"]["proof_lines"] == ["证明1"]
     assert hero_prompt["raw_prompt_override"] == "请生成一张带强点击主标题的主图"
     assert "必须额外遵守这些约束" in hero_prompt["final_prompt"]
 

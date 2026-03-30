@@ -21,6 +21,13 @@ from app.services.detail_panel_library import (
 )
 from app.services.platforms import get_platform_or_none
 from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
+from app.services.prompt_safety import (
+    prompt_matrix_guardrails,
+    sanitize_detail_copy_blocks,
+    sanitize_planning_context_text,
+    sanitize_surface_list,
+    sanitize_surface_text,
+)
 from app.services.reference_images import LoadedReferenceImage, build_reference_manifest, load_reference_images
 from app.services.rule_packs import DETAIL_RULE_PACK_ID, load_published_rule_pack_config
 from app.services.strategy_overrides import resolve_session_overrides
@@ -358,20 +365,23 @@ def compose_detail_panel_prompt(
     db: Session | None = None,
 ) -> dict[str, Any]:
     plan = panel_plan_item or find_detail_panel_plan_item(strategy_preview, panel_id, db=db)
-    product_name = _fallback_text(confirmed_copy.get("product_name"), "product")
-    style_summary = _fallback_text(strategy_preview.get("style_summary"), "clean ecommerce detail page style")
+    product_name = _fallback_text(confirmed_copy.get("product_name"), "产品")
+    style_summary = _fallback_text(strategy_preview.get("style_summary"), "干净、高级、适合电商详情页的信息化设计")
     panel_type = str(plan.get("panel_type") or "feature_benefit")
     raw_copy_lines = [str(item).strip() for item in plan.get("copy_lines", []) if str(item).strip()]
     raw_copy_blocks = dict(plan.get("copy_blocks") or _copy_blocks_from_lines(raw_copy_lines, panel_type=panel_type))
-    visible_copy_lines = _sanitize_visible_copy_lines(raw_copy_lines)
-    visible_copy_blocks = _sanitize_visible_copy_blocks(raw_copy_blocks, panel_type=panel_type, fallback_lines=visible_copy_lines)
-    planner_base = _sanitize_planning_context_text(
+    visible_copy_lines = sanitize_surface_list(raw_copy_lines)
+    visible_copy_blocks, sanitized_fields, copy_safety_notes = sanitize_detail_copy_blocks(
+        raw_copy_blocks,
+        fallback_lines=visible_copy_lines,
+    )
+    planner_base = sanitize_planning_context_text(
         plan.get("planner_prompt_base"),
-        f"Create one ecommerce detail page panel for {product_name} with clear hierarchy and strong product fidelity.",
+        f"为 {product_name} 生成一张层级清晰、商品保真优先的电商详情页横向 panel。",
     )
     reference_rule = (
-        "Use the panel-selected product references as the primary fidelity reference. "
-        "If style/font reference images exist, follow their color and typography direction."
+        "优先以当前 panel 选中的商品参考图作为商品保真基准。"
+        "如果存在风格/字体参考图，只吸收其色彩、字体和版式方向，不要照搬无关文案。"
     )
     panel_type_label = str(plan.get("panel_type_label") or panel_type)
     layout_template = str(plan.get("layout_template") or "feature_card")
@@ -380,7 +390,7 @@ def compose_detail_panel_prompt(
     visual_truth_mode = str(plan.get("visual_truth_mode") or _default_visual_truth_mode(panel_type)).strip()
     origin_note = str(plan.get("origin_note") or "").strip()
     truth_constraint = _visual_truth_constraint(visual_truth_mode, origin_note)
-    planning_context = _sanitize_planning_context_text(
+    planning_context = sanitize_planning_context_text(
         " | ".join(
             item
             for item in [
@@ -390,37 +400,39 @@ def compose_detail_panel_prompt(
             ]
             if str(item).strip()
         ),
-        f"Highlight the key value of {product_name} with strong product fidelity and clear visual hierarchy.",
+        f"围绕 {product_name} 的核心价值做清晰表达，保持强保真和明确的信息层级。",
     )
+    constraints = [
+        "只生成单张 21:9 横向详情页 panel，不要拼整页九宫格或画册。",
+        "图上文案必须是最终可见表达，不要输出思考过程、推理标签、内部规划字段或流程说明。",
+        "不要出现 Proof、panel_goal、copy_focus、narrative_section、origin_note、visual_truth_mode、设计证明、规则模块、布局模板、【...】等内部标签。",
+        "不要出现水印、UI 截图、重复主体、无关道具或无关产品。",
+        truth_constraint,
+        *prompt_matrix_guardrails(),
+    ]
 
     blocks = {
         "planning_context": planning_context,
-        "subject": f"Keep {product_name} as the dominant subject. Preserve silhouette, structure, color and proportions.",
-        "layout": _fallback_text(plan.get("layout_notes"), "Single 21:9 panel layout with clear hierarchy for image and text."),
+        "subject": f"让 {product_name} 成为绝对主体，保持轮廓、结构、颜色和比例稳定。",
+        "layout": _fallback_text(plan.get("layout_notes"), "采用单张 21:9 横向布局，图文层级清晰，主体突出。"),
         "text": _build_text_block(visible_copy_lines, visible_copy_blocks),
-        "style": f"Use an ecommerce-ready detail page look. Style direction: {style_summary}. {reference_rule}",
-        "constraints": (
-            "Render one single horizontal detail page panel only. "
-            "Visible text should be concise and integrated into the composition. "
-            "Do not create a gallery sheet, watermark, UI screenshot, duplicated product or irrelevant props. "
-            "Never render internal planning labels such as Proof, panel_goal, copy_focus, narrative_section, 设计证明, 布局模板, 规则模块 or any 【...】 wrappers. "
-            f"{truth_constraint}"
-        ),
-        "instruction": _fallback_text(instruction, "No extra edit instruction."),
+        "style": f"整体采用适合电商详情页的信息化设计风格。风格方向：{style_summary}。{reference_rule}",
+        "constraints": " ".join(dict.fromkeys(item for item in constraints if item)),
+        "instruction": _fallback_text(instruction, "无额外修改要求。"),
     }
     final_prompt = (
         f"{raw_prompt_override} 必须额外遵守这些约束：{blocks['constraints']}"
         if raw_prompt_override
         else (
-            f"Create a single ecommerce detail page panel image in a {DETAIL_PAGE_ASPECT_RATIO} horizontal layout. "
-            f"Panel type: {panel_type_label}. Layout template: {layout_template}. "
-            f"Planning context only, not literal on-image copy: {blocks['planning_context']} "
-            f"Subject: {blocks['subject']} "
-            f"Layout: {blocks['layout']} "
-            f"On-image copy: {blocks['text']} "
-            f"Style: {blocks['style']} "
-            f"Constraints: {blocks['constraints']} "
-            f"Additional instruction: {blocks['instruction']}"
+            f"请生成一张适用于电商详情页的单张横向 panel 图片，画幅比例 {DETAIL_PAGE_ASPECT_RATIO}。"
+            f"Panel 类型：{panel_type_label}。布局模板：{layout_template}。"
+            f"内部规划语义仅用于推理，不可原样上图：{blocks['planning_context']} "
+            f"主体：{blocks['subject']} "
+            f"布局：{blocks['layout']} "
+            f"图上文案建议：{blocks['text']} "
+            f"风格：{blocks['style']} "
+            f"约束：{blocks['constraints']} "
+            f"额外要求：{blocks['instruction']}"
         )
     )
 
@@ -456,6 +468,8 @@ def compose_detail_panel_prompt(
         "planner_source": str(plan.get("planner_source") or "rule_based"),
         "planner_base": planning_context,
         "rule_modules_used": rule_modules_used,
+        "copy_safety_notes": copy_safety_notes,
+        "sanitized_fields": sanitized_fields,
         "final_prompt": final_prompt,
     }
 
@@ -554,7 +568,6 @@ def _build_default_panel_plan(
             **_copy_blocks_from_lines(copy_lines, panel_type=panel_type),
             **dict(override.get("copy_blocks_override") or {}),
         }
-        extra_instruction = f" Extra planner instruction: {planner_instruction}." if planner_instruction else ""
         narrative_section = DETAIL_STORY_SECTIONS[min(default_order - 1, len(DETAIL_STORY_SECTIONS) - 1)]
         panel_plan.append(
             {
@@ -574,10 +587,11 @@ def _build_default_panel_plan(
                 "layout_template": panel_meta["layout_template"],
                 "copy_policy": panel_meta["copy_policy"],
                 "planner_prompt_base": (
-                    f"Create a polished ecommerce detail page panel for {product_name}. "
-                    f"Panel type is {panel_meta['panel_type_label']}. "
-                    f"Focus on {copy_lines[0] if copy_lines else product_name}. "
-                    f"Maintain strong product fidelity and leave room for readable marketing copy.{extra_instruction}"
+                    f"为 {product_name} 生成一张精致的电商详情页横向 panel。"
+                    f"当前 panel 类型是 {panel_meta['panel_type_label']}。"
+                    f"重点围绕 {copy_lines[0] if copy_lines else product_name} 展开。"
+                    f"商品保真优先，并为清晰、稳定、可上图的短文案预留空间。"
+                    f"{(' 额外策略指令：' + planner_instruction + '。') if planner_instruction else ''}"
                 ),
                 "copy_lines": copy_lines,
                 "copy_blocks": copy_blocks,
@@ -610,13 +624,22 @@ def _merge_panel_plan(
             continue
         merged_item = {**item}
         for key in ("panel_label", "planner_prompt_base", "layout_notes", "narrative_section", "panel_goal", "copy_focus", "panel_type", "layout_template", "visual_truth_mode", "origin_note"):
-            value = str(llm_item.get(key) or "").strip()
+            if key in {"planner_prompt_base", "layout_notes", "panel_goal", "copy_focus", "origin_note"}:
+                value = sanitize_surface_text(llm_item.get(key))
+            elif key == "narrative_section":
+                value = sanitize_surface_text(llm_item.get(key))
+            else:
+                value = str(llm_item.get(key) or "").strip()
             if value:
                 merged_item[key] = value
         for key in ("copy_lines", "product_reference_ids", "style_reference_ids"):
             value = llm_item.get(key)
             if isinstance(value, list):
-                cleaned = [str(entry).strip() for entry in value if str(entry).strip()]
+                cleaned = (
+                    sanitize_surface_list(value)
+                    if key == "copy_lines"
+                    else [str(entry).strip() for entry in value if str(entry).strip()]
+                )
                 if cleaned:
                     merged_item[key] = cleaned
         if merged_item.get("panel_type") and merged_item.get("panel_type") != item.get("panel_type"):
@@ -643,10 +666,10 @@ def _apply_detail_panel_review(
         merged.append(
             {
                 **item,
-                "copy_focus": review.get("copy_focus") or item.get("copy_focus"),
-                "panel_goal": review.get("panel_goal") or item.get("panel_goal"),
+                "copy_focus": sanitize_surface_text(review.get("copy_focus")) or item.get("copy_focus"),
+                "panel_goal": sanitize_surface_text(review.get("panel_goal")) or item.get("panel_goal"),
                 "visual_truth_mode": review.get("visual_truth_mode") or item.get("visual_truth_mode") or _default_visual_truth_mode(str(item.get("panel_type") or "")),
-                "origin_note": review.get("origin_note") or item.get("origin_note") or "",
+                "origin_note": sanitize_surface_text(review.get("origin_note")) or item.get("origin_note") or "",
             }
         )
     return merged
@@ -753,78 +776,14 @@ def _default_visual_truth_mode(panel_type: str) -> str:
 
 def _visual_truth_constraint(visual_truth_mode: str, origin_note: str) -> str:
     base = {
-        "faithful_closeup": "Only enlarge or restage structures that are verifiably present in the uploaded references. Do not invent hidden internal parts.",
-        "mechanism_illustration": "This panel may use a conceptual mechanism illustration, but it must stay anchored to the real product silhouette and visible structure.",
-        "scene_reconstruction": "This panel may reconstruct a usage scene, but product appearance, proportions and key structures must remain faithful to the uploaded references.",
-        "parameter_board": "This panel can be more informational, but parameter text and highlighted structures must remain grounded in the known product facts.",
-    }.get(visual_truth_mode, "Keep product structure faithful to the uploaded references.")
+        "faithful_closeup": "只能放大或重构上传参考图里可验证的真实结构，不要杜撰隐藏内部件。",
+        "mechanism_illustration": "允许做机制示意，但示意图必须锚定真实商品轮廓和可见结构，不要画成全新产品。",
+        "scene_reconstruction": "允许重建使用场景，但商品外观、比例和关键结构必须忠于上传参考图。",
+        "parameter_board": "允许信息化参数板表达，但参数文字和高亮结构都必须基于已知商品事实。",
+    }.get(visual_truth_mode, "商品结构必须忠于上传参考图。")
     if origin_note:
-        return f"{base} Reviewer note: {origin_note}"
+        return f"{base} 审校备注：{sanitize_surface_text(origin_note)}"
     return base
-
-
-_DETAIL_VISIBLE_COPY_BLOCKLIST = (
-    "proof",
-    "panel_goal",
-    "copy_focus",
-    "narrative_section",
-    "design proof",
-    "设计证明",
-    "规则模块",
-    "布局模板",
-    "rule module",
-    "layout template",
-)
-
-
-def _sanitize_visible_copy_text(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    text = re.sub(r"[【\[]([^】\]]+)[】\]]", r"\1", text)
-    text = re.sub(r"\((?:Proof|panel_goal|copy_focus)\)", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip(" |：:;；-")
-    lowered = text.lower()
-    if any(token in lowered for token in _DETAIL_VISIBLE_COPY_BLOCKLIST):
-        return ""
-    return text
-
-
-def _sanitize_visible_copy_lines(copy_lines: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in copy_lines:
-        text = _sanitize_visible_copy_text(item)
-        if not text or text in seen:
-            continue
-        result.append(text)
-        seen.add(text)
-    return result
-
-
-def _sanitize_visible_copy_blocks(copy_blocks: dict[str, Any], *, panel_type: str, fallback_lines: list[str]) -> dict[str, Any]:
-    bullet_points = copy_blocks.get("bullet_points")
-    proof_lines = copy_blocks.get("proof_lines")
-    sanitized = {
-        "headline": _sanitize_visible_copy_text(copy_blocks.get("headline")),
-        "supporting": _sanitize_visible_copy_text(copy_blocks.get("supporting")),
-        "bullet_points": _sanitize_visible_copy_lines([str(item) for item in bullet_points]) if isinstance(bullet_points, list) else [],
-        "proof_lines": _sanitize_visible_copy_lines([str(item) for item in proof_lines]) if isinstance(proof_lines, list) else [],
-        "cta_line": _sanitize_visible_copy_text(copy_blocks.get("cta_line")),
-    }
-    if any(sanitized.values()):
-        return sanitized
-    return _copy_blocks_from_lines(fallback_lines, panel_type=panel_type)
-
-
-def _sanitize_planning_context_text(value: Any, fallback: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return fallback
-    text = re.sub(r"[【\[]([^】\]]+)[】\]]", r"\1", text)
-    text = re.sub(r"(panel_goal|copy_focus|narrative_section|Proof|设计证明|规则模块|布局模板)", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip(" |：:;；-")
-    return text or fallback
 
 
 def _build_text_block(copy_lines: list[str], copy_blocks: dict[str, Any]) -> str:
@@ -839,10 +798,10 @@ def _build_text_block(copy_lines: list[str], copy_blocks: dict[str, Any]) -> str
             if isinstance(value, list):
                 parts.extend([str(item).strip() for item in value if str(item).strip()])
         if parts:
-            return "Suggested copy lines: " + " | ".join(parts[:6])
+            return "最终上图文案请从这些短句中择优使用：" + " | ".join(parts[:6])
     if not copy_lines:
-        return "Use concise headline and short supporting copy integrated into the panel."
-    return "Suggested copy lines: " + " | ".join(copy_lines[:4])
+        return "若需要图上文案，请只使用短标题和短副文案，并与版式自然融合。"
+    return "最终上图文案请从这些短句中择优使用：" + " | ".join(copy_lines[:4])
 
 
 def _copy_blocks_from_lines(copy_lines: list[str], *, panel_type: str) -> dict[str, Any]:
@@ -862,7 +821,7 @@ def _copy_blocks_from_lines(copy_lines: list[str], *, panel_type: str) -> dict[s
 
 def _style_summary(confirmed_copy: dict[str, Any], style_loaded: list[LoadedReferenceImage]) -> str:
     if style_loaded:
-        return "Follow the uploaded style and typography reference grid."
+        return "优先跟随上传的风格与字体参考图。"
     resolved = confirmed_copy.get("resolved_style_preset")
     parts: list[str] = []
     if isinstance(resolved, dict):
@@ -875,7 +834,7 @@ def _style_summary(confirmed_copy: dict[str, Any], style_loaded: list[LoadedRefe
         if text and text not in parts:
             parts.append(text)
     style = " ".join(parts)
-    return style or "clean premium ecommerce detail page design"
+    return style or "干净、高级、适合电商详情页的信息化设计"
 
 
 def _split_points(value: Any) -> list[str]:

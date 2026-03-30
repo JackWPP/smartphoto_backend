@@ -23608,12 +23608,43 @@
             "type": "object",
             "title": "Analysis Snapshot",
             "description": "图片分析结果快照。"
+          },
+          "analysis_version": {
+            "type": "integer",
+            "title": "Analysis Version",
+            "description": "分析结果版本号；仅在 analysis job 成功落库后递增。"
+          },
+          "analysis_updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Updated At",
+            "description": "最近一次成功写入 analysis_snapshot 的时间。"
+          },
+          "latest_analysis_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Analysis Job Id",
+            "description": "最近一次 analysis 任务 ID。"
           }
         },
         "type": "object",
         "required": [
           "status",
-          "analysis_snapshot"
+          "analysis_snapshot",
+          "analysis_version"
         ],
         "title": "AnalysisData"
       },
@@ -27341,6 +27372,24 @@
             "title": "Analysis Snapshot",
             "description": "分析结果快照。"
           },
+          "analysis_version": {
+            "type": "integer",
+            "title": "Analysis Version",
+            "description": "分析结果版本号。"
+          },
+          "analysis_updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Updated At",
+            "description": "最近一次成功写入分析结果的时间。"
+          },
           "parameter_snapshot": {
             "anyOf": [
               {
@@ -27468,6 +27517,7 @@
           "status",
           "current_step",
           "selected_platform_ids",
+          "analysis_version",
           "generation_round",
           "latest_result_version",
           "detail_generation_round",

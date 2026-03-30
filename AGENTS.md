@@ -319,3 +319,36 @@
   - `strategy_preview/detail_strategy_preview` 新增 `planner_primary_* / planner_fallback_* / planner_attempt_count / planner_final_source` 调试元数据；job failure payload 增加 `planner_stage`
   - 详情页 prompt 组装新增“planning context vs visible copy”隔离，过滤 `Proof/panel_goal/copy_focus/设计证明/【...】` 等内部规划标签，避免泄露到最终成图
   - 修复 detail worker 复用预览时误读 `product_manifest` 字段的问题，确保 `detail_strategy_preview` 命中同一 `input_hash` 时不再重跑 planner/reviewer
+  - 生产 `docker-compose.prod.yml` 改为通过 `bash ./scripts/docker-{api,worker,migrate}.sh` 启动，避免容器内直接执行脚本时因执行位异常导致 `permission denied`
+- 2026-03-30 Hotfix:
+  - `1688/taobao` 主图 prompt 新增“图上 visible copy 必须为简体中文”的硬约束；`alibaba_intl` 继续保持英文站点语义
+  - 主图下载后、落库前新增图中文字语言验收：默认允许简体中文、数字、必要计量单位和 `confirmed_copy` 推导出的型号/缩写白名单
+  - 若 `1688/taobao` 结果图识别到非白名单英文，只对当前单图补提 1 次；二次仍失败时在 `assets.generation_snapshot.language_validation` 写入 `retry_applied/soft_failed/disallowed_latin_tokens`
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与阿里平台 prompt/worker 回归测试
+- 2026-03-30 Hardening:
+  - `1688/taobao` visible copy 策略收口为“prompt-first + validator 兜底”：国内平台 prompt 明确要求中文短句、少字、不要英文营销词；若中文不稳，宁可少字或无字
+  - visible copy 白名单仅保留 `confirmed_copy.product_name + key_parameters` 推导出的型号/缩写，不再从 headline / selling points / specs 自动放行英文营销词
+  - 图中文字验收改为“双层软补救”：先补 1 次更强中文约束，再补 1 次“少字/必要时无字”保守版本；两次后仍失败只写 `retry_applied/rescue_stage/soft_failed/reason` 留痕，不整组打挂
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与 visible copy 相关回归测试
+- 2026-03-30 Analysis Freshness:
+  - `sessions` 新增 `analysis_version/analysis_updated_at`，`GET /api/v2/sessions/{session_id}` 与 `GET /api/v2/sessions/{session_id}/analysis` 统一返回 freshness 契约
+  - analysis worker 仅在新 `analysis_snapshot` 与 freshness 字段成功落库后才写 job `succeeded`，并在 `job.result_payload` 回传本轮 freshness 元数据
+  - 商品图 upload/delete、`/api/v2/uploads/complete`、平台切换与显式重跑 analysis 改为统一清理下游陈旧产物：保留旧快照、置 `reanalysis_required=true`、清空 `parameter_snapshot/strategy_preview/detail_strategy_preview`
+  - Step 3 参数提取改为不再把旧 `parameter_snapshot` 合并回自己的输入；旧 session 回到 `2 -> 3` 时不会再被上一轮参数结果自我污染
+  - 补充旧 session 重跑分析、平台切换失效、图片补传失效与 Step 3 去旧值回归测试，并同步更新 API 联调、Agent 协作、运行排障文档与 OpenAPI 导出
+- 2026-03-30 Prompt Matrix:
+  - 新增统一 `prompt_safety` 层，形成 `Agent Prompt / Planner Prompt / Render Prompt / Sanitize/Validation Prompt` 四层 Prompt Matrix
+  - analysis / 主图 planner / 详情页 planner / Step3 / copy regenerate 的内部提示默认统一走中文表述，并补充“不输出思考过程、内部规划字段、流程说明”的共用约束
+  - 主图 `copy_blocks`、详情页 `copy_lines/copy_blocks`、Step3/Step4 默认编辑值、copy regenerate 返回值统一走清洗，过滤 `panel_goal/copy_focus/narrative_section/origin_note/visual_truth_mode/Proof/设计证明/规则模块/布局模板/【...】/思考过程`
+  - 主图与详情页 `generation_snapshot` 新增 `sanitized_fields/copy_safety_notes` 轻量调试痕迹；继续保持非阻断式治理，不新增整任务硬失败
+  - 同步更新 `docs/提示词汇总.md`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与相关回归测试
+- 2026-03-30 Performance Restore:
+  - 主图生成热路径明确保持“批量提交全部任务 -> 集中轮询 -> 并发下载结果”，不再在下载后、落库前追加图中文字语言验收或单图补救重生
+  - `1688/taobao` 中文 visible copy 改回纯 prompt-first：继续通过规则包、策略预览和最终 render prompt 强化“简体中文短句、若不稳宁可少字或无字、不要英文营销词、不要内部规划标签”
+  - 保留 `prompt_safety` 的文案清洗与白底能力标记校验，但不再为了语言审核拖慢整组主图生成时长
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与主图 worker 回归测试
+- 2026-03-30 Reliability Hotfix:
+  - `analysis / main_planner / detail_planner / Step3` 命中 `429` 时改为先做单请求内短退避重试；planner 若仍失败优先 fallback，不再直接进入整 job 长退避
+  - 主图下载阶段改为“单槽位补救优先”：单张失败先重试该槽位；若仍失败，当前版本允许以 `partial_succeeded` 落库，不再让整组结果归零
+  - `GET /api/v2/sessions/{session_id}/results` 新增 `summary.expected_count`、`expected_slot_ids`、`missing_slot_ids`，前端可直接复用 `slot_ids` 补齐缺失槽位
+  - 主图 `generation_snapshot` 新增 `download_retry_count / download_rescued / download_rescue_reason`，运行排障手册同步补充 `429` 与缺图排查口径

@@ -301,7 +301,7 @@ RUN PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
 
 EXPOSE 8000
 
-CMD ["./scripts/docker-api.sh"]
+CMD ["bash", "./scripts/docker-api.sh"]
 EOF
 
 docker build --network host --progress=plain -t "$IMAGE_REF" -f Dockerfile.fast-mirror .
@@ -543,15 +543,16 @@ SMARTPHOTO_IMAGE=<new-image> docker compose --env-file .env.prod -f docker-compo
 
 原因：
 
-- 镜像里打进去的脚本执行位不对
+- 镜像里打进去的脚本执行位不对，或 runtime 直接执行脚本文件过于脆弱
 
 处理：
 
 ```bash
-chmod +x scripts/*.sh
-chmod +x scripts/docker-*.sh
-docker build -t smartphoto-backend:<fix-tag> .
-SMARTPHOTO_IMAGE=smartphoto-backend:<fix-tag> docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps api worker
+sed -i 's#command: \\[\"\\./scripts/docker-migrate.sh\"\\]#command: [\"bash\", \"./scripts/docker-migrate.sh\"]#' docker-compose.prod.yml
+sed -i 's#command: \\[\"\\./scripts/docker-api.sh\"\\]#command: [\"bash\", \"./scripts/docker-api.sh\"]#' docker-compose.prod.yml
+sed -i 's#command: \\[\"\\./scripts/docker-worker.sh\"\\]#command: [\"bash\", \"./scripts/docker-worker.sh\"]#' docker-compose.prod.yml
+
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --force-recreate api worker
 ```
 
 ### 14.6 生产上传经边缘层返回 `524`

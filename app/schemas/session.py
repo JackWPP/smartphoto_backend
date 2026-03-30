@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -575,6 +576,9 @@ class AnalysisTriggerData(BaseModel):
 class AnalysisData(BaseModel):
     status: str = Field(description="当前 session 状态。")
     analysis_snapshot: dict[str, Any] = Field(description="图片分析结果快照。")
+    analysis_version: int = Field(description="分析结果版本号；仅在 analysis job 成功落库后递增。")
+    analysis_updated_at: datetime | None = Field(default=None, description="最近一次成功写入 analysis_snapshot 的时间。")
+    latest_analysis_job_id: str | None = Field(default=None, description="最近一次 analysis 任务 ID。")
 
 
 class SessionSnapshotData(BaseModel):
@@ -584,6 +588,8 @@ class SessionSnapshotData(BaseModel):
     selected_platform_ids: list[str] = Field(description="当前选中的平台列表。")
     active_platform_id: str | None = Field(default=None, description="当前生效平台。")
     analysis_snapshot: dict[str, Any] | None = Field(default=None, description="分析结果快照。")
+    analysis_version: int = Field(description="分析结果版本号。")
+    analysis_updated_at: datetime | None = Field(default=None, description="最近一次成功写入分析结果的时间。")
     parameter_snapshot: dict[str, Any] | None = Field(default=None, description="参数提取结果快照。")
     confirmed_copy: dict[str, Any] | None = Field(default=None, description="当前保存的 copy。")
     strategy_preview: dict[str, Any] | None = Field(default=None, description="当前保存的策略预览。")

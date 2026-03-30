@@ -32,13 +32,12 @@ from app.services.copy_normalization import (
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
-    build_detail_prompt_previews,
     detail_strategy_preview_input_hash,
     build_detail_reference_grids,
     build_detail_strategy_preview,
     compose_detail_panel_prompt,
 )
-from app.services.jobs import append_job_event, update_job_status
+from app.services.jobs import append_job_event, now_utc, update_job_status
 from app.services.locking import release_locks
 from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy, merge_parameter_snapshot_into_copy
 from app.services.prompts import compose_prompt
@@ -51,6 +50,7 @@ from app.services.strategy_overrides import serialize_prompt_preset, serialize_s
 from app.services.upstream import WhataiClient
 from app.services.user_accounts import create_job_completion_notification, refresh_session_search_cache, update_session_last_generated_at
 from app.services.white_bg import strengthen_white_bg_instruction, validate_white_background
+from app.services.prompt_safety import sanitize_generated_copy_fields
 
 COPY_TARGETS = {
     "headline",
@@ -150,9 +150,9 @@ def _session_prompt_overrides(db: Session, session_id: str) -> list[dict[str, An
     ]
 
 
-def _resolved_copy_for_session(db: Session, session: SessionModel) -> dict[str, Any]:
+def _resolved_copy_for_session(db: Session, session: SessionModel, *, include_parameter_snapshot: bool = True) -> dict[str, Any]:
     copy_data = normalize_copy_payload(session.confirmed_copy or {})
-    if session.parameter_snapshot:
+    if include_parameter_snapshot and session.parameter_snapshot:
         copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
     preset_id = copy_data.get("style_preset_id")
     if preset_id:
@@ -348,13 +348,20 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     session.analysis_snapshot = snapshot
     session.confirmed_copy = _apply_analysis_defaults_to_copy(session.confirmed_copy, snapshot)
     refresh_session_search_cache(session)
+    session.analysis_version = (session.analysis_version or 0) + 1
+    session.analysis_updated_at = now_utc()
 
     ensure_session_transition(session.status, "analyzed")
     session.status = "analyzed"
     session.current_step = max(session.current_step, 2)
     session.latest_analysis_job_id = job.id
 
-    result_payload = {"analysis_snapshot": snapshot}
+    result_payload = {
+        "analysis_snapshot": snapshot,
+        "analysis_version": session.analysis_version,
+        "analysis_updated_at": session.analysis_updated_at.isoformat() if session.analysis_updated_at else None,
+        "latest_analysis_job_id": session.latest_analysis_job_id,
+    }
     update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
     logger.info(
@@ -398,7 +405,7 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
         )
 
     snapshot = client.extract_parameters(
-        confirmed_copy=_resolved_copy_for_session(db, session),
+        confirmed_copy=_resolved_copy_for_session(db, session, include_parameter_snapshot=False),
         analysis_snapshot=session.analysis_snapshot or {},
         active_platform_id=session.active_platform_id,
         product_images=loaded_product_images,
@@ -450,7 +457,7 @@ def run_regenerate_copy_job(db: Session, job_id: str) -> None:
     update_job_status(db, job, status="running", progress=20, stage="rewriting")
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
-    generated_fields = client.regenerate_copy(copy_source, targets, instruction)
+    generated_fields = sanitize_generated_copy_fields(client.regenerate_copy(copy_source, targets, instruction))
 
     session.latest_copy_job_id = job.id
     session.current_step = max(session.current_step, 4)
@@ -462,7 +469,7 @@ def run_regenerate_copy_job(db: Session, job_id: str) -> None:
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
 
 
-def _prepare_assets_plan(job: JobModel, strategy_preview: dict, session: SessionModel) -> list[dict]:
+def _prepare_assets_plan(db: Session, job: JobModel, strategy_preview: dict, session: SessionModel) -> list[dict]:
     payload = job.input_payload or {}
 
     if job.job_type == "regenerate_asset":
@@ -653,7 +660,7 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
             round_no = session.generation_round + 1
 
         version_no = last_version + 1
-        plan = _prepare_assets_plan(job, effective_strategy_preview, session)
+        plan = _prepare_assets_plan(db, job, effective_strategy_preview, session)
         carry_forward_sources: list[AssetModel] = []
         if job.job_type == "regenerate_asset" and last_version > 0:
             parent_asset_id = payload.get("parent_asset_id")
@@ -676,14 +683,41 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                 if slot_id in regenerated_slot_ids:
                     continue
                 carry_forward_sources.append(asset)
+        elif job.job_type == "generate_gallery" and payload.get("slot_ids") and last_version > 0:
+            regenerated_slot_ids = {
+                str(item.get("slot_id") or item.get("role") or "").strip()
+                for item in plan
+                if isinstance(item, dict)
+            }
+            for asset in _version_assets(db, session.id, last_version, asset_family="main_gallery"):
+                slot_id = str(asset.slot_id or asset.asset_role or "").strip()
+                if slot_id in regenerated_slot_ids:
+                    continue
+                carry_forward_sources.append(asset)
 
-        rendered_assets = _render_assets_concurrently(
+        render_bundle = _render_assets_concurrently(
             confirmed_copy=_resolved_copy_for_session(db, session),
             strategy_preview=effective_strategy_preview,
             plan=plan,
             instruction=instruction,
             loaded_reference_images=loaded_reference_images,
         )
+        rendered_assets = list(render_bundle["rendered_assets"])
+        missing_slots = list(render_bundle["missing_slots"])
+        expected_slot_order = {
+            str(item.get("slot_id") or item.get("role") or "").strip(): int(item.get("display_order") or 0)
+            for item in plan
+            if str(item.get("slot_id") or item.get("role") or "").strip()
+        }
+        if carry_forward_sources:
+            for asset in carry_forward_sources:
+                slot_id = str(asset.slot_id or asset.asset_role or "").strip()
+                if slot_id and slot_id not in expected_slot_order:
+                    expected_slot_order[slot_id] = int(asset.display_order or 0)
+        expected_slot_ids = [slot_id for slot_id, _ in sorted(expected_slot_order.items(), key=lambda item: item[1])]
+
+        if not rendered_assets and not carry_forward_sources:
+            raise AppError("upstream_image_error", "no ready assets produced for current version", 502)
 
         total = max(len(rendered_assets) + len(carry_forward_sources), 1)
         created_assets: list[AssetModel] = []
@@ -743,6 +777,30 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                     "render_total_ms": (rendered.get("generation_snapshot") or {}).get("timing", {}).get("render_total_ms"),
                 },
             )
+            if (rendered.get("generation_snapshot") or {}).get("download_retry_count"):
+                append_job_event(
+                    db,
+                    job.id,
+                    "asset_download_retry",
+                    {
+                        "event": "asset_download_retry",
+                        "asset_id": asset.id,
+                        "slot_id": rendered.get("slot_id"),
+                        "retry_count": (rendered.get("generation_snapshot") or {}).get("download_retry_count"),
+                    },
+                )
+            if (rendered.get("generation_snapshot") or {}).get("download_rescued"):
+                append_job_event(
+                    db,
+                    job.id,
+                    "asset_download_rescued",
+                    {
+                        "event": "asset_download_rescued",
+                        "asset_id": asset.id,
+                        "slot_id": rendered.get("slot_id"),
+                        "reason": (rendered.get("generation_snapshot") or {}).get("download_rescue_reason"),
+                    },
+                )
 
         for source_asset in carry_forward_sources:
             asset = _clone_asset_for_version(
@@ -780,13 +838,55 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         update_session_last_generated_at(session)
         refresh_session_search_cache(session)
 
+        missing_slot_set = {str(item.get("slot_id") or "") for item in missing_slots if str(item.get("slot_id") or "")}
+        missing_slot_ids = [slot_id for slot_id in expected_slot_ids if slot_id in missing_slot_set]
         result_payload = {
             "asset_ids": [asset.id for asset in created_assets],
             "generation_round": session.generation_round,
             "version_no": version_no,
+            "expected_slot_ids": expected_slot_ids,
+            "missing_slot_ids": missing_slot_ids,
+            "expected_count": len(expected_slot_ids),
         }
-        update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
-        append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+        terminal_status = "partial_succeeded" if missing_slot_ids else "succeeded"
+        update_job_status(db, job, status=terminal_status, progress=100, stage="done", result_payload=result_payload)
+        if missing_slot_ids:
+            for missing in missing_slots:
+                append_job_event(
+                    db,
+                    job.id,
+                    "asset_missing",
+                    {
+                        "event": "asset_missing",
+                        "slot_id": missing.get("slot_id"),
+                        "display_order": missing.get("display_order"),
+                        "error": missing.get("error_message"),
+                        "retry_count": missing.get("retry_count"),
+                    },
+                )
+                append_job_event(
+                    db,
+                    job.id,
+                    "asset_download_failed",
+                    {
+                        "event": "asset_download_failed",
+                        "slot_id": missing.get("slot_id"),
+                        "display_order": missing.get("display_order"),
+                        "error": missing.get("error_message"),
+                    },
+                )
+            append_job_event(
+                db,
+                job.id,
+                "job_partial_succeeded",
+                {
+                    "event": "job_partial_succeeded",
+                    "job_id": job.id,
+                    "missing_slot_ids": missing_slot_ids,
+                },
+            )
+        else:
+            append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
         if session.user_id:
             create_job_completion_notification(
                 db,
@@ -900,12 +1000,17 @@ def _render_assets_concurrently(
     plan: list[dict[str, object]],
     instruction: str | None,
     loaded_reference_images: list,
-) -> list[dict[str, object]]:
+) -> dict[str, Any]:
     if not plan:
-        return []
+        return {"rendered_assets": [], "expected_slot_ids": [], "missing_slots": []}
 
     client = WhataiClient()
     settings = get_settings()
+    expected_slot_ids = [
+        str(plan_item.get("slot_id") or plan_item.get("role") or "").strip()
+        for plan_item in sorted(plan, key=lambda item: int(item.get("display_order") or 0))
+        if str(plan_item.get("slot_id") or plan_item.get("role") or "").strip()
+    ]
     render_specs = [
         _prepare_main_render_spec(
             confirmed_copy=confirmed_copy,
@@ -936,16 +1041,22 @@ def _render_assets_concurrently(
         results_by_submission=results_by_submission,
         max_workers=settings.main_generation_concurrency,
     )
-    return [
-        _finalize_main_rendered_asset(
-            client=client,
-            confirmed_copy=confirmed_copy,
-            strategy_preview=strategy_preview,
-            render_spec=render_spec,
-            instruction=instruction,
+    finalized: list[dict[str, object]] = []
+    for render_spec in rendered_specs["rendered_specs"]:
+        finalized.append(
+            _finalize_main_rendered_asset(
+                client=client,
+                confirmed_copy=confirmed_copy,
+                strategy_preview=strategy_preview,
+                render_spec=render_spec,
+                instruction=instruction,
+            )
         )
-        for render_spec in rendered_specs
-    ]
+    return {
+        "rendered_assets": finalized,
+        "expected_slot_ids": expected_slot_ids,
+        "missing_slots": rendered_specs["failed_specs"],
+    }
 
 
 def _prepare_main_render_spec(
@@ -1035,11 +1146,12 @@ def _materialize_render_specs(
     render_specs: list[dict[str, Any]],
     results_by_submission: dict[str, dict[str, Any]],
     max_workers: int,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     if not render_specs:
-        return []
+        return {"rendered_specs": [], "failed_specs": []}
 
     rendered: list[dict[str, Any]] = []
+    failed_specs: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(render_specs)))) as executor:
         future_map = {
             executor.submit(
@@ -1051,8 +1163,64 @@ def _materialize_render_specs(
             for render_spec in render_specs
         }
         for future in as_completed(future_map):
-            rendered.append(future.result())
-    return rendered
+            render_spec = future_map[future]
+            try:
+                rendered.append(future.result())
+            except AppError as exc:
+                failed_specs.append(
+                    {
+                        "render_spec": render_spec,
+                        "error_message": exc.message,
+                        "error_code": exc.error.code,
+                        "upstream_http_status": exc.http_status,
+                    }
+                )
+
+    rescued: list[dict[str, Any]] = []
+    remaining_failures: list[dict[str, Any]] = []
+    for failed_spec in failed_specs:
+        try:
+            rescued_spec = _rescue_failed_render_spec(
+                client=client,
+                render_spec=failed_spec["render_spec"],
+            )
+            rescued_spec["download_retry_count"] = 1
+            rescued_spec["download_rescued"] = True
+            rescued_spec["download_rescue_reason"] = failed_spec["error_message"]
+            rescued.append(rescued_spec)
+        except AppError as rescue_exc:
+            render_spec = failed_spec["render_spec"]
+            remaining_failures.append(
+                {
+                    "role": str(render_spec.get("role") or ""),
+                    "slot_id": str(render_spec.get("slot_id") or render_spec.get("role") or ""),
+                    "display_order": int(render_spec.get("display_order") or 0),
+                    "error_message": rescue_exc.message,
+                    "error_code": rescue_exc.error.code,
+                    "upstream_http_status": rescue_exc.http_status,
+                    "retry_count": 1,
+                }
+            )
+
+    rendered.extend(rescued)
+    return {"rendered_specs": rendered, "failed_specs": remaining_failures}
+
+
+def _rescue_failed_render_spec(
+    *,
+    client: WhataiClient,
+    render_spec: dict[str, Any],
+) -> dict[str, Any]:
+    resubmitted_spec = _submit_single_render_spec(client=client, render_spec=render_spec)
+    results_by_submission = client.poll_image_tasks(
+        [resubmitted_spec["submission"]],
+        "upstream_image_error",
+    )
+    return _download_single_render_spec(
+        client=client,
+        render_spec=resubmitted_spec,
+        result=results_by_submission.get(str(resubmitted_spec["submission_id"])),
+    )
 
 
 def _download_single_render_spec(
@@ -1070,8 +1238,107 @@ def _download_single_render_spec(
         **render_spec,
         "image_bytes": image_bytes,
         "timing": timing,
+        "download_retry_count": int(render_spec.get("download_retry_count") or 0),
+        "download_rescued": bool(render_spec.get("download_rescued") or False),
+        "download_rescue_reason": render_spec.get("download_rescue_reason"),
     }
 
+
+def _apply_main_gallery_post_validations(
+    *,
+    client: WhataiClient,
+    confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, object],
+    plan_item: dict[str, Any],
+    role: str,
+    slot_id: str,
+    display_order: int,
+    instruction: str | None,
+    prompt_payload: dict[str, Any],
+    image_bytes: bytes,
+    image_size: str,
+    aspect_ratio: str,
+    reference_images: list,
+) -> tuple[dict[str, Any], bytes, dict[str, Any] | None, dict[str, Any] | None]:
+    current_prompt_payload = prompt_payload
+    current_image_bytes = image_bytes
+    white_bg_validation = None
+
+    if bool(plan_item.get("requires_white_bg_validation")) and getattr(getattr(client, "settings", None), "whatai_api_key", ""):
+        passed, diagnostics = validate_white_background(current_image_bytes)
+        white_bg_validation = diagnostics
+        if not passed:
+            retry_instruction = _merge_instructions(instruction, strengthen_white_bg_instruction())
+            retry_prompt_payload = compose_prompt(
+                confirmed_copy=confirmed_copy,
+                strategy_preview=strategy_preview,
+                asset_role=role,
+                instruction=retry_instruction,
+                plan_item=plan_item,
+            )
+            current_image_bytes = _generate_image_with_asset_retry(
+                client=client,
+                prompt=retry_prompt_payload["final_prompt"],
+                image_size=image_size,
+                aspect_ratio=aspect_ratio,
+                reference_images=reference_images,
+                role=role,
+                display_order=display_order,
+            )
+            passed, diagnostics = validate_white_background(current_image_bytes)
+            diagnostics["retry_applied"] = True
+            white_bg_validation = diagnostics
+            current_prompt_payload = retry_prompt_payload
+            if not passed:
+                diagnostics["soft_failed"] = True
+                logger.warning(
+                    "white background validation soft-failed after retry: role=%s slot_id=%s diagnostics=%s",
+                    role,
+                    slot_id,
+                    diagnostics,
+                )
+
+    return current_prompt_payload, current_image_bytes, white_bg_validation, None
+
+
+def _inspect_visible_text_language(
+    *,
+    client: WhataiClient,
+    image_bytes: bytes,
+    platform_id: str,
+    allowed_tokens: list[str],
+) -> dict[str, Any] | None:
+    validator = getattr(client, "inspect_visible_text_language", None)
+    if not callable(validator):
+        return None
+    try:
+        return validator(
+            image_bytes=image_bytes,
+            platform_id=platform_id,
+            allowed_abbreviations=allowed_tokens,
+        )
+    except AppError as exc:
+        logger.warning(
+            "visible text language validation skipped after upstream error: platform_id=%s error=%s",
+            platform_id,
+            exc.message,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "visible text language validation skipped after unexpected error: platform_id=%s error=%s",
+            platform_id,
+            exc,
+        )
+    return {
+        "status": "unknown",
+        "passed": True,
+        "has_readable_text": False,
+        "detected_text_lines": [],
+        "latin_tokens": [],
+        "disallowed_latin_tokens": [],
+        "allowed_latin_tokens": allowed_tokens,
+        "reason": "validator_error",
+    }
 
 def _finalize_main_rendered_asset(
     *,
@@ -1083,48 +1350,30 @@ def _finalize_main_rendered_asset(
 ) -> dict[str, object]:
     prompt_payload = render_spec["prompt_payload"]
     image_bytes = render_spec["image_bytes"]
-    validation_result = None
     plan_item = render_spec["plan_item"]
     reference_images = render_spec["reference_images"]
-
-    if bool(plan_item.get("requires_white_bg_validation")) and client.settings.whatai_api_key:
-        passed, diagnostics = validate_white_background(image_bytes)
-        validation_result = diagnostics
-        if not passed:
-            retry_instruction = _merge_instructions(instruction, strengthen_white_bg_instruction())
-            retry_prompt_payload = compose_prompt(
-                confirmed_copy=confirmed_copy,
-                strategy_preview=strategy_preview,
-                asset_role=render_spec["role"],
-                instruction=retry_instruction,
-                plan_item=plan_item,
-            )
-            image_bytes = _generate_image_with_asset_retry(
-                client=client,
-                prompt=retry_prompt_payload["final_prompt"],
-                image_size=render_spec["image_size"],
-                aspect_ratio=render_spec["aspect_ratio"],
-                reference_images=reference_images,
-                role=render_spec["role"],
-                display_order=render_spec["display_order"],
-            )
-            passed, diagnostics = validate_white_background(image_bytes)
-            diagnostics["retry_applied"] = True
-            validation_result = diagnostics
-            prompt_payload = retry_prompt_payload
-            if not passed:
-                diagnostics["soft_failed"] = True
-                logger.warning(
-                    "white background validation soft-failed after retry: role=%s slot_id=%s diagnostics=%s",
-                    render_spec["role"],
-                    render_spec["slot_id"],
-                    diagnostics,
-                )
+    prompt_payload, image_bytes, white_bg_validation, language_validation = _apply_main_gallery_post_validations(
+        client=client,
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        plan_item=plan_item,
+        role=render_spec["role"],
+        slot_id=render_spec["slot_id"],
+        display_order=render_spec["display_order"],
+        instruction=instruction,
+        prompt_payload=prompt_payload,
+        image_bytes=image_bytes,
+        image_size=render_spec["image_size"],
+        aspect_ratio=render_spec["aspect_ratio"],
+        reference_images=reference_images,
+    )
 
     generation_snapshot = {
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
+        "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
         "style_preset_id": confirmed_copy.get("style_preset_id"),
@@ -1137,7 +1386,8 @@ def _finalize_main_rendered_asset(
         "aspect_ratio": render_spec["aspect_ratio"],
         "size": render_spec["image_size"],
         "planner_source": prompt_payload.get("planner_source"),
-        "white_bg_validation": validation_result,
+        "white_bg_validation": white_bg_validation,
+        "language_validation": language_validation,
         "slot_id": render_spec["slot_id"],
         "expression_mode": prompt_payload.get("expression_mode") or plan_item.get("expression_mode"),
         "rule_pack_id": plan_item.get("platform_rule_pack"),
@@ -1145,6 +1395,9 @@ def _finalize_main_rendered_asset(
         "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
         "platform_overlay": prompt_payload.get("platform_overlay"),
         "timing": dict(render_spec.get("timing") or {}),
+        "download_retry_count": int(render_spec.get("download_retry_count") or 0),
+        "download_rescued": bool(render_spec.get("download_rescued") or False),
+        "download_rescue_reason": render_spec.get("download_rescue_reason"),
     }
     return {
         "role": render_spec["role"],
@@ -1192,46 +1445,28 @@ def _render_single_asset(
         role=role,
         display_order=display_order,
     )
-
-    validation_result = None
-    if bool(plan_item.get("requires_white_bg_validation")) and client.settings.whatai_api_key:
-        passed, diagnostics = validate_white_background(image_bytes)
-        validation_result = diagnostics
-        if not passed:
-            retry_instruction = _merge_instructions(instruction, strengthen_white_bg_instruction())
-            retry_prompt_payload = compose_prompt(
-                confirmed_copy=confirmed_copy,
-                strategy_preview=strategy_preview,
-                asset_role=role,
-                instruction=retry_instruction,
-                plan_item=plan_item,
-            )
-            image_bytes = _generate_image_with_asset_retry(
-                client=client,
-                prompt=retry_prompt_payload["final_prompt"],
-                image_size=image_size,
-                aspect_ratio=aspect_ratio,
-                reference_images=reference_images,
-                role=role,
-                display_order=display_order,
-            )
-            passed, diagnostics = validate_white_background(image_bytes)
-            diagnostics["retry_applied"] = True
-            validation_result = diagnostics
-            prompt_payload = retry_prompt_payload
-            if not passed:
-                diagnostics["soft_failed"] = True
-                logger.warning(
-                    "white background validation soft-failed after retry: role=%s slot_id=%s diagnostics=%s",
-                    role,
-                    slot_id,
-                    diagnostics,
-                )
+    prompt_payload, image_bytes, white_bg_validation, language_validation = _apply_main_gallery_post_validations(
+        client=client,
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        plan_item=plan_item,
+        role=role,
+        slot_id=slot_id,
+        display_order=display_order,
+        instruction=instruction,
+        prompt_payload=prompt_payload,
+        image_bytes=image_bytes,
+        image_size=image_size,
+        aspect_ratio=aspect_ratio,
+        reference_images=reference_images,
+    )
 
     generation_snapshot = {
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
+        "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
         "style_preset_id": confirmed_copy.get("style_preset_id"),
@@ -1244,7 +1479,8 @@ def _render_single_asset(
         "aspect_ratio": aspect_ratio,
         "size": image_size,
         "planner_source": prompt_payload.get("planner_source"),
-        "white_bg_validation": validation_result,
+        "white_bg_validation": white_bg_validation,
+        "language_validation": language_validation,
         "slot_id": slot_id,
         "expression_mode": prompt_payload.get("expression_mode") or plan_item.get("expression_mode"),
         "rule_pack_id": plan_item.get("platform_rule_pack"),
@@ -1252,6 +1488,9 @@ def _render_single_asset(
         "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
         "platform_overlay": prompt_payload.get("platform_overlay"),
         "timing": {"render_total_ms": int((time.perf_counter() - started_at) * 1000)},
+        "download_retry_count": 0,
+        "download_rescued": False,
+        "download_rescue_reason": None,
     }
     return {
         "role": role,
@@ -1833,7 +2072,14 @@ def _render_detail_panels_concurrently(
         results_by_submission=results_by_submission,
         max_workers=settings.detail_generation_concurrency,
     )
-    return [_finalize_detail_rendered_panel(render_spec, strategy_preview) for render_spec in rendered_specs]
+    if rendered_specs["failed_specs"]:
+        first_failure = rendered_specs["failed_specs"][0]
+        raise AppError(
+            "upstream_image_error",
+            str(first_failure.get("error_message") or "detail panel download failed"),
+            int(first_failure.get("upstream_http_status") or 502),
+        )
+    return [_finalize_detail_rendered_panel(render_spec, strategy_preview) for render_spec in rendered_specs["rendered_specs"]]
 
 
 def _prepare_detail_render_spec(
@@ -1901,6 +2147,8 @@ def _finalize_detail_rendered_panel(
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
+        "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
         "style_preset_id": confirmed_copy.get("style_preset_id"),
@@ -2019,6 +2267,8 @@ def _render_single_detail_panel(
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
+        "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
         "style_preset_id": confirmed_copy.get("style_preset_id"),

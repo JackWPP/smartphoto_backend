@@ -47,6 +47,7 @@ def simplified_chinese_visible_copy_constraints() -> list[str]:
     return [
         "图上可见文字必须为简体中文短句；只允许阿拉伯数字、必要计量单位，以及用户已提供的型号/缩写。",
         "不要出现英文标题、英文副文案或自由英文营销词。",
+        "如果没有足够好的中文短句，宁可少字，也不要硬塞英文 slogan 或英文卖点。",
     ]
 
 
@@ -55,6 +56,19 @@ def strengthen_simplified_chinese_visible_copy_instruction(allowed_tokens: list[
     base = (
         "图上所有可见文字必须全部改为简体中文短句，只允许阿拉伯数字、必要计量单位，"
         "以及用户已明确提供的型号或缩写；绝对不要出现英文标题、英文副文案或自由英文营销文案。"
+        "如果中文短句不够稳，宁可减少文字密度，也不要硬塞英文。"
+    )
+    if not allowed:
+        return base
+    return f"{base} 当前允许保留的型号/缩写仅限：{'、'.join(allowed[:12])}。"
+
+
+def minimize_simplified_chinese_visible_copy_instruction(allowed_tokens: list[str] | None = None) -> str:
+    allowed = normalize_visible_text_allowlist(allowed_tokens)
+    base = (
+        "当前图上可见文字请进一步收口为极少量简体中文短句。"
+        "除阿拉伯数字、必要计量单位和用户已明确提供的型号/缩写外，尽量不要再放其他文字。"
+        "若中文文案仍不稳定，优先只保留必要参数或型号，必要时直接无字，不要出现英文营销词。"
     )
     if not allowed:
         return base
@@ -63,25 +77,20 @@ def strengthen_simplified_chinese_visible_copy_instruction(allowed_tokens: list[
 
 def build_visible_text_allowlist(confirmed_copy: dict[str, Any] | None) -> list[str]:
     normalized = normalize_copy_payload(confirmed_copy or {})
-    raw_candidates: list[Any] = [
-        normalized.get("product_name"),
-        normalized.get("headline"),
-        normalized.get("hero_scene"),
-        normalized.get("selling_points"),
-        normalized.get("usage_scenes"),
-        normalized.get("specs"),
-        *normalized.get("core_selling_points", []),
-        *normalized.get("product_advantages", []),
-        *key_parameter_strings(normalized.get("key_parameters")),
+    raw_candidates: list[tuple[str, Any]] = [
+        ("product_name", normalized.get("product_name")),
+        *[("core_selling_points", item) for item in normalized.get("core_selling_points", [])],
+        *[("product_advantages", item) for item in normalized.get("product_advantages", [])],
+        *[("key_parameters", item) for item in key_parameter_strings(normalized.get("key_parameters"))],
     ]
     allowlist: list[str] = []
     seen: set[str] = set()
-    for value in raw_candidates:
+    for source, value in raw_candidates:
         text = repair_broken_text(value)
         if not text:
             continue
         for token in extract_latin_tokens(text):
-            if not _looks_like_explicit_allowlist_token(token):
+            if not _looks_like_explicit_allowlist_token(token, source=source, source_text=text):
                 continue
             canonical = canonical_visible_text_token(token)
             if not canonical or canonical in seen:
@@ -137,7 +146,12 @@ def canonical_visible_text_token(token: str | None) -> str:
     return cleaned.lower()
 
 
-def _looks_like_explicit_allowlist_token(token: str) -> bool:
+def _looks_like_explicit_allowlist_token(
+    token: str,
+    *,
+    source: str | None = None,
+    source_text: str | None = None,
+) -> bool:
     canonical = canonical_visible_text_token(token)
     if not canonical:
         return False
@@ -145,10 +159,22 @@ def _looks_like_explicit_allowlist_token(token: str) -> bool:
         return True
     if any(char.isdigit() for char in canonical):
         return True
+    if source in {"core_selling_points", "product_advantages"} and not _supports_freeform_copy_allowlist(token, source_text):
+        return False
     letters_only = re.sub(r"[^A-Za-z]", "", token)
     if len(letters_only) < 2 or len(letters_only) > 16:
         return False
     return token.upper() == token
+
+
+def _supports_freeform_copy_allowlist(token: str, source_text: str | None) -> bool:
+    letters_only = re.sub(r"[^A-Za-z]", "", token)
+    if not letters_only:
+        return False
+    text = repair_broken_text(source_text)
+    has_cjk_context = bool(re.search(r"[\u4e00-\u9fff]", text))
+    has_symbol = any(char in token for char in "-/+.")  # e.g. USB-C / m3/h
+    return has_symbol or (len(letters_only) <= 4 and has_cjk_context)
 
 
 def _is_allowed_non_chinese_token(canonical: str, allowed_tokens: set[str]) -> bool:
@@ -157,7 +183,5 @@ def _is_allowed_non_chinese_token(canonical: str, allowed_tokens: set[str]) -> b
     if canonical in COMMON_ALLOWED_UNIT_TOKENS:
         return True
     if canonical in allowed_tokens:
-        return True
-    if any(char.isdigit() for char in canonical):
         return True
     return False
