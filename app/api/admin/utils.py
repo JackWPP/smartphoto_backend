@@ -72,6 +72,25 @@ def serialize_asset(asset: AssetModel) -> dict[str, Any]:
     }
 
 
+def serialize_quality_feedback_case(item) -> dict[str, Any]:
+    return {
+        "feedback_case_id": item.id,
+        "service_id": item.service_id,
+        "session_id": item.session_id,
+        "asset_id": item.asset_id,
+        "job_id": item.job_id,
+        "asset_family": item.asset_family,
+        "version_no": int(item.version_no or 0),
+        "slot_id": item.slot_id,
+        "issue_codes": [str(code).strip() for code in (item.issue_codes or []) if str(code).strip()],
+        "severity": item.severity,
+        "operator_note": item.operator_note,
+        "resolution_status": item.resolution_status,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
 def serialize_session(session: SessionModel) -> dict[str, Any]:
     return {
         "session_id": session.id,

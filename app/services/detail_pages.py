@@ -29,6 +29,7 @@ from app.services.prompt_safety import (
     sanitize_surface_list,
     sanitize_surface_text,
 )
+from app.services.quality_signals import build_truth_contract
 from app.services.reference_images import LoadedReferenceImage, build_reference_manifest, load_reference_images
 from app.services.rule_packs import DETAIL_RULE_PACK_ID, load_published_rule_pack_config
 from app.services.strategy_overrides import resolve_session_overrides
@@ -452,6 +453,7 @@ def compose_detail_panel_prompt(
     visual_truth_mode = str(plan.get("visual_truth_mode") or _default_visual_truth_mode(panel_type)).strip()
     origin_note = str(plan.get("origin_note") or "").strip()
     truth_constraint = _visual_truth_constraint(visual_truth_mode, origin_note)
+    truth_contract = plan.get("truth_contract") if isinstance(plan.get("truth_contract"), dict) else {}
     display_module_title = str(plan.get("display_module_title") or _detail_display_module_title(panel_type, str(plan.get("slot_id") or panel_id))).strip()
     display_module_kind = str(plan.get("display_module_kind") or _detail_display_module_kind(panel_type)).strip()
     display_module_intent = str(
@@ -492,6 +494,7 @@ def compose_detail_panel_prompt(
         "不要出现内部规划标签、模板标记、分类代号或带包装的说明词。",
         "不要出现水印、UI 截图、重复主体、无关道具或无关产品。",
         truth_constraint,
+        _detail_truth_contract_text(truth_contract),
         *prompt_matrix_guardrails(),
     ]
     if copy_language == "zh":
@@ -570,6 +573,8 @@ def compose_detail_panel_prompt(
         "rule_modules_used": rule_modules_used,
         "platform_overlay": platform_overlay,
         "copy_language": copy_language,
+        "risk_flags": [str(item) for item in plan.get("risk_flags", []) if str(item).strip()],
+        "truth_contract": truth_contract,
         "copy_safety_notes": copy_safety_notes,
         "sanitized_fields": sanitized_fields,
         "final_prompt": final_prompt,
@@ -706,6 +711,14 @@ def _build_default_panel_plan(
         )
         copy_lines = _copy_lines_from_detail_blocks(copy_blocks) or copy_lines
         narrative_section = DETAIL_STORY_SECTIONS[min(default_order - 1, len(DETAIL_STORY_SECTIONS) - 1)]
+        panel_goal = copy_lines[0] if copy_lines else product_name
+        truth_contract = build_truth_contract(
+            slot_id=spec["slot_id"],
+            analysis_snapshot=analysis_snapshot,
+            copy_focus=panel_goal,
+            focus_selling_point=panel_goal,
+            product_name=product_name,
+        )
         panel_plan.append(
             {
                 "slot_id": spec["slot_id"],
@@ -720,17 +733,19 @@ def _build_default_panel_plan(
                 "display_module_kind": _detail_display_module_kind(panel_type),
                 "display_module_intent": _detail_display_module_intent(
                     panel_type=panel_type,
-                    panel_goal=copy_lines[0] if copy_lines else product_name,
-                    copy_focus=copy_lines[0] if copy_lines else product_name,
+                    panel_goal=panel_goal,
+                    copy_focus=panel_goal,
                     panel_type_reason=panel_type_reason,
                 ),
                 "display_order": display_order,
                 "narrative_section": narrative_section,
-                "panel_goal": copy_lines[0] if copy_lines else product_name,
-                "copy_focus": copy_lines[0] if copy_lines else product_name,
+                "panel_goal": panel_goal,
+                "copy_focus": panel_goal,
                 "panel_type": panel_type,
                 "visual_truth_mode": _default_visual_truth_mode(panel_type),
                 "origin_note": "",
+                "risk_flags": [str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()],
+                "truth_contract": truth_contract,
                 "panel_type_label": panel_meta["panel_type_label"],
                 "panel_type_reason": panel_type_reason,
                 "candidate_panel_types": list(spec["candidate_panel_types"]),
@@ -832,6 +847,18 @@ def _merge_panel_plan(
             display_module_kind=merged_item["display_module_kind"],
             narrative_section=str(merged_item.get("narrative_section") or ""),
             visual_truth_mode=str(merged_item.get("visual_truth_mode") or ""),
+        )
+        merged_item["truth_contract"] = build_truth_contract(
+            slot_id=str(merged_item.get("slot_id") or item.get("slot_id") or ""),
+            analysis_snapshot={
+                "reference_summary": {},
+                "risk_flags": merged_item.get("risk_flags") or item.get("risk_flags") or [],
+                "selling_point_entities": [],
+                "evidence_scores": {},
+            },
+            copy_focus=str(merged_item.get("copy_focus") or ""),
+            focus_selling_point=str(merged_item.get("panel_goal") or ""),
+            product_name=confirmed_copy.get("product_name"),
         )
         merged_item["planner_source"] = "llm"
         merged.append(merged_item)
@@ -966,6 +993,25 @@ def _visual_truth_constraint(visual_truth_mode: str, origin_note: str) -> str:
     if origin_note:
         return f"{base} 审校备注：{sanitize_surface_text(origin_note)}"
     return base
+
+
+def _detail_truth_contract_text(truth_contract: dict[str, Any]) -> str:
+    if not isinstance(truth_contract, dict):
+        return ""
+    clauses: list[str] = []
+    immutable = [sanitize_surface_text(item) for item in truth_contract.get("immutable_features", []) if sanitize_surface_text(item)]
+    forbidden = [sanitize_surface_text(item) for item in truth_contract.get("forbidden_drift", []) if sanitize_surface_text(item)]
+    if immutable:
+        clauses.append("主体不可漂移：" + "；".join(immutable[:3]))
+    if forbidden:
+        clauses.append("关键结构不可换位：" + "；".join(forbidden[:3]))
+    if sanitize_surface_text(truth_contract.get("scale_anchor")):
+        clauses.append("比例与厚薄关系按参考图：" + sanitize_surface_text(truth_contract.get("scale_anchor")))
+    if not truth_contract.get("allow_structure_extrapolation", True):
+        clauses.append("证据不足时宁可保守，不补虚构结构。")
+    if sanitize_surface_text(truth_contract.get("scene_grounding_rule")):
+        clauses.append(sanitize_surface_text(truth_contract.get("scene_grounding_rule")))
+    return " ".join(clauses[:4])
 
 
 def _build_text_block(copy_lines: list[str], copy_blocks: dict[str, Any]) -> str:

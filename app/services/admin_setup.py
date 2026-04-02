@@ -8,12 +8,13 @@ from app.admin_db.base import AdminBase
 from app.admin_models.admin_audit_log import AdminAuditLogModel
 from app.admin_models.admin_refresh_token import AdminRefreshTokenModel
 from app.admin_models.admin_user import AdminUserModel
+from app.admin_models.quality_feedback_case import QualityFeedbackCaseModel
 from app.core.admin_auth import hash_password
 from app.core.config import get_settings
 
 
 def init_admin_schema() -> None:
-    _ = (AdminAuditLogModel, AdminRefreshTokenModel, AdminUserModel)
+    _ = (AdminAuditLogModel, AdminRefreshTokenModel, AdminUserModel, QualityFeedbackCaseModel)
     AdminBase.metadata.create_all(bind=admin_db_session.admin_engine, checkfirst=True)
     _reconcile_admin_audit_schema()
 

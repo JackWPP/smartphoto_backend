@@ -6,19 +6,30 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.admin_db.session import get_admin_db
-from app.api.admin.utils import paginate, serialize_asset
+from app.api.admin.utils import paginate, serialize_asset, serialize_quality_feedback_case
 from app.api.v2.assets import regenerate_asset as public_regenerate_asset
+from app.admin_models.quality_feedback_case import QualityFeedbackCaseModel
 from app.core.admin_deps import get_current_admin_user
+from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
 from app.models.asset import AssetModel
-from app.schemas.admin import AdminAssetArchiveRequest, AdminAssetListData, AdminAssetRegenerateRequest
+from app.schemas.admin import (
+    AdminAssetArchiveRequest,
+    AdminAssetListData,
+    AdminAssetRegenerateRequest,
+    AdminQualityFeedbackCreateRequest,
+    AdminQualityFeedbackListData,
+)
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.schemas.session import AssetRegenerateRequest
 from app.services.admin_audit import append_admin_audit_log, request_id_from_request
+from app.services.quality_signals import FIDELITY_ISSUE_TAXONOMY
 from app.services.repo import get_asset_or_404, get_session_or_404
 
 router = APIRouter(prefix="/assets", tags=["admin-assets"])
+VALID_QUALITY_SEVERITIES = {"low", "medium", "high", "critical"}
+VALID_RESOLUTION_STATUSES = {"open", "triaged", "resolved", "wont_fix"}
 
 
 @router.get("", response_model=APIResponse[AdminAssetListData], operation_id="adminListAssets", responses={**OPENAPI_ERROR_RESPONSES})
@@ -165,3 +176,76 @@ def regenerate_asset(
     )
     admin_db.commit()
     return response
+
+
+@router.get("/{asset_id}/quality-feedback", response_model=APIResponse[AdminQualityFeedbackListData], operation_id="adminListAssetQualityFeedback", responses={**OPENAPI_ERROR_RESPONSES})
+def list_asset_quality_feedback(
+    asset_id: str,
+    admin_db: Session = Depends(get_admin_db),
+    _admin_user=Depends(get_current_admin_user),
+) -> dict:
+    items = (
+        admin_db.query(QualityFeedbackCaseModel)
+        .filter(QualityFeedbackCaseModel.asset_id == asset_id)
+        .order_by(QualityFeedbackCaseModel.created_at.desc())
+        .all()
+    )
+    return success_response({"items": [serialize_quality_feedback_case(item) for item in items]})
+
+
+@router.post("/{asset_id}/quality-feedback", response_model=APIResponse[AdminQualityFeedbackListData], operation_id="adminCreateAssetQualityFeedback", responses={**OPENAPI_ERROR_RESPONSES})
+def create_asset_quality_feedback(
+    asset_id: str,
+    req: AdminQualityFeedbackCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin_db: Session = Depends(get_admin_db),
+    admin_user=Depends(get_current_admin_user),
+) -> dict:
+    asset = get_asset_or_404(db, asset_id)
+    issue_codes = [str(code).strip() for code in req.issue_codes if str(code).strip()]
+    invalid_codes = [code for code in issue_codes if code not in FIDELITY_ISSUE_TAXONOMY]
+    if invalid_codes:
+        raise AppError("invalid_request", f"invalid issue_codes: {','.join(invalid_codes)}", 400)
+    severity = str(req.severity or "medium").strip().lower()
+    if severity not in VALID_QUALITY_SEVERITIES:
+        raise AppError("invalid_request", "invalid severity", 400)
+    resolution_status = str(req.resolution_status or "open").strip().lower()
+    if resolution_status not in VALID_RESOLUTION_STATUSES:
+        raise AppError("invalid_request", "invalid resolution_status", 400)
+    record = QualityFeedbackCaseModel(
+        service_id=get_session_or_404(db, asset.session_id).service_id,
+        session_id=asset.session_id,
+        asset_id=asset.id,
+        job_id=asset.job_id,
+        asset_family=asset.asset_family,
+        version_no=int(asset.version_no or 0),
+        slot_id=asset.slot_id or asset.asset_role,
+        issue_codes=issue_codes,
+        severity=severity,
+        operator_note=req.operator_note,
+        resolution_status=resolution_status,
+    )
+    admin_db.add(record)
+    admin_db.flush()
+    append_admin_audit_log(
+        admin_db,
+        admin_user_id=admin_user.id,
+        action="asset.quality_feedback.create",
+        module="assets",
+        risk_level="medium",
+        operator_note=req.operator_note,
+        target_type="asset",
+        target_id=asset.id,
+        before_snapshot=None,
+        after_snapshot=serialize_quality_feedback_case(record),
+        request_id=request_id_from_request(request),
+    )
+    admin_db.commit()
+    items = (
+        admin_db.query(QualityFeedbackCaseModel)
+        .filter(QualityFeedbackCaseModel.asset_id == asset.id)
+        .order_by(QualityFeedbackCaseModel.created_at.desc())
+        .all()
+    )
+    return success_response({"items": [serialize_quality_feedback_case(item) for item in items]})

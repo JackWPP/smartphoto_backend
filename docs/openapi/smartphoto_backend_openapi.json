@@ -15077,6 +15077,322 @@
         }
       }
     },
+    "/api/admin/v1/assets/{asset_id}/quality-feedback": {
+      "get": {
+        "tags": [
+          "admin-assets"
+        ],
+        "summary": "List Asset Quality Feedback",
+        "operationId": "adminListAssetQualityFeedback",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_AdminQualityFeedbackListData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin-assets"
+        ],
+        "summary": "Create Asset Quality Feedback",
+        "operationId": "adminCreateAssetQualityFeedback",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminQualityFeedbackCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_AdminQualityFeedbackListData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/v1/prompt-presets": {
       "get": {
         "tags": [
@@ -19319,6 +19635,37 @@
         ],
         "title": "APIResponse[AdminPromptPresetListData]"
       },
+      "APIResponse_AdminQualityFeedbackListData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/AdminQualityFeedbackListData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[AdminQualityFeedbackListData]"
+      },
       "APIResponse_AdminRulePackDetailData_": {
         "properties": {
           "code": {
@@ -22910,6 +23257,163 @@
         "type": "object",
         "title": "AdminPromptPresetUpdateRequest"
       },
+      "AdminQualityFeedbackCreateRequest": {
+        "properties": {
+          "issue_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Issue Codes"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity",
+            "default": "medium"
+          },
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note"
+          },
+          "resolution_status": {
+            "type": "string",
+            "title": "Resolution Status",
+            "default": "open"
+          }
+        },
+        "type": "object",
+        "title": "AdminQualityFeedbackCreateRequest"
+      },
+      "AdminQualityFeedbackItem": {
+        "properties": {
+          "feedback_case_id": {
+            "type": "string",
+            "title": "Feedback Case Id"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "asset_id": {
+            "type": "string",
+            "title": "Asset Id"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "asset_family": {
+            "type": "string",
+            "title": "Asset Family"
+          },
+          "version_no": {
+            "type": "integer",
+            "title": "Version No"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id"
+          },
+          "issue_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Issue Codes"
+          },
+          "severity": {
+            "type": "string",
+            "title": "Severity"
+          },
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note"
+          },
+          "resolution_status": {
+            "type": "string",
+            "title": "Resolution Status"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "feedback_case_id",
+          "service_id",
+          "session_id",
+          "asset_id",
+          "asset_family",
+          "version_no",
+          "severity",
+          "resolution_status"
+        ],
+        "title": "AdminQualityFeedbackItem"
+      },
+      "AdminQualityFeedbackListData": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminQualityFeedbackItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "AdminQualityFeedbackListData"
+      },
       "AdminRulePackDetailData": {
         "properties": {
           "rule_pack": {
@@ -23790,6 +24294,36 @@
             "type": "integer",
             "title": "Version No",
             "description": "结果版本号。"
+          },
+          "carry_forward": {
+            "type": "boolean",
+            "title": "Carry Forward",
+            "description": "该图是否为从旧版本沿用而来。",
+            "default": false
+          },
+          "source_version_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version No",
+            "description": "若为沿用图，来源版本号。"
+          },
+          "fidelity_validation_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fidelity Validation Status",
+            "description": "保真校验状态。"
           }
         },
         "type": "object",
@@ -24404,6 +24938,50 @@
             "title": "Panel Label",
             "description": "panel 中文名。"
           },
+          "display_tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Display Tags",
+            "description": "用户侧可直接展示的模块标签。"
+          },
+          "display_module_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Module Title",
+            "description": "用户侧可直接展示的模块标题。"
+          },
+          "display_module_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Module Kind",
+            "description": "用户侧模块类型说明。"
+          },
+          "display_module_intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Module Intent",
+            "description": "用户侧模块目标说明。"
+          },
           "narrative_section": {
             "anyOf": [
               {
@@ -24529,6 +25107,36 @@
             "type": "integer",
             "title": "Version No",
             "description": "结果版本号。"
+          },
+          "carry_forward": {
+            "type": "boolean",
+            "title": "Carry Forward",
+            "description": "该 panel 是否为从旧版本沿用而来。",
+            "default": false
+          },
+          "source_version_no": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version No",
+            "description": "若为沿用 panel，来源版本号。"
+          },
+          "fidelity_validation_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fidelity Validation Status",
+            "description": "保真校验状态。"
           }
         },
         "type": "object",
@@ -24663,6 +25271,18 @@
             "title": "Detail Story Brief",
             "description": "详情页 8 段叙事摘要。"
           },
+          "detail_policy_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Policy Version",
+            "description": "详情页语义分层策略版本。"
+          },
           "prompts": {
             "items": {
               "$ref": "#/components/schemas/DetailPromptPreviewItem"
@@ -24718,6 +25338,50 @@
             "type": "string",
             "title": "Panel Label",
             "description": "panel 中文名。"
+          },
+          "display_tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Display Tags",
+            "description": "用户侧可直接展示的模块标签。"
+          },
+          "display_module_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Module Title",
+            "description": "用户侧可直接展示的模块标题。"
+          },
+          "display_module_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Module Kind",
+            "description": "用户侧模块类型说明。"
+          },
+          "display_module_intent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Module Intent",
+            "description": "用户侧模块目标说明。"
           },
           "narrative_section": {
             "anyOf": [
@@ -24920,6 +25584,31 @@
             "type": "array",
             "title": "Rule Modules Used",
             "description": "详情页规则模块列表。"
+          },
+          "platform_overlay": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform Overlay",
+            "description": "详情页平台 overlay 元数据。"
+          },
+          "copy_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Language",
+            "description": "当前详情页 panel 的图上文案语言策略。"
           }
         },
         "type": "object",
@@ -25087,9 +25776,37 @@
             "title": "Aspect Ratio",
             "description": "固定为 21:9。"
           },
+          "detail_policy_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Policy Version",
+            "description": "详情页语义分层策略版本。"
+          },
           "summary": {
             "$ref": "#/components/schemas/DetailResultsSummary",
             "description": "当前版本统计信息。"
+          },
+          "expected_panel_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Expected Panel Ids",
+            "description": "当前版本理论应覆盖的详情页 panel 槽位 ID 列表。"
+          },
+          "missing_panel_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Panel Ids",
+            "description": "当前版本仍缺失的详情页 panel 槽位 ID 列表。"
           },
           "panels": {
             "items": {
@@ -25123,6 +25840,8 @@
           "use_case",
           "aspect_ratio",
           "summary",
+          "expected_panel_ids",
+          "missing_panel_ids",
           "panels"
         ],
         "title": "DetailResultsData"
@@ -25143,13 +25862,19 @@
             "type": "integer",
             "title": "Panel Count",
             "description": "panel 资产数。"
+          },
+          "expected_panel_count": {
+            "type": "integer",
+            "title": "Expected Panel Count",
+            "description": "当前版本理论应有的详情页 panel 数。"
           }
         },
         "type": "object",
         "required": [
           "total_count",
           "ready_count",
-          "panel_count"
+          "panel_count",
+          "expected_panel_count"
         ],
         "title": "DetailResultsSummary"
       },
@@ -27174,6 +27899,22 @@
             "$ref": "#/components/schemas/ResultsSummary",
             "description": "当前版本统计信息。"
           },
+          "expected_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Expected Slot Ids",
+            "description": "当前版本理论应覆盖的槽位 ID 列表。"
+          },
+          "missing_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Slot Ids",
+            "description": "当前版本仍缺失的槽位 ID 列表。"
+          },
           "assets": {
             "items": {
               "$ref": "#/components/schemas/AssetItem"
@@ -27193,6 +27934,8 @@
           "available_versions",
           "version_summaries",
           "summary",
+          "expected_slot_ids",
+          "missing_slot_ids",
           "assets"
         ],
         "title": "ResultsData"
@@ -27208,12 +27951,18 @@
             "type": "integer",
             "title": "Ready Count",
             "description": "ready 状态资产数。"
+          },
+          "expected_count": {
+            "type": "integer",
+            "title": "Expected Count",
+            "description": "当前版本理论应有的主图槽位数。"
           }
         },
         "type": "object",
         "required": [
           "total_count",
-          "ready_count"
+          "ready_count",
+          "expected_count"
         ],
         "title": "ResultsSummary"
       },
@@ -28091,6 +28840,76 @@
             "type": "integer",
             "title": "Ready Count",
             "description": "该版本 ready 资产数。"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At",
+            "description": "该版本最近一次物化时间。"
+          },
+          "job_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Type",
+            "description": "生成该版本的 job 类型。"
+          },
+          "is_partial": {
+            "type": "boolean",
+            "title": "Is Partial",
+            "description": "该版本是否为 partial 版本。",
+            "default": false
+          },
+          "cover_asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cover Asset Id",
+            "description": "该版本封面资产 ID。"
+          },
+          "cover_thumbnail_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cover Thumbnail Url",
+            "description": "该版本封面缩略图 URL。"
+          },
+          "missing_slot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Slot Ids",
+            "description": "主图版本缺失槽位列表。"
+          },
+          "missing_panel_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Panel Ids",
+            "description": "详情页版本缺失 panel 列表。"
           }
         },
         "type": "object",

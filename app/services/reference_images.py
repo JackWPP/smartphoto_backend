@@ -151,8 +151,10 @@ def select_reference_images_for_role(
 def reference_images_used_for_role(
     manifest: list[dict[str, Any]],
     role: str,
+    *,
+    max_images: int = 2,
 ) -> list[dict[str, Any]]:
-    selected_ids = [item["image_id"] for item in select_reference_images_for_role(manifest, role)]
+    selected_ids = [item["image_id"] for item in select_reference_images_for_role(manifest, role, max_images=max_images)]
     manifest_by_id = {item["image_id"]: item for item in manifest}
     return [manifest_by_id[image_id] for image_id in selected_ids if image_id in manifest_by_id]
 

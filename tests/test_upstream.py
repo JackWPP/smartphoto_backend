@@ -906,13 +906,28 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
             "copy_draft": {"headline": "空气净化器"},
             "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
             "suggested_styles": ["现代简约"],
-            "reference_summary": {"shape": "圆柱形", "colors": "白色", "materials": "塑料", "structures": "进风格栅", "must_keep": "外形不能变"},
+            "reference_summary": {
+                "shape": "圆柱形",
+                "colors": "白色",
+                "materials": "塑料",
+                "structures": "进风格栅",
+                "must_keep": "外形不能变",
+                "proportion_note": "保持塔式比例",
+                "control_panel_note": "面板在机身正面上半区",
+                "transparent_parts_note": "",
+                "structure_anchor_points": "进风格栅、顶盖和面板位置",
+                "do_not_move_features": "面板和进风口不要换位",
+                "scene_fit_notes": "场景摆放需与地面自然接触",
+            },
             "category_candidates": [
                 {"category": "空气净化器", "confidence": 91, "reason": "主体是空气净化器"},
                 {"category": "加湿器", "confidence": 25, "reason": "外形近似但无明显喷雾证据"},
                 {"category": "其他", "confidence": 10, "reason": "保底候选"},
             ],
             "scene_tags": ["白底产品"],
+            "evidence_scores": {"structure": 82, "proportion": 74, "scene": 60, "text": 78},
+            "risk_flags": ["control_panel_sensitive"],
+            "selling_point_entities": ["控制面板"],
             "supplement_image_recommendations": [
                 {
                     "slot_type": "angle45",
@@ -1009,9 +1024,13 @@ def test_merge_analysis_result_normalizes_scalar_sections():
     assert merged["recognized_product"]["product_name"] == "便携榨汁杯"
     assert merged["copy_draft"]["headline"] == "鲜榨更方便"
     assert merged["reference_summary"]["must_keep"] == "保持杯体颜色和把手结构一致"
+    assert "proportion_note" in merged["reference_summary"]
     assert merged["missing_views"] == ["side"]
     assert merged["suggested_styles"] == ["现代简约", "清爽明亮"]
     assert merged["key_parameters"][0]["label"] == "300ml"
+    assert isinstance(merged["evidence_scores"], dict)
+    assert isinstance(merged["risk_flags"], list)
+    assert isinstance(merged["selling_point_entities"], list)
 
 
 def test_analyze_images_repairs_invalid_priority_before_fallback(monkeypatch):
@@ -1035,13 +1054,28 @@ def test_analyze_images_repairs_invalid_priority_before_fallback(monkeypatch):
                 "copy_draft": {"headline": "空气净化器"},
                 "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
                 "suggested_styles": ["现代简约"],
-                "reference_summary": {"shape": "圆柱形", "colors": "白色", "materials": "塑料", "structures": "进风格栅", "must_keep": "外形不能变"},
+                "reference_summary": {
+                    "shape": "圆柱形",
+                    "colors": "白色",
+                    "materials": "塑料",
+                    "structures": "进风格栅",
+                    "must_keep": "外形不能变",
+                    "proportion_note": "保持正面高度比例",
+                    "control_panel_note": "面板位于正面上半区",
+                    "transparent_parts_note": "",
+                    "structure_anchor_points": "顶盖和进风格栅",
+                    "do_not_move_features": "不要改动面板位置",
+                    "scene_fit_notes": "场景图需保持落地接触",
+                },
                 "category_candidates": [
                     {"category": "空气净化器", "confidence": 88, "reason": "主体明确"},
                     {"category": "加湿器", "confidence": 18, "reason": "外形相近"},
                     {"category": "其他", "confidence": 8, "reason": "保底"},
                 ],
                 "scene_tags": ["白底产品"],
+                "evidence_scores": {"structure": 78, "proportion": 72, "scene": 55, "text": 80},
+                "risk_flags": ["control_panel_sensitive"],
+                "selling_point_entities": ["控制面板"],
                 "supplement_image_recommendations": [
                     {
                         "slot_type": "angle45",
@@ -1064,13 +1098,28 @@ def test_analyze_images_repairs_invalid_priority_before_fallback(monkeypatch):
                 "copy_draft": {"headline": "空气净化器"},
                 "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
                 "suggested_styles": ["现代简约"],
-                "reference_summary": {"shape": "圆柱形", "colors": "白色", "materials": "塑料", "structures": "进风格栅", "must_keep": "外形不能变"},
+                "reference_summary": {
+                    "shape": "圆柱形",
+                    "colors": "白色",
+                    "materials": "塑料",
+                    "structures": "进风格栅",
+                    "must_keep": "外形不能变",
+                    "proportion_note": "保持正面高度比例",
+                    "control_panel_note": "面板位于正面上半区",
+                    "transparent_parts_note": "",
+                    "structure_anchor_points": "顶盖和进风格栅",
+                    "do_not_move_features": "不要改动面板位置",
+                    "scene_fit_notes": "场景图需保持落地接触",
+                },
                 "category_candidates": [
                     {"category": "空气净化器", "confidence": 88, "reason": "主体明确"},
                     {"category": "加湿器", "confidence": 18, "reason": "外形相近"},
                     {"category": "其他", "confidence": 8, "reason": "保底"},
                 ],
                 "scene_tags": ["白底产品"],
+                "evidence_scores": {"structure": 78, "proportion": 72, "scene": 55, "text": 80},
+                "risk_flags": ["control_panel_sensitive"],
+                "selling_point_entities": ["控制面板"],
                 "supplement_image_recommendations": [
                     {
                         "slot_type": "angle45",

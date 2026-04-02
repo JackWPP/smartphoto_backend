@@ -166,6 +166,34 @@ class AdminAssetListData(AdminPaginationData):
     items: list[AdminAssetItem]
 
 
+class AdminQualityFeedbackItem(BaseModel):
+    feedback_case_id: str
+    service_id: str
+    session_id: str
+    asset_id: str
+    job_id: str | None = None
+    asset_family: str
+    version_no: int
+    slot_id: str | None = None
+    issue_codes: list[str] = Field(default_factory=list)
+    severity: str
+    operator_note: str | None = None
+    resolution_status: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class AdminQualityFeedbackListData(BaseModel):
+    items: list[AdminQualityFeedbackItem] = Field(default_factory=list)
+
+
+class AdminQualityFeedbackCreateRequest(BaseModel):
+    issue_codes: list[str] = Field(default_factory=list)
+    severity: str = "medium"
+    operator_note: str | None = None
+    resolution_status: str = "open"
+
+
 class AdminAuditItem(BaseModel):
     audit_log_id: str
     admin_user_id: str | None = None
