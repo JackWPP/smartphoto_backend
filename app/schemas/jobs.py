@@ -21,6 +21,7 @@ class JobStatusData(BaseModel):
     stage_timings: list[dict[str, Any]] = Field(default_factory=list, description="各阶段耗时。")
     error_code: str | None = Field(default=None, description="失败时的业务错误码。")
     error_message: str | None = Field(default=None, description="失败时的错误消息。")
+    result_payload: dict[str, Any] | None = Field(default=None, description="任务结果或失败附加信息。")
 
 
 class JobEventSSEPayload(BaseModel):

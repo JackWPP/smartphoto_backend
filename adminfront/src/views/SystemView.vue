@@ -3,7 +3,7 @@
     <div class="page-toolbar">
       <div>
         <span class="eyebrow">System</span>
-        <h3>运行时与定价观测</h3>
+        <h3>运行时与队列观测</h3>
       </div>
       <button class="ghost-button" @click="loadSystem">刷新</button>
     </div>
@@ -30,23 +30,6 @@
         </div>
         <pre>{{ prettyJson(runtime) }}</pre>
       </article>
-      <article class="surface-card">
-        <div class="surface-card__header">
-          <h4>定价规则</h4>
-        </div>
-        <div class="stack-list">
-          <div v-for="item in pricing.items || []" :key="item.pricing_rule_id" class="stack-list__item">
-            <div>
-              <strong>{{ item.action }}</strong>
-              <small>{{ item.pricing_rule_id }}</small>
-            </div>
-            <div class="align-right">
-              <span class="status-chip status-chip--success">{{ item.credits }} credits</span>
-              <small>{{ item.description }}</small>
-            </div>
-          </div>
-        </div>
-      </article>
     </div>
   </section>
 </template>
@@ -57,12 +40,8 @@ import { adminApi } from '../api'
 import { prettyJson } from '../lib/format'
 
 const runtime = ref({})
-const pricing = ref({ items: [] })
-
 async function loadSystem() {
-  const [runtimeData, pricingData] = await Promise.all([adminApi.getSystemRuntime(), adminApi.getSystemPricing()])
-  runtime.value = runtimeData
-  pricing.value = pricingData
+  runtime.value = await adminApi.getSystemRuntime()
 }
 
 onMounted(loadSystem)

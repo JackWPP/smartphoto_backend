@@ -9,11 +9,15 @@
 | 逻辑 Agent | 职责 | 主要代码映射 |
 |---|---|---|
 | Session Orchestrator | 接收请求、做前置状态校验、创建 job、分发任务 | `app/api/v2/sessions.py`, `app/api/v2/assets.py` |
+| Service Principal Agent | 校验 `X-App-Key`、解析 `service_id`、隔离接入方数据访问 | `app/core/deps.py`, `app/core/actors.py` |
+| LLM Router Agent | 按任务类型选择文本模型，统一屏蔽 OpenRouter / WhatAI 文本调用差异 | `app/services/llm_router.py` |
 | Analysis Agent | 读取会话图片，产出 `analysis_snapshot` 与 copy 草稿 | `run_analysis_job` + `WhataiClient.analyze_images` |
-| Parameter Extract Agent | 读取参数附件，产出 `parameter_snapshot` | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
+| Parameter Extract Agent | 基于 `analysis + 商品图 + confirmed_copy + 可选附件` 一次性产出 Step3 最终可编辑结果 | `run_extract_parameters_job` + `WhataiClient.extract_parameters` |
+| Parameter Completion Agent | 兼容保留的同步补全入口，不再属于默认 Step3 主链 | `POST /sessions/{id}/parameters/complete` + `WhataiClient.complete_parameters` |
 | Copy Regen Agent | 按字段重写 copy 建议，不直接覆盖 confirmed_copy | `run_regenerate_copy_job` |
 | Strategy Builder | 生成 `strategy_preview`、`reference_manifest`、`prompt_plan` 和可执行 `asset_plan` | `build_strategy_preview` |
-| Detail Page Planner | 生成 `detail_strategy_preview`、商品/风格参考 manifest 和 8 个 panel 规划 | `build_detail_strategy_preview` |
+| Main Copy Design Agent | 为主图每个槽位补充更适合上图的短标题、短副文案和参数标签 | `WhataiClient.design_main_copy_blocks` + `build_strategy_preview` |
+| Detail Page Planner | 生成 `detail_strategy_preview`、商品/风格参考 manifest 和 8 个 panel 规划，并直接补齐 `copy_focus/panel_goal/visual_truth_mode/origin_note` | `build_detail_strategy_preview` |
 | Prompt Composer | 按主图槽位输出结构化 prompt blocks 与最终 `final_prompt` | `compose_prompt` |
 | Detail Prompt Composer | 按 panel slot 输出带字详情页 prompt blocks 与最终 `final_prompt` | `compose_detail_panel_prompt` |
 | Image Generation Agent | 批量提交上游异步任务、集中轮询、并发下载图片字节 | `WhataiClient.submit_image_request/poll_image_tasks/download_image_bytes` |
@@ -27,6 +31,7 @@
 - 输入：HTTP 请求（含 session_id、asset_id、instruction、Idempotency-Key）
 - 输出：`job_id` 或同步业务数据
 - 状态责任：
+  - 识别 `ServicePrincipal(app_id)`，资源归属统一为 `service_id`
   - 校验 session 状态与前置条件
   - 创建 `jobs` 记录（`queued`）
   - 分发到 `q.analysis` / `q.copy` / `q.generation.main` / `q.generation.detail`
@@ -35,6 +40,15 @@
 - 详情页补充：
   - `POST /sessions/{id}/detail-pages/generations` 创建 `generate_detail_page`
   - 与主图 generation 共用同一套并发锁与冲突码 `40901/40902`
+### 3.1.1 Service Principal Agent
+- 输入：HTTP Header `X-App-Key`
+- 输出：`ServicePrincipal(app_id)`
+- 状态责任：
+  - 校验接入方静态密钥
+  - 将主链路资源统一绑定到 `service_id`
+  - 拦截跨接入方读取他人 session/job/upload/download
+- 失败处理：
+  - 缺失或错误的 `X-App-Key` 返回 `40101 unauthorized`
 
 ### 3.2 Analysis Agent
 - 输入：session 可用图片 + active_platform（可空）
@@ -45,8 +59,47 @@
   - 上游异常转 `50201`
 - 重试策略：上游网络级异常会先做单请求重试；若仍失败，Celery 任务最多再重试 3 次（`max_retries=3`）
 - 当前实现补充：
+  - LLM Router 已改为按任务显式路由：`analysis / main planner / detail planner / visual parameter extraction` 默认保持 `WhatAI + Gemini`，OpenRouter 只保留给文本辅助任务
   - 上传商品图会以内联图像内容的方式发给上游，不再依赖 `localhost` URL
+  - 分析输入当前会优先走受控尺寸图片（`max_edge` 缩边），避免大图全量进内存
+  - analysis / planner / parameter extraction 现在统一走 `validator -> 同模型 repair 1 次 -> fallback`，worker 不再因为轻微格式漂移直接崩溃
+  - analysis freshness 现在显式落到 session：
+    - `analysis_version`
+    - `analysis_updated_at`
+    - `latest_analysis_job_id`
+  - 同一轮 analysis 的完成条件已经收口为：
+    - 新 `analysis_snapshot` 落库完成
+    - `reanalysis_required=false`
+    - `confirmed_copy` 默认值补齐完成
+    - `analysis_version / analysis_updated_at / latest_analysis_job_id` 更新完成
+    - 然后 job 才允许写 `succeeded`
   - `analysis_snapshot` 包含 `reference_summary`，至少提炼主体形态、颜色、材质、结构与不可漂移点
+  - `analysis_snapshot` 额外包含：
+    - `analysis_source`
+    - `category_candidates[{category,confidence,reason}]`
+    - `scene_tags`
+    - `selling_point_entities`
+    - `risk_flags`
+    - `evidence_scores[{structure,proportion,scene,text}]`
+    - `detected_view_slots`
+    - `supplement_image_recommendations[{slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption,image_kind?}]`
+    - `reanalysis_required`
+    - `provider/model/prompt_version/repair_round/source`
+  - Step 2 品类识别会优先消费后台启用的“全局品类库”，而不是开放式自由猜类目
+  - Step 2 的补图建议已经收口为“建议补传什么图片”，不再是抽象拍摄技巧：
+    - `upload_goal` 描述要补哪块视觉信息
+    - `must_show` 描述图片里必须出现的真实结构元素
+    - `framing_hint` 描述建议前端如何提示用户取景
+    - `example_caption` 只作为补图意图示例
+    - `extra.image_kind` 当前支持 `detail_closeup / water_tank / filter_structure / size_in_hand / use_scene_real`
+  - fallback 不再把 `家居用品` 当成默认结论；推不出时返回 `其他` + 弱候选列表
+  - 商品图 upload/delete、`/uploads/complete` 与“切换 active_platform_id”都只会把当前分析标脏：
+    - 保留旧 `analysis_snapshot`
+    - 设置 `reanalysis_required=true`
+    - 清空 `parameter_snapshot`
+    - 清空 `strategy_preview/detail_strategy_preview`
+    - 不会递增 `analysis_version`
+  - 显式重跑 `POST /sessions/{id}/analysis` 时，也会先清空上一轮 `parameter_snapshot`
 
 ### 3.3 Copy Regen Agent
 - 输入：`targets` + `instruction` + 当前 copy
@@ -56,14 +109,32 @@
 - 重试策略：上游网络级异常可进入 Celery 任务重试，最多 3 次
 
 ### 3.3.1 Parameter Extract Agent
-- 输入：参数附件（图片/PDF）+ 当前 copy + active_platform
+- 输入：`analysis_snapshot + 当前 session 商品图 + confirmed_copy + 可选参数附件`
 - 输出：`parameter_snapshot`
 - 状态责任：
-  - 产出 `relevance_status/rejection_reason/hero_scene/core_selling_points/key_parameters/product_advantages/feature_highlights`
+  - 一次性产出 Step3 页面默认展示的最终可编辑结果：
+    - `hero_scene`
+    - `core_selling_points`
+    - `key_parameters`
+    - `product_advantages`
+    - `feature_highlights`
+  - 无附件时仍可运行，属于 `analysis_only` 轻策划模式
+  - 有附件时附件优先，属于 `attachment_backed` 模式，可整页覆盖旧的 analysis-only 结果
   - 不相关附件返回 `invalid`，但 job 仍可成功完成，供前端展示解释
+  - 快照额外补充：
+    - `source_mode`
+    - `evidence_priority`
+    - `evidence_summary`
+    - `provider/model/prompt_version/source`
 - Job 语义：
   - `job_type = extract_parameters`
   - 当前复用 `q.analysis` 队列
+
+### 3.3.2 Parameter Completion Agent
+- 当前实现说明：
+  - 为同步接口，不创建独立 job
+  - 不再属于默认前端主链
+  - Step3 的产品语义已经收口为“单次 extract 出最终页”，不是 `extract -> complete` 两段式
 
 ### 3.4 Strategy Builder
 - 输入：`confirmed_copy` + `active_platform_id` + session 图片 + 可选 `planner_instruction`
@@ -72,25 +143,56 @@
 - 失败处理：copy 或平台缺失返回 `40002/40003`
 - 重试策略：当前为同步接口流程，不走 Worker
 - 额外约束：
+  - 同一份输入会按 `input_hash` 直接复用已持久化 `strategy_preview`
+  - `input_hash` 与正式构建共享同一批已加载 reference images，避免重复读图
+  - `generate_gallery` 进入 worker 后，会优先复用 session 上已存在且 `input_hash` 未变化的 `strategy_preview`，不再为了正式生成再重跑一次 planner
+  - 当前支持通过 `planner_profile` 切换策略预览档位：
+    - `harness_first`：当前默认主/详情 planner 先走 `WhatAI + kimi-k2.5`，并对 `kimi-k2.5` 自动追加 `enable_thinking=true`；若命中 `429/超时` 再降级到 `WHATAI_PLANNER_LIGHT_MODEL`
+    - `light_model`：切到更轻量的 planner 模型
+  - `strategy_preview` / `detail_strategy_preview` 会记录 `planner_profile`、`planner_primary_* / planner_fallback_* / planner_attempt_count / planner_final_source`，同时 `input_hash` 也会把当前 profile/provider/model 纳入哈希
+  - `Main Copy Design Agent` 当前默认关闭，不再作为主链默认时延来源
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”
   - 默认平台固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
   - 阿里系平台固定输出 5 个槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
   - 每个 `asset_plan` 项都带 `slot_id/slot_family/expression_mode/copy_blocks/layout_policy/proof_policy/requires_white_bg_validation/platform_rule_pack`
   - 每个 `prompt_plan` 项都带 `reference_image_ids/must_keep/must_avoid/background_rule/composition_rule/lighting_rule/fidelity_rule/final_prompt_base/rule_modules_used/resolved_constraints`
   - 当前支持在 Step 5 通过 `planner_instruction` 对整组策略做一轮额外优化
+  - 当前优先让 planner 决定 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包退化为 guardrail + fallback
+  - `prompt_plan` / `asset_plan` 现在还会带 `global_consistency_note`：
+    - 用于约束局部图和结构图必须与参考图整体结构一致
+    - 如果没有内部结构证据，就不能直接生成强结构剖面图
+  - `prompt_plan` 现在还会带 `truth_contract/risk_flags/selling_point_binding`：
+    - `truth_contract` 把“主体不可漂移 / 关键结构不可换位 / 比例按参考图 / 证据不足时保守降级”固化到 render prompt
+    - `selling_point_binding` 用于把宠物、透明水箱、控制面板、滤芯、尺寸等实体卖点绑定成必须出现的真实视觉证据
+  - 详情页 prompt 组装新增“内部规划语义 vs 可见文案”边界：
+    - `panel_goal/copy_focus/planner_prompt_base/visual_truth_mode/origin_note` 只作为内部 planning context
+    - 最终上图文案会过滤 `Proof/panel_goal/copy_focus/设计证明/【...】` 等规划标签，避免泄露到成图
 
 ### 3.5 Prompt Composer + Image Generation Agent
 - 输入：copy、strategy、slot/role、可选 instruction、参考图
 - 输出：单图结构化 prompt 预览与图片字节
 - 状态变更：job `running`，逐图产出 `asset_ready`
-- 失败处理：上游失败 `50202`，任务写 `job_failed`
+- 失败处理：
+  - 若整组没有任何 ready 资产，上游失败 `50202`，任务写 `job_failed`
+  - 若主图仍有 ready 槽位，或详情页仍有 ready panel，任务允许写成 `partial_succeeded`
+- 限流补充：
+  - 若上游返回 `429 Too Many Requests`，当前会直接写成 `rate_limited (42901)`
+  - `jobs.result_payload` 会补 `upstream_http_status=429` 与 `upstream_reason=rate_limited`
+  - 前端结果页应显示“上游限流”，而不是统一显示 timeout
 - 重试策略：
   - 当前主图组默认优先走 `/v1/images/edits`，把参考图以 multipart 形式上传到上游
+  - 当前默认图片模型为 `gemini-3.1-flash-image-preview-2k`
   - `/images/edits` 当前传 `aspect_ratio`；`/images/generations` 才传 `size`
-  - 主图与详情页都采用“两阶段执行”：先批量提交全部上游异步任务，再集中轮询全部 `task_id`，最后并发下载结果
-  - `/images/edits` 若在提交阶段出现传输层断连，会先做请求级重试；若仍失败，只对当前单张图做内部重试
+  - 主图与详情页都采用“两阶段执行”：先分批提交上游异步任务，再延迟启动轮询全部 `task_id`，最后并发下载结果
+  - 默认提交节奏：
+    - `image_submit_batch_size=5`
+    - `image_submit_batch_interval_seconds=5`
+    - `image_poll_initial_delay_seconds=45`
+  - `/images/edits` 当前使用独立 timeout：`whatai_image_edit_timeout_seconds=120`；文本链路仍继续使用 `whatai_request_timeout_seconds=90`
+  - `/images/edits` 若在提交阶段出现传输层断连或读超时，会先做请求级重试；重试带轻量 jitter，若仍失败，只对当前单张图做内部重试
   - 图片下载遇到传输层异常时，会做请求级重试
   - 生图链路默认不再因为 `upstream_image_error` 进入 Celery 整任务重试，避免重复消费上游额度
+  - `/images/edits` 若返回 opaque `400`（例如上游误报 `API Key not found`），当前不自动重提该张图，优先收敛已成功提交的结果并暴露缺失槽位/panel，避免重复计费
 - 参考图选择规则：
   - 参考图优先级：`front > angle45 > side > extra`
   - `hero` / `white_bg` / `selling_point` / `scene`：优先 `front + angle45`
@@ -99,7 +201,11 @@
 - 并发规则：
   - 主图默认并发 `main_generation_concurrency=4`
   - 详情页默认并发 `detail_generation_concurrency=6`
-  - 上游任务提交默认并发 `generation_submit_concurrency=6`
+  - 上游任务提交默认单批内部并发上限 `generation_submit_concurrency=6`
+  - 详情页提交节奏单独收口为：
+    - `detail_generation_submit_concurrency=4`
+    - `detail_image_submit_batch_size=4`
+  - 但真正对上游的发包节奏优先由 `image_submit_batch_size/image_submit_batch_interval_seconds` 控制
   - 即使内部并发执行，Asset 最终持久化顺序仍按 `display_order`
 - Prompt 结构：
   - `blocks.goal`
@@ -110,8 +216,14 @@
   - `blocks.selling_points`
   - `blocks.constraints`
   - `blocks.instruction`
+- Prompt Matrix / Harness 加固：
+  - prompt 现按 `Agent Prompt / Planner Prompt / Render Prompt / Sanitize/Validation Prompt` 四层收口
+  - analysis / 主图 planner / 详情页 planner / Step3 / copy regenerate 的内部提示默认统一走中文表述
+  - 所有可见文案在真正进入 render prompt 前，会先经过统一 `prompt_safety` 清洗：去掉思考过程、推理标签、内部规划字段、流程说明和内部包装词
+  - 当前优先策略是“清洗 / 降级 / 软补救”，而不是整链路硬拦截
 - 主图 visible copy 质量门禁：
   - `copy_blocks` 在进入 `final_prompt` 前会过滤占位词、弱信息短句和假参数占位，不再把 `核心功能突出/视觉清爽/参数A 100unit` 直接透传到单图 prompt
+  - 还会额外过滤 `panel_goal/copy_focus/narrative_section/origin_note/visual_truth_mode/Proof/设计证明/规则模块/布局模板/【...】/思考过程` 等内部词
   - 当高质量事实不足时，单图允许退化为少文案或仅保留产品识别标题，不强行堆砌泛口号
   - `must_keep/must_avoid` 与 planner 自由文本会先做字符拆分修复，避免 `整；体；圆；柱...` 这类异常文本继续污染 prompt
 - Analysis fallback 约束：
@@ -128,17 +240,60 @@
   - `proof_authority`：最强卖点 + 参数/证书/面板特写/结构放大；没有真实证书素材时不伪造权威认证
   - `benefit_scene_or_compare`：消费者利益场景或对比优势；必须有颜色/光区强化视觉重点，不能做平淡白底陈列图
   - `closing_selling_point`：优质场景 + 核心卖点 + 1-2 个辅助卖点；承担尾屏总结，不是简单换背景重拍
+- 阿里中文平台 visible copy 约束规则：
+  - 仅 `1688` / `taobao` 触发；`alibaba_intl` 保持英文语义
+  - 当前主链改回纯 prompt-first：先在策略预览和最终 prompt 中前置强化“中文短句、少字、不要英文营销词、不要内部标签”，不再在下载后追加热路径语言验收
+  - 新增海报文案必须中文化，但参考图里商品本体原有英文、型号、logo、按钮字样和铭牌丝印属于保真范围，应尽量保留
+  - 默认允许的 visible copy 语义仍只围绕简体中文、阿拉伯数字、必要计量单位，以及用户明确提供的商品事实
+  - 若中文文案不稳定，优先少字或无字，不再为了语言审核对单图做额外补跑，避免拖慢整组生成
+- 429 / EOF 鲁棒性：
+  - `analysis / main_planner / detail_planner / Step3` 命中 `429` 时，先在单请求内做短退避重试，不直接进入 Celery 长退避
+  - planner 若短退避后仍失败，直接回退到 rule-based/fallback，不再为了一次上游拥塞把整组主图时延拖长
+  - 主图下载阶段若只有个别槽位失败，会先尝试单槽位补救；补救后仍失败时，允许当前版本以 `partial_succeeded` 落库
+  - `partial_succeeded` 版本会显式记录 `missing_slot_ids`，前端可继续复用 `slot_ids` 只补缺失槽位
+- 用户可编辑文案口径：
+  - Step3/Step4 默认继续沿用现有编辑结构，不新增前台编辑器能力
+  - 但默认可编辑值必须来自清洗后的最终候选文案，不再把内部 planning 字段直接暴露给前台
+  - `copy/regenerate` 返回值同样会走文案清洗，不把思考过程或内部规划词直接回传给用户
 - 白底分支额外规则：
   - 生成后执行轻量白底校验：边缘白色占比、外环白色占比、主体连通域数量
   - 白底校验不再依赖 `role == white_bg`，而依赖 `requires_white_bg_validation=true`
   - 若校验失败，只对当前槽位内部追加更强白底约束再尝试 1 次
-  - 若二次仍失败，整 job 直接 `job_failed`，不产出 `partial_succeeded`
+  - 若二次仍失败，当前只做 `soft_failed` 标记，不整组打挂
+- 保真约束当前策略：
+  - `truth_contract/risk_flags/selling_point_binding` 只用于 planner 和 render prompt 的前置约束，不再在图片下载后追加逐张 `fidelity_validation`
+  - 当前优先通过一次成功的 harness、参考图选择和 prompt 约束提高命中率，而不是用生成后 LLM 复检拖慢整组完成时间
+    - `control_panel_misplaced`
+    - `scene_grounding_failed`
+    - `selling_point_not_rendered`
+    - `text_mismatch`
+    - `insufficient_reference_evidence`
+  - 若首次验收失败，只对当前单槽位/单 panel 追加更强保真约束并补救 1 次
+  - 二次仍失败时写 `retry_applied/soft_failed/issues[]`，结果保留但可复盘
 
 ### 3.5.1 Detail Page Planner + Detail Prompt Composer
 - 输入：copy、商品图、可选风格图、可选 `planner_instruction`、可选本轮 `instruction`
 - 输出：
   - `detail_strategy_preview`
   - 8 个 panel prompt
+  - 用户侧 display 语义：`display_tags / display_module_title / display_module_kind / display_module_intent`
+- 详情页 Prompt Matrix 已对齐主图的“内部语义与用户语义分层”：
+  - planner 内部仍保留 `panel_type / panel_type_reason / planner_base / planner_source`
+  - 但用户侧预览、prompt preview 与 results 默认新增 `display_module_*`，前端应优先消费这组字段
+  - `panel_label` 已降级为兼容字段，不再建议直接作为前台标题真相源
+- 详情页 render prompt 已去规划化：
+  - `final_prompt` 不再直接出现 `Panel 类型 / 布局模板 / 内部规划语义仅用于推理`
+  - 改为先把 planner 信息归并成 `visual_contract / copy_contract / truth_contract` 后再组装 prompt
+  - `planning_context` 仍保留作内部拼装输入，但不会再以带标签的自然语言直接塞进最终 prompt
+- 详情页文案清洗也继续加严：
+  - 除 `panel_goal/copy_focus/narrative_section/origin_note/visual_truth_mode/Proof/设计证明/规则模块/布局模板/【...】/思考过程`
+  - 还会过滤 `卖点槽位 / 场景卖点 / 产品类型 / 模块 / feature_* / parameter_* / kv_* / icon_*` 等内部模板词
+  - 若用户侧文案像内部标签，优先改写为业务短句；改不稳时直接降级为空，不把规划术语暴露给用户
+- 详情页 preview 自动升级条件：
+  - 命中 `input_hash` 失配、`language_policy_version` 落后、`detail_policy_version` 落后、`display_module_*` 缺失，或中文站仍残留英文营销文案/内部模板词时，会自动重建 `detail_strategy_preview`
+- 详情页中文站用户侧模块命名现统一往业务中文收口，例如：
+  - `首屏亮点 / 核心概览 / 核心卖点 / 场景价值 / 使用收益 / 结构工艺 / 细节参数 / 收尾总结`
+- 详情页用户侧 chip/tag 也不应再直接渲染 `panel_type / narrative_section / visual_truth_mode` 原值，后端已补充 `display_tags` 作为安全展示字段
   - 8 张 `detail_page/panel` 资产
   - 1 张 `detail_page/stitched` 资产
 - 状态责任：
@@ -148,13 +303,35 @@
   - `use_case` 固定为 `amazon_detail`
   - `aspect_ratio` 固定为 `21:9`
   - `panel_count` 固定为 `8`
-  - `panel_plan` 当前带 `slot_id/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used`
+  - 同一份输入会优先复用已持久化 `detail_strategy_preview`
+  - 若 `input_hash` 失配、`language_policy_version` 落后，或中文站 panel 里仍残留英文营销文案，后端会自动重建 `detail_strategy_preview`
+  - `generate_detail_page` 进入 worker 后，也会优先复用仍有效的 `detail_strategy_preview`，不再为了正式生成再重跑一次详情页 planner
+  - `detail_strategy_preview` 当前额外带 `detail_story_brief/platform_overlay/copy_language/language_policy_version`
+  - `panel_plan` 当前带 `slot_id/narrative_section/panel_goal/copy_focus/panel_type/panel_type_reason/candidate_panel_types/layout_template/rule_modules_used/product_reference_ids/style_reference_ids/visual_truth_mode/origin_note`
+  - 详情页 planner 会显式复用同一 `session_id` 下的 `analysis_snapshot + 商品图 + parameter_snapshot`
+  - 详情页链路保持独立生成，但语义上是 narrative-first，不是主图 5 槽位的复写
+  - `detail_planner` 会一次性产出 `copy_focus/panel_goal/visual_truth_mode/origin_note`，不再追加默认 reviewer 二跳
+  - 这样做的目的是减少详情页默认 LLM 调用数，避免策略预览为了文案 review 再额外等待一轮
+  - 中文站详情页的新增文案默认走简体中文策略；商品本体原有英文、型号、logo、按钮字样和铭牌丝印属于保真范围，可保留
+  - `use_case = amazon_detail` 继续保留为兼容字段，但不再代表详情页默认输出英文
   - 未上传风格图时，优先使用 `style_preset_id` 解析出的风格摘要，再拼接 `style_custom`；仅兼容回退 `style_choice`
   - 生图默认使用 1 张商品 grid；有风格图时追加 1 张 style/font grid
+  - 详情页执行阶段优先消费 panel 级参考图，grid 只作为 fallback/辅助参考，不再让所有 panel 共用同一组主参考输入
 - Job / 事件语义：
   - `job_type = generate_detail_page`
-  - 事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_succeeded|job_failed`
-  - `asset_ready` 会产出 9 次：8 次 panel + 1 次 stitched
+  - 通用事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_partial_succeeded|job_succeeded|job_failed`
+  - 当前会额外写入详情页专属阶段事件：
+    - `detail_strategy_ready`
+    - `detail_panel_render_started`
+    - `detail_panel_render_succeeded`
+    - `detail_panel_render_failed`
+    - `detail_stitched_ready`
+  - 完整成功时 `asset_ready` 会产出 9 次：8 次 panel + 1 次 stitched
+  - 详情页若缺 panel 但仍有 ready panel：
+    - job 终态写 `partial_succeeded`
+    - `result_payload` 写入 `expected_panel_ids/missing_panel_ids/expected_panel_count`
+    - `GET /sessions/{id}/detail-pages/results` 也会回传同名字段
+    - `stitched_asset` 不生成，避免把不完整详情页伪装成完整长图
 
 ### 3.6 Storage/Versioning Agent
 - 输入：图片字节、session_id、round/version、role/order
@@ -175,7 +352,6 @@
 - 事件：`job_queued/job_started/job_progress/asset_ready/job_succeeded/job_failed`
 - 并发规则：
   - 同 session 同时最多 1 个生图任务
-  - 同 user 同时最多 1 个生图任务
   - Redis 不可用时降级到 DB 检查
   - 详情页 generation 也参与同一套互斥，不允许和主图 generation 并行
 
@@ -270,7 +446,7 @@ sequenceDiagram
 5. 失败可定位：失败必须写 `job_failed` 且带错误信息。
 6. Prompt 可追溯：最终写入 `assets.prompt_snapshot` 的是实际提交给上游的 `final_prompt`。
 7. 引用可追溯：`assets.generation_snapshot` 必须记录 `reference_image_ids/reference_slots/upstream_endpoint/planner_instruction/size`。
-8. 槽位可追溯：主图资产需写 `slot_id/expression_mode/rule_pack_id`；详情页资产需写 `slot_id/panel_type`。
+8. 槽位可追溯：主图资产需写 `slot_id/expression_mode/rule_pack_id`；详情页资产需写 `slot_id/panel_type/visual_truth_mode/origin_note`。
 9. 后台资产归档不物理删除，只修改 `visibility_status` 并记录后台审计日志。
 
 ## 6.1 Prompt Debug 只读接口

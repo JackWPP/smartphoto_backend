@@ -13,6 +13,7 @@ from app.services.copy_normalization import (
 )
 from app.services.platforms import PlatformProfile, get_platform_or_none
 from app.services.rule_packs import load_published_rule_pack_config
+from app.services.visible_copy_policy import simplified_chinese_visible_copy_constraints
 
 
 DEFAULT_MAIN_RULE_PACK_ID = "default_main_gallery_v2"
@@ -445,7 +446,11 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": True,
         "allow_certificate_elements": True,
         "allow_compare_overlay": True,
-        "constraints": ["中文短句允许更密，但每屏只保留1个核心主标题和少量佐证信息", "允许认证、参数、证书、对比优势等导购型元素"],
+        "constraints": [
+            "中文短句允许更密，但每屏只保留1个核心主标题和少量佐证信息",
+            "允许认证、参数、证书、对比优势等导购型元素",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
     },
     "taobao": {
         "id": "taobao",
@@ -454,7 +459,11 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": True,
         "allow_certificate_elements": True,
         "allow_compare_overlay": True,
-        "constraints": ["中文短句允许较密集，强调点击率和利益点承接", "允许理由卡、能力卡和适度的销售导向文案"],
+        "constraints": [
+            "中文短句允许较密集，强调点击率和利益点承接",
+            "允许理由卡、能力卡和适度的销售导向文案",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
     },
     "alibaba_intl": {
         "id": "alibaba_intl",
@@ -542,6 +551,8 @@ def recommend_expression_mode(
     specs = _split_points(confirmed_copy.get("specs"))
     key_parameters = _key_parameter_strings(confirmed_copy.get("key_parameters"))
     must_keep = _safe_analysis_value(analysis_snapshot, "reference_summary", "must_keep")
+    evidence_scores = (analysis_snapshot or {}).get("evidence_scores") if isinstance((analysis_snapshot or {}).get("evidence_scores"), dict) else {}
+    risk_flags = {str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()}
     overlay = get_platform_overlay(platform_id)
 
     if slot_id == "white_bg":
@@ -555,12 +566,16 @@ def recommend_expression_mode(
             return "mechanism_card", "当前 copy 含参数/机制信息，优先做机制卡说明为什么有效。"
         return "reason_card", "理由图默认用理由卡承接首图点击后的疑问。"
     if slot_id == "proof_authority":
+        if "insufficient_panel_evidence" in risk_flags:
+            return "spec_proof", "面板/结构证据不足时，优先做更保守的参数佐证，不走虚构机构或实验场景。"
         if "cert" in must_keep.lower() or any("证" in item or "认" in item for item in selling_points + specs + key_parameters):
             return "certificate_proof", "检测到认证/证书语义，优先做证书佐证图。"
         if specs or key_parameters:
             return "spec_proof", "存在明显参数信息，优先用参数佐证支撑最强卖点。"
         return "lab_proof", "默认使用实验/能力证明型佐证图。"
     if slot_id == "benefit_scene_or_compare":
+        if "scene_entity_sensitive" in risk_flags or "insufficient_scale_evidence" in risk_flags:
+            return "real_scene_benefit", "场景/比例证据偏弱，优先用更保守的利益场景表达，避免复杂互动或夸张对比。"
         if usage_scenes:
             return "real_scene_benefit", "存在使用场景文案，优先用真实场景承接消费者利益点。"
         if overlay.get("allow_compare_overlay"):
@@ -581,10 +596,14 @@ def recommend_expression_mode(
             return "benefit_proof_card", "卖点图存在参数支撑信息，优先用卖点佐证卡。"
         return "single_feature_focus", "默认聚焦单卖点做功能化构图。"
     if slot_id == "scene":
+        if "scene_entity_sensitive" in risk_flags or "insufficient_scale_evidence" in risk_flags:
+            return "benefit_scene", "当前缺少稳定的人物/尺寸证据，场景槽位降级为更轻的利益场景。"
         if usage_scenes:
             return "immersive_scene", "场景槽位优先按真实使用场景来推荐。"
         return "benefit_scene", "无明确场景时，退回利益点场景表达。"
     if slot_id == "detail":
+        if int(evidence_scores.get("structure") or 0) < 60 or risk_flags & {"transparent_or_internal_structure", "insufficient_panel_evidence"}:
+            return "macro_texture_closeup", "结构证据不足或存在透明/面板敏感风险，细节图降级为保守特写。"
         if specs or key_parameters:
             return "structure_cutaway", "检测到结构/参数语义，优先使用结构拆解式细节图。"
         return "macro_texture_closeup", "默认使用材质微距特写。"
@@ -658,16 +677,16 @@ def build_copy_blocks(
         allow_placeholder_parameters=False,
     )
 
-    hero_headline = _first_non_empty(headline_candidates, product_name_candidates, benefit_candidates)
-    hero_supporting = _pick_first_distinct(benefit_candidates, hero_headline)
-    hero_matrix = _take_distinct(benefit_candidates, exclude=[hero_headline, hero_supporting], max_items=2)
+    hero_headline = _first_non_empty(headline_candidates, benefit_candidates, product_name_candidates)
+    hero_supporting = _pick_first_distinct(benefit_candidates + scene_candidates + proof_candidates, hero_headline)
+    hero_matrix = _take_distinct(benefit_candidates + proof_candidates, exclude=[hero_headline, hero_supporting], max_items=2)
 
     reason_headline = _first_non_empty(benefit_candidates, headline_candidates, product_name_candidates)
-    reason_supporting = _pick_first_distinct(benefit_candidates + proof_candidates, reason_headline)
-    reason_matrix = _take_distinct(benefit_candidates + proof_candidates, exclude=[reason_headline, reason_supporting], max_items=2)
+    reason_supporting = _pick_first_distinct(proof_candidates + benefit_candidates + scene_candidates, reason_headline)
+    reason_matrix = _take_distinct(benefit_candidates + proof_candidates + scene_candidates, exclude=[reason_headline, reason_supporting], max_items=3)
 
     proof_headline = _first_non_empty(proof_candidates, benefit_candidates, headline_candidates, product_name_candidates)
-    proof_supporting = _pick_first_distinct(benefit_candidates + headline_candidates, proof_headline)
+    proof_supporting = _pick_first_distinct(benefit_candidates + headline_candidates + scene_candidates, proof_headline)
     proof_lines = _take_distinct(proof_candidates, exclude=[proof_headline, proof_supporting], max_items=3)
 
     benefit_headline = _first_non_empty(benefit_candidates, scene_candidates, headline_candidates, product_name_candidates)
@@ -676,7 +695,7 @@ def build_copy_blocks(
 
     closing_headline = _first_non_empty(benefit_candidates, headline_candidates, product_name_candidates)
     closing_scene_candidates = _select_closing_scene_candidates(scene_candidates)
-    closing_supporting = _pick_first_distinct(benefit_candidates + closing_scene_candidates, closing_headline)
+    closing_supporting = _pick_first_distinct(benefit_candidates + closing_scene_candidates + proof_candidates, closing_headline)
     closing_proof = _take_distinct(proof_candidates, exclude=[closing_headline, closing_supporting], max_items=2)
     closing_matrix = _take_distinct(
         benefit_candidates + proof_candidates + closing_scene_candidates,
@@ -836,10 +855,10 @@ def _to_brief_english(text: str) -> str:
 def _normalize_copy_blocks_for_slot(slot_id: str, blocks: dict[str, Any]) -> dict[str, Any]:
     policy = {
         "primary_kv": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 0, "matrix_max": 2},
-        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 0, "matrix_max": 2},
+        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 20, "supporting_ascii": 34, "proof_max": 0, "matrix_max": 3},
         "proof_authority": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 3, "matrix_max": 0},
-        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 0, "matrix_max": 2},
-        "closing_selling_point": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 2, "matrix_max": 2},
+        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 0, "matrix_max": 2},
+        "closing_selling_point": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 2, "matrix_max": 2},
     }.get(slot_id, {"headline_cn": 18, "headline_ascii": 32, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 2, "matrix_max": 2})
 
     headline = _clip_copy_text(blocks.get("headline"), cn_limit=policy["headline_cn"], ascii_limit=policy["headline_ascii"])

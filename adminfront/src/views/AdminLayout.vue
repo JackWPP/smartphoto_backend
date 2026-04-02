@@ -4,7 +4,7 @@
       <div class="brand-block">
         <span class="eyebrow">SmartPhoto</span>
         <h1>Admin Console</h1>
-        <p>运营、配置、排障三位一体控制台</p>
+        <p>图片生成运维与配置控制台</p>
       </div>
       <nav class="nav-grid">
         <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" class="nav-link">
@@ -48,15 +48,15 @@ const router = useRouter()
 const route = useRoute()
 
 const navItems = [
-  { to: '/overview', label: 'Overview', kicker: '01', description: '经营概览、趋势与待处理事项' },
-  { to: '/users', label: 'Users', kicker: '02', description: '用户、额度、订单与通知' },
-  { to: '/sessions', label: 'Sessions', kicker: '03', description: 'Session 干预与结果追踪' },
-  { to: '/jobs', label: 'Jobs', kicker: '04', description: '任务、事件时间线与重试' },
-  { to: '/assets', label: 'Assets', kicker: '05', description: '资产预览、归档与重生成' },
-  { to: '/prompts', label: 'Prompts', kicker: '06', description: 'Prompt Preset 管理' },
+  { to: '/overview', label: 'Overview', kicker: '01', description: '运行概览、趋势与待处理事项' },
+  { to: '/sessions', label: 'Sessions', kicker: '02', description: 'Session 干预与结果追踪' },
+  { to: '/jobs', label: 'Jobs', kicker: '03', description: '任务、事件时间线与重试' },
+  { to: '/assets', label: 'Assets', kicker: '04', description: '资产预览、归档与重生成' },
+  { to: '/prompts', label: 'Prompts', kicker: '05', description: 'Prompt Preset 管理' },
+  { to: '/category-catalog', label: 'Category Catalog', kicker: '06', description: '全局品类库配置与启停' },
   { to: '/rule-packs', label: 'Rule Packs', kicker: '07', description: '规则包草稿、版本与发布' },
   { to: '/audit', label: 'Audit', kicker: '08', description: '高风险操作审计追踪' },
-  { to: '/system', label: 'System', kicker: '09', description: '运行时与定价观测' },
+  { to: '/system', label: 'System', kicker: '09', description: '运行时与模型/队列观测' },
 ]
 
 async function logout() {

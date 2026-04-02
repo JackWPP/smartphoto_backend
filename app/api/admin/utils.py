@@ -3,16 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.asset import AssetModel
-from app.models.credit_transaction import CreditTransactionModel
-from app.models.credit_wallet import CreditWalletModel
+from app.models.category_catalog import CategoryCatalogModel
 from app.models.job import JobModel
 from app.models.prompt_preset import PromptPresetModel
-from app.models.purchase_order import PurchaseOrderModel
 from app.models.rule_pack import RulePackModel
 from app.models.rule_pack_version import RulePackVersionModel
 from app.models.session import SessionModel
-from app.models.user import UserModel
-from app.models.user_notification import UserNotificationModel
 from app.services.storage import public_url_for
 
 
@@ -30,7 +26,7 @@ def serialize_job(job: JobModel) -> dict[str, Any]:
     return {
         "job_id": job.id,
         "session_id": job.session_id,
-        "user_id": job.user_id,
+        "service_id": job.service_id,
         "job_type": job.job_type,
         "status": job.status,
         "progress": job.progress,
@@ -76,10 +72,29 @@ def serialize_asset(asset: AssetModel) -> dict[str, Any]:
     }
 
 
+def serialize_quality_feedback_case(item) -> dict[str, Any]:
+    return {
+        "feedback_case_id": item.id,
+        "service_id": item.service_id,
+        "session_id": item.session_id,
+        "asset_id": item.asset_id,
+        "job_id": item.job_id,
+        "asset_family": item.asset_family,
+        "version_no": int(item.version_no or 0),
+        "slot_id": item.slot_id,
+        "issue_codes": [str(code).strip() for code in (item.issue_codes or []) if str(code).strip()],
+        "severity": item.severity,
+        "operator_note": item.operator_note,
+        "resolution_status": item.resolution_status,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
 def serialize_session(session: SessionModel) -> dict[str, Any]:
     return {
         "session_id": session.id,
-        "user_id": session.user_id,
+        "service_id": session.service_id,
         "status": session.status,
         "current_step": session.current_step,
         "selected_platform_ids": session.selected_platform_ids,
@@ -122,58 +137,19 @@ def serialize_prompt_preset(preset: PromptPresetModel) -> dict[str, Any]:
     }
 
 
-def serialize_user(user: UserModel) -> dict[str, Any]:
+def serialize_category_catalog(item: CategoryCatalogModel) -> dict[str, Any]:
     return {
-        "user_id": user.id,
-        "email": user.email,
-        "display_name": user.display_name,
-        "avatar_url": user.avatar_url,
-        "status": user.status,
-        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
-        "created_at": user.created_at.isoformat() if user.created_at else None,
-        "updated_at": user.updated_at.isoformat() if user.updated_at else None,
-    }
-
-
-def serialize_wallet(wallet: CreditWalletModel) -> dict[str, Any]:
-    return {
-        "wallet_id": wallet.id,
-        "user_id": wallet.user_id,
-        "balance": wallet.balance,
-        "created_at": wallet.created_at.isoformat() if wallet.created_at else None,
-        "updated_at": wallet.updated_at.isoformat() if wallet.updated_at else None,
-    }
-
-
-def serialize_order(order: PurchaseOrderModel) -> dict[str, Any]:
-    return {
-        "order_id": order.id,
-        "user_id": order.user_id,
-        "order_no": order.order_no,
-        "plan_name": order.plan_name,
-        "status": order.status,
-        "amount": order.amount,
-        "currency": order.currency,
-        "credits_delta": order.credits_delta,
-        "source": order.source,
-        "paid_at": order.paid_at.isoformat() if order.paid_at else None,
-        "metadata": order.meta or {},
-        "created_at": order.created_at.isoformat() if order.created_at else None,
-        "updated_at": order.updated_at.isoformat() if order.updated_at else None,
-    }
-
-
-def serialize_wallet_transaction(item: CreditTransactionModel) -> dict[str, Any]:
-    return {
-        "transaction_id": item.id,
-        "user_id": item.user_id,
-        "order_id": item.order_id,
-        "transaction_type": item.transaction_type,
-        "credits_delta": item.credits_delta,
-        "balance_after": item.balance_after,
-        "note": item.note,
-        "source": item.source,
-        "payload": item.payload or {},
+        "category_id": item.id,
+        "name": item.name,
+        "slug": item.slug,
+        "sort_order": int(item.sort_order or 0),
+        "aliases": [str(alias).strip() for alias in (item.aliases or []) if str(alias).strip()],
+        "sample_keywords": [str(keyword).strip() for keyword in (item.sample_keywords or []) if str(keyword).strip()],
+        "notes": item.notes,
+        "is_featured": bool(item.is_featured),
+        "is_system": bool(item.is_system),
+        "is_active": bool(item.is_active),
+        "created_by": item.created_by,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     }
@@ -209,21 +185,6 @@ def serialize_rule_pack(rule_pack: RulePackModel, version: RulePackVersionModel 
             else None
         ),
     }
-
-
-def serialize_notification(item: UserNotificationModel) -> dict[str, Any]:
-    return {
-        "notification_id": item.id,
-        "category": item.category,
-        "title": item.title,
-        "content": item.content,
-        "is_read": bool(item.is_read),
-        "read_at": item.read_at.isoformat() if item.read_at else None,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-        "payload": item.payload or {},
-    }
-
-
 def paginate(*, total: int, page: int, page_size: int, sort_by: str | None = None, sort_order: str = "desc") -> dict[str, Any]:
     return {
         "total": int(total),

@@ -1,0 +1,32 @@
+[
+  {
+    "case_id": "kettle_control_panel_misplaced",
+    "product_family": "electric_kettle",
+    "issue_codes": ["control_panel_misplaced"]
+  },
+  {
+    "case_id": "kettle_base_and_lid_drift",
+    "product_family": "electric_kettle",
+    "issue_codes": ["shape_drift", "proportion_error"]
+  },
+  {
+    "case_id": "dehumidifier_transparent_tank_error",
+    "product_family": "dehumidifier",
+    "issue_codes": ["internal_structure_hallucination"]
+  },
+  {
+    "case_id": "dehumidifier_control_panel_wrong_side",
+    "product_family": "dehumidifier",
+    "issue_codes": ["control_panel_misplaced"]
+  },
+  {
+    "case_id": "air_purifier_pet_selling_point_missing",
+    "product_family": "air_purifier",
+    "issue_codes": ["selling_point_not_rendered"]
+  },
+  {
+    "case_id": "scene_grounding_unrealistic",
+    "product_family": "generic_scene",
+    "issue_codes": ["scene_grounding_failed"]
+  }
+]

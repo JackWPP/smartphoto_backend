@@ -8,7 +8,6 @@
       <div class="toolbar-actions">
         <select v-model="filters.module" class="compact-input">
           <option value="">全部模块</option>
-          <option value="users">users</option>
           <option value="sessions">sessions</option>
           <option value="assets">assets</option>
           <option value="jobs">jobs</option>

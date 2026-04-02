@@ -6,8 +6,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.models.session_image import SessionImageModel
-from app.services.copy_normalization import normalize_copy_payload, normalize_phrase_list, repair_broken_text
+from app.services.copy_normalization import normalize_phrase_list, repair_broken_text
 from app.services.main_gallery_rules import (
     build_copy_blocks,
     expression_metadata,
@@ -20,6 +21,7 @@ from app.services.main_gallery_rules import (
 )
 from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
 from app.services.prompt_specs import get_prompt_role_spec
+from app.services.quality_signals import build_truth_contract
 from app.services.reference_images import (
     LoadedReferenceImage,
     build_reference_manifest,
@@ -29,6 +31,55 @@ from app.services.reference_images import (
 )
 from app.services.upstream import WhataiClient
 from app.services.strategy_overrides import resolve_session_overrides
+from app.services.visible_copy_policy import requires_simplified_chinese_visible_copy
+
+
+def strategy_preview_input_hash(
+    confirmed_copy: dict,
+    active_platform_id: str,
+    *,
+    db: Session | None = None,
+    session_images: list[SessionImageModel] | None = None,
+    analysis_snapshot: dict[str, Any] | None = None,
+    parameter_snapshot: dict[str, Any] | None = None,
+    planner_instruction: str | None = None,
+    slot_preferences: list[dict[str, Any]] | None = None,
+    prompt_overrides: list[dict[str, Any]] | None = None,
+    strategy_reference_images: list[Any] | None = None,
+    loaded_reference_images: list[LoadedReferenceImage] | None = None,
+    loaded_strategy_reference_images: list[LoadedReferenceImage] | None = None,
+    reference_manifest: list[dict[str, Any]] | None = None,
+    strategy_reference_manifest: list[dict[str, Any]] | None = None,
+) -> str:
+    settings = get_settings()
+    client = WhataiClient()
+    normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
+    loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
+    loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
+    reference_manifest = reference_manifest if reference_manifest is not None else build_reference_manifest(loaded_reference_images)
+    strategy_reference_manifest = strategy_reference_manifest if strategy_reference_manifest is not None else build_reference_manifest(loaded_strategy_reference_images)
+    resolved_slot_preferences = resolve_slot_preferences(active_platform_id, slot_preferences, db=db)
+    resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
+    slot_blueprints = get_main_gallery_slot_blueprints(active_platform_id, db=db)
+    payload = preview_hash_payload(
+        platform_id=active_platform_id,
+        confirmed_copy=normalized_copy,
+        analysis_snapshot=analysis_snapshot or {},
+        parameter_snapshot=parameter_snapshot or {},
+        planner_instruction=planner_instruction,
+        slot_preferences=resolved_slot_preferences,
+        reference_manifest=reference_manifest,
+        strategy_reference_manifest=strategy_reference_manifest,
+    )
+    payload["platform_overlay"] = get_platform_overlay(active_platform_id)
+    payload["slot_blueprints"] = slot_blueprints
+    payload["strategy_overrides"] = list(resolved_prompt_overrides.values())
+    payload["planner_profile"] = settings.planner_profile
+    payload["planner_provider"] = client.llm_router.provider_for_task("main_planner")
+    payload["planner_model"] = client.llm_router.model_for_task("main_planner")
+    return _stable_hash(
+        payload
+    )
 
 
 def build_strategy_preview(
@@ -43,17 +94,22 @@ def build_strategy_preview(
     slot_preferences: list[dict[str, Any]] | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
     strategy_reference_images: list[Any] | None = None,
+    loaded_reference_images: list[LoadedReferenceImage] | None = None,
+    loaded_strategy_reference_images: list[LoadedReferenceImage] | None = None,
+    reference_manifest: list[dict[str, Any]] | None = None,
+    strategy_reference_manifest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    settings = get_settings()
     normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
     profile = platform_profile(active_platform_id)
     platform_name = profile.name if profile else active_platform_id
     aspect_ratio = profile.default_aspect_ratio if profile else "1:1"
     overlay = get_platform_overlay(active_platform_id)
 
-    loaded_reference_images = load_reference_images(session_images or []) if session_images else []
-    loaded_strategy_reference_images = load_reference_images(strategy_reference_images or []) if strategy_reference_images else []
-    reference_manifest = build_reference_manifest(loaded_reference_images)
-    strategy_reference_manifest = build_reference_manifest(loaded_strategy_reference_images)
+    loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
+    loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
+    reference_manifest = reference_manifest if reference_manifest is not None else build_reference_manifest(loaded_reference_images)
+    strategy_reference_manifest = strategy_reference_manifest if strategy_reference_manifest is not None else build_reference_manifest(loaded_strategy_reference_images)
     resolved_slot_preferences = resolve_slot_preferences(active_platform_id, slot_preferences, db=db)
     resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
     asset_plan = _build_asset_plan(
@@ -66,18 +122,39 @@ def build_strategy_preview(
         prompt_overrides=resolved_prompt_overrides,
         db=db,
     )
+    llm_slot_plan = _plan_main_gallery(
+        confirmed_copy=normalized_copy,
+        active_platform_id=active_platform_id,
+        asset_plan=asset_plan,
+        loaded_reference_images=loaded_reference_images,
+        loaded_strategy_reference_images=loaded_strategy_reference_images,
+        analysis_snapshot=analysis_snapshot or {},
+        planner_instruction=planner_instruction,
+    )
+    planner_meta = llm_slot_plan.get("_planner_meta") if isinstance(llm_slot_plan, dict) else None
+    if llm_slot_plan:
+        asset_plan = [_merge_asset_plan_item(plan_item, llm_slot_plan.get(str(plan_item["slot_id"])) or llm_slot_plan.get(str(plan_item["role"]))) for plan_item in asset_plan]
     prompt_plan = _build_prompt_plan(
         confirmed_copy=normalized_copy,
         active_platform_id=active_platform_id,
         platform_name=platform_name,
         asset_plan=asset_plan,
         reference_manifest=reference_manifest,
-        loaded_reference_images=loaded_reference_images,
-        loaded_strategy_reference_images=loaded_strategy_reference_images,
         analysis_snapshot=analysis_snapshot or {},
+        parameter_snapshot=parameter_snapshot or {},
         planner_instruction=planner_instruction,
         platform_overlay=overlay,
+        llm_plan=llm_slot_plan,
     )
+    copy_design_plan = _design_main_gallery_copy(
+        confirmed_copy=normalized_copy,
+        analysis_snapshot=analysis_snapshot or {},
+        asset_plan=asset_plan,
+        prompt_plan=prompt_plan,
+    )
+    if copy_design_plan:
+        asset_plan, prompt_plan = _apply_main_copy_design(asset_plan, prompt_plan, copy_design_plan)
+    asset_plan = _sync_asset_plan_quality_metadata(asset_plan, prompt_plan)
 
     return {
         "product_name": normalized_copy.get("product_name", ""),
@@ -98,23 +175,40 @@ def build_strategy_preview(
         "planner_instruction": planner_instruction,
         "platform_rule_pack": profile.main_rule_pack_id if profile else "default_main_gallery_v2",
         "platform_overlay": overlay,
+        "provider": (planner_meta or {}).get("provider", "whatai"),
+        "model": (planner_meta or {}).get("model", ""),
+        "planner_profile": settings.planner_profile,
+        "planner_primary_provider": (planner_meta or {}).get("planner_primary_provider"),
+        "planner_primary_model": (planner_meta or {}).get("planner_primary_model"),
+        "planner_fallback_provider": (planner_meta or {}).get("planner_fallback_provider"),
+        "planner_fallback_model": (planner_meta or {}).get("planner_fallback_model"),
+        "planner_attempt_count": int((planner_meta or {}).get("planner_attempt_count") or 0),
+        "planner_final_source": (planner_meta or {}).get("planner_final_source"),
+        "prompt_version": (planner_meta or {}).get("prompt_version", ""),
+        "repair_round": int((planner_meta or {}).get("repair_round") or 0),
+        "source": (planner_meta or {}).get("source", "rule_based"),
+        "text_design_source": _copy_design_source(copy_design_plan),
         "slot_preferences": list(resolved_slot_preferences.values()),
         "strategy_overrides": list(resolved_prompt_overrides.values()),
         "reference_manifest": reference_manifest,
         "strategy_reference_manifest": strategy_reference_manifest,
         "asset_plan": asset_plan,
         "prompt_plan": prompt_plan,
-        "input_hash": _stable_hash(
-            preview_hash_payload(
-                platform_id=active_platform_id,
-                confirmed_copy=normalized_copy,
-                analysis_snapshot=analysis_snapshot or {},
-                parameter_snapshot=parameter_snapshot or {},
-                planner_instruction=planner_instruction,
-                slot_preferences=resolved_slot_preferences,
-                reference_manifest=reference_manifest,
-                strategy_reference_manifest=strategy_reference_manifest,
-            )
+        "input_hash": strategy_preview_input_hash(
+            confirmed_copy,
+            active_platform_id,
+            db=db,
+            session_images=session_images,
+            analysis_snapshot=analysis_snapshot,
+            parameter_snapshot=parameter_snapshot,
+            planner_instruction=planner_instruction,
+            slot_preferences=slot_preferences,
+            prompt_overrides=prompt_overrides,
+            strategy_reference_images=strategy_reference_images,
+            loaded_reference_images=loaded_reference_images,
+            loaded_strategy_reference_images=loaded_strategy_reference_images,
+            reference_manifest=reference_manifest,
+            strategy_reference_manifest=strategy_reference_manifest,
         ),
     }
 
@@ -159,6 +253,7 @@ def normalize_strategy_preview(
         confirmed_copy=confirmed_copy,
         reference_manifest=normalized["reference_manifest"],
         analysis_snapshot=strategy_preview.get("analysis_snapshot") or {},
+        parameter_snapshot=parameter_snapshot or {},
         active_platform_id=active_platform_id,
         planner_instruction=strategy_preview.get("planner_instruction"),
         platform_overlay=normalized.get("platform_overlay") or get_platform_overlay(active_platform_id),
@@ -242,6 +337,8 @@ def _build_asset_plan(
                 "applied_preset_id": override.get("applied_preset_id"),
                 "applied_preset": preset or None,
                 "locked": bool(chosen.get("locked")),
+                "reference_image_limit": _reference_image_limit_for_plan(slot, analysis_snapshot, []),
+                "risk_flags": [str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()],
             }
         )
     return sorted(plan, key=lambda item: int(item.get("display_order") or 0))
@@ -254,11 +351,11 @@ def _build_prompt_plan(
     platform_name: str,
     asset_plan: list[dict[str, Any]],
     reference_manifest: list[dict[str, Any]],
-    loaded_reference_images: list[LoadedReferenceImage],
-    loaded_strategy_reference_images: list[LoadedReferenceImage],
     analysis_snapshot: dict[str, Any],
+    parameter_snapshot: dict[str, Any],
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
+    llm_plan: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     base_plan = [
         _build_default_prompt_plan_item(
@@ -267,25 +364,13 @@ def _build_prompt_plan(
             plan_item=plan_item,
             reference_manifest=reference_manifest,
             analysis_snapshot=analysis_snapshot,
+            parameter_snapshot=parameter_snapshot,
             planner_instruction=planner_instruction,
             platform_overlay=platform_overlay,
         )
         for plan_item in asset_plan
     ]
 
-    if not loaded_reference_images:
-        return base_plan
-
-    client = WhataiClient()
-    llm_plan = client.plan_prompt_plan(
-        confirmed_copy=confirmed_copy,
-        active_platform_id=active_platform_id,
-        asset_plan=asset_plan,
-        reference_images=loaded_reference_images,
-        supplemental_reference_images=loaded_strategy_reference_images,
-        reference_summary=_safe_analysis_section(analysis_snapshot, "reference_summary"),
-        planner_instruction=planner_instruction,
-    )
     if not llm_plan:
         return base_plan
 
@@ -297,6 +382,130 @@ def _build_prompt_plan(
     return merged
 
 
+def _plan_main_gallery(
+    *,
+    confirmed_copy: dict[str, Any],
+    active_platform_id: str,
+    asset_plan: list[dict[str, Any]],
+    loaded_reference_images: list[LoadedReferenceImage],
+    loaded_strategy_reference_images: list[LoadedReferenceImage],
+    analysis_snapshot: dict[str, Any],
+    planner_instruction: str | None,
+) -> dict[str, dict[str, Any]]:
+    if not loaded_reference_images:
+        return {}
+    client = WhataiClient()
+    return client.plan_prompt_plan(
+        confirmed_copy=confirmed_copy,
+        active_platform_id=active_platform_id,
+        asset_plan=asset_plan,
+        reference_images=loaded_reference_images,
+        supplemental_reference_images=loaded_strategy_reference_images,
+        analysis_snapshot=analysis_snapshot or {},
+        reference_summary=_safe_analysis_section(analysis_snapshot, "reference_summary"),
+        planner_instruction=planner_instruction,
+    )
+
+
+def _design_main_gallery_copy(
+    *,
+    confirmed_copy: dict[str, Any],
+    analysis_snapshot: dict[str, Any],
+    asset_plan: list[dict[str, Any]],
+    prompt_plan: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    client = WhataiClient()
+    return client.design_main_copy_blocks(
+        confirmed_copy=confirmed_copy,
+        analysis_snapshot=analysis_snapshot,
+        strategy_asset_plan=asset_plan,
+        prompt_plan=prompt_plan,
+    )
+
+
+def _apply_main_copy_design(
+    asset_plan: list[dict[str, Any]],
+    prompt_plan: list[dict[str, Any]],
+    copy_design_plan: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    prompt_by_slot = {str(item.get("slot_id") or ""): item for item in prompt_plan if isinstance(item, dict)}
+    next_asset_plan: list[dict[str, Any]] = []
+    next_prompt_plan: list[dict[str, Any]] = []
+
+    for item in asset_plan:
+        slot_id = str(item.get("slot_id") or "")
+        design = copy_design_plan.get(slot_id) or {}
+        copy_blocks = dict(item.get("copy_blocks") or {})
+        merged_blocks = {
+            **copy_blocks,
+            **{
+                "headline": design.get("headline") or copy_blocks.get("headline"),
+                "supporting": design.get("supporting") or copy_blocks.get("supporting"),
+                "proof_lines": design.get("proof_lines") or copy_blocks.get("proof_lines") or [],
+                "matrix_lines": design.get("matrix_lines") or copy_blocks.get("matrix_lines") or [],
+            },
+        }
+        next_asset_plan.append(
+            {
+                **item,
+                "copy_blocks": merged_blocks,
+                "text_density": design.get("text_density") or item.get("text_density"),
+                "visual_emphasis": design.get("visual_emphasis") or item.get("visual_emphasis"),
+                "global_consistency_note": design.get("global_consistency_note") or item.get("global_consistency_note"),
+            }
+        )
+
+    for item in prompt_plan:
+        slot_id = str(item.get("slot_id") or "")
+        design = copy_design_plan.get(slot_id) or {}
+        copy_blocks = dict(item.get("copy_blocks") or {})
+        next_prompt_plan.append(
+            {
+                **item,
+                "copy_blocks": {
+                    **copy_blocks,
+                    **{
+                        "headline": design.get("headline") or copy_blocks.get("headline"),
+                        "supporting": design.get("supporting") or copy_blocks.get("supporting"),
+                        "proof_lines": design.get("proof_lines") or copy_blocks.get("proof_lines") or [],
+                        "matrix_lines": design.get("matrix_lines") or copy_blocks.get("matrix_lines") or [],
+                    },
+                },
+                "text_density": design.get("text_density") or item.get("text_density"),
+                "visual_emphasis": design.get("visual_emphasis") or item.get("visual_emphasis"),
+                "global_consistency_note": design.get("global_consistency_note") or item.get("global_consistency_note"),
+            }
+        )
+        prompt_by_slot.pop(slot_id, None)
+    return next_asset_plan, next_prompt_plan
+
+
+def _copy_design_source(copy_design_plan: dict[str, dict[str, Any]]) -> str:
+    for value in copy_design_plan.values():
+        meta = value.get("_meta") if isinstance(value, dict) else None
+        if isinstance(meta, dict):
+            return str(meta.get("source") or "rule_based")
+    return "rule_based"
+
+
+def _merge_asset_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(llm_item, dict):
+        return base
+    merged = {**base}
+    expression_mode = repair_broken_text(llm_item.get("expression_mode"))
+    if expression_mode and expression_mode in set(base.get("candidate_expression_modes") or []):
+        meta = expression_metadata(expression_mode)
+        merged.update(meta)
+        merged["expression_mode"] = expression_mode
+    copy_focus = repair_broken_text(llm_item.get("copy_focus"))
+    if copy_focus:
+        merged["copy_focus"] = copy_focus
+    focus_selling_point = repair_broken_text(llm_item.get("focus_selling_point"))
+    if focus_selling_point:
+        merged["focus_selling_point"] = focus_selling_point
+    return merged
+
+
 def _build_default_prompt_plan_item(
     *,
     confirmed_copy: dict[str, Any],
@@ -304,14 +513,22 @@ def _build_default_prompt_plan_item(
     plan_item: dict[str, Any],
     reference_manifest: list[dict[str, Any]],
     analysis_snapshot: dict[str, Any],
+    parameter_snapshot: dict[str, Any],
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
 ) -> dict[str, Any]:
     role_hint = str(plan_item.get("reference_role_hint") or plan_item["role"])
-    reference_images = reference_images_used_for_role(reference_manifest, role_hint)
+    reference_images = reference_images_used_for_role(
+        reference_manifest,
+        role_hint,
+        max_images=_reference_image_limit_for_plan(plan_item, analysis_snapshot, reference_manifest),
+    )
     reference_image_ids = [item["image_id"] for item in reference_images]
     reference_slots = [item["slot_type"] for item in reference_images]
     reference_summary = _safe_analysis_section(analysis_snapshot, "reference_summary")
+    risk_flags = [str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()]
+    selling_point_entities = [str(item).strip() for item in (analysis_snapshot or {}).get("selling_point_entities", []) if str(item).strip()]
+    feature_highlights = [str(item).strip() for item in (parameter_snapshot or {}).get("feature_highlights", []) if str(item).strip()]
 
     slot_id = str(plan_item["slot_id"])
     product_name = confirmed_copy.get("product_name") or "商品"
@@ -334,6 +551,20 @@ def _build_default_prompt_plan_item(
         or (specs[0] if specs else "材质与结构")
     )
     rule_modules_used = [str(item) for item in plan_item.get("rule_modules_used", []) if str(item).strip()]
+    global_consistency_note = repair_broken_text(plan_item.get("global_consistency_note")) or _fallback_text(reference_summary.get("must_keep"), "")
+    truth_contract = build_truth_contract(
+        slot_id=slot_id,
+        analysis_snapshot=analysis_snapshot,
+        copy_focus=plan_item.get("copy_focus"),
+        focus_selling_point=plan_item.get("focus_selling_point"),
+        product_name=product_name,
+    )
+    selling_point_binding = _selling_point_binding(
+        copy_blocks=copy_blocks,
+        analysis_snapshot=analysis_snapshot,
+        feature_highlights=feature_highlights,
+        focus_selling_point=plan_item.get("focus_selling_point"),
+    )
     slot_guardrails_map = {
         "primary_kv": [
             "主体占画面约 45%-60%，必须预留主标题区",
@@ -428,12 +659,31 @@ def _build_default_prompt_plan_item(
         resolved_constraints.append("背景必须是纯白无缝，禁止人物、道具、场景元素。")
     if plan_item.get("text_policy") == "no_text":
         resolved_constraints.append("不要生成海报文字、标题字、角标、贴纸或说明文案。")
+    elif requires_simplified_chinese_visible_copy(platform_overlay.get("overlay_id")):
+        resolved_constraints.append("后加图上文案必须保持简体中文短句、高对比且与版式融合。")
+        resolved_constraints.append("商品本体原有英文、型号、logo、按钮字样或铭牌丝印属于保真范围，应尽量保持，不要擅自汉化。")
+        resolved_constraints.append("如果没有足够好的中文短句，宁可少字，也不要新增英文 slogan、英文副文案或英文卖点。")
     else:
         resolved_constraints.append("Visible copy must stay short, high-contrast and integrated into the layout.")
     if slot_id == "proof_authority":
         resolved_constraints.append("没有真实证书素材时，优先参数标签、面板特写或结构放大，不伪造权威认证。")
+    if slot_id == "primary_kv":
+        resolved_constraints.append("首图优先形成一句明确中文主利益点，并搭配 0-2 个短辅助利益点；不要再叠长副标题或大段解释。")
+        if requires_simplified_chinese_visible_copy(platform_overlay.get("overlay_id")):
+            resolved_constraints.append("首图标题要先说明产品是什么、解决什么问题；若标题不稳，优先少字，但不要退化成只有空泛产品名。")
+    if slot_id == "reason_why":
+        resolved_constraints.append("理由图至少要讲清 2 个不同理由点，优先理由卡、机制卡或证据化分镜，不要只喊泛口号。")
+    if slot_id == "proof_authority":
+        resolved_constraints.append("佐证图优先参数、部件、认证、结构和实验式证据，文案允许更短更硬，不做空氛围图。")
     if slot_id == "benefit_scene_or_compare":
-        resolved_constraints.append("画面必须有明确视觉强化区域，不允许做平淡白底陈列图。")
+        resolved_constraints.append("利益图必须明确讲出用户收益，并做强视觉强化区域，不允许做平淡白底陈列图。")
+    if slot_id == "closing_selling_point":
+        resolved_constraints.append("尾屏要承担总结收口，强调记忆点和购买理由，不要只是重复首图。")
+    if global_consistency_note:
+        resolved_constraints.append(f"全局一致性锚点：{global_consistency_note}")
+    if slot_id in {"detail", "proof_authority"}:
+        resolved_constraints.append("局部图只能放大解释上传参考图里可验证的结构，不可杜撰不属于真实商品的内部细节。")
+    resolved_constraints.extend(_truth_contract_constraints(slot_id, truth_contract))
 
     return {
         "slot_id": slot_id,
@@ -445,6 +695,8 @@ def _build_default_prompt_plan_item(
         "expression_mode": plan_item.get("expression_mode"),
         "expression_label": plan_item.get("expression_label"),
         "expression_reason": plan_item.get("expression_reason"),
+        "copy_focus": plan_item.get("copy_focus"),
+        "focus_selling_point": plan_item.get("focus_selling_point"),
         "copy_blocks": copy_blocks,
         "raw_prompt_override": plan_item.get("raw_prompt_override"),
         "applied_preset_id": plan_item.get("applied_preset_id"),
@@ -457,6 +709,9 @@ def _build_default_prompt_plan_item(
         "platform_rule_pack": plan_item.get("platform_rule_pack"),
         "reference_image_ids": reference_image_ids,
         "reference_slots": reference_slots,
+        "reference_image_limit": int(plan_item.get("reference_image_limit") or len(reference_image_ids) or 2),
+        "risk_flags": risk_flags,
+        "selling_point_binding": selling_point_binding,
         "must_keep": must_keep,
         "must_avoid": must_avoid,
         "slot_guardrails": slot_guardrails,
@@ -469,6 +724,8 @@ def _build_default_prompt_plan_item(
         "platform_context": f"{platform_name} {plan_item.get('slot_label') or plan_item.get('role_label')} 视觉策略",
         "white_bg_mode": bool(plan_item.get("requires_white_bg_validation")),
         "rule_modules_used": rule_modules_used,
+        "global_consistency_note": global_consistency_note,
+        "truth_contract": truth_contract,
         "resolved_constraints": resolved_constraints,
         "text_policy": plan_item.get("text_policy"),
     }
@@ -511,6 +768,10 @@ def _merge_prompt_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | Non
         merged["reference_slots"] = normalized_reference_slots
 
     merged["planner_source"] = "llm"
+    for key in ("expression_mode", "copy_focus", "focus_selling_point"):
+        value = repair_broken_text(llm_item.get(key))
+        if value:
+            merged[key] = value
     return merged
 
 
@@ -585,6 +846,7 @@ def _normalize_prompt_plan(
     confirmed_copy: dict[str, Any],
     reference_manifest: list[dict[str, Any]],
     analysis_snapshot: dict[str, Any],
+    parameter_snapshot: dict[str, Any],
     active_platform_id: str,
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
@@ -598,6 +860,7 @@ def _normalize_prompt_plan(
             plan_item=plan_item,
             reference_manifest=reference_manifest,
             analysis_snapshot=analysis_snapshot,
+            parameter_snapshot=parameter_snapshot,
             planner_instruction=planner_instruction,
             platform_overlay=platform_overlay,
         )
@@ -625,10 +888,15 @@ def _normalize_prompt_plan(
                 "display_order": int(item.get("display_order") or base["display_order"]),
                 "reference_image_ids": [str(v) for v in item.get("reference_image_ids", base["reference_image_ids"])],
                 "reference_slots": _normalize_phrase_list(item.get("reference_slots", base["reference_slots"])),
+                "reference_image_limit": int(item.get("reference_image_limit") or base.get("reference_image_limit") or 2),
                 "must_keep": _normalize_text_list(item.get("must_keep", base["must_keep"])),
                 "must_avoid": _normalize_text_list(item.get("must_avoid", base["must_avoid"])),
                 "slot_guardrails": _normalize_text_list(item.get("slot_guardrails", base.get("slot_guardrails", []))),
                 "rule_modules_used": [str(v) for v in item.get("rule_modules_used", base["rule_modules_used"])],
+                "global_consistency_note": repair_broken_text(item.get("global_consistency_note", base.get("global_consistency_note"))),
+                "risk_flags": _normalize_text_list(item.get("risk_flags", base.get("risk_flags", []))),
+                "selling_point_binding": item.get("selling_point_binding", base.get("selling_point_binding", {})),
+                "truth_contract": item.get("truth_contract", base.get("truth_contract", {})),
                 "resolved_constraints": _normalize_text_list(item.get("resolved_constraints", base["resolved_constraints"])),
                 "background_rule": repair_broken_text(item.get("background_rule", base["background_rule"])),
                 "composition_rule": repair_broken_text(item.get("composition_rule", base["composition_rule"])),
@@ -660,8 +928,87 @@ def find_prompt_plan_item(strategy_preview: dict[str, Any], asset_role: str) -> 
 def select_loaded_reference_images_for_role(
     loaded_reference_images: list[LoadedReferenceImage],
     role: str,
+    *,
+    max_images: int = 2,
 ) -> list[LoadedReferenceImage]:
-    return [item for item in select_reference_images_for_role(loaded_reference_images, role) if isinstance(item, LoadedReferenceImage)]
+    return [item for item in select_reference_images_for_role(loaded_reference_images, role, max_images=max_images) if isinstance(item, LoadedReferenceImage)]
+
+
+def _reference_image_limit_for_plan(
+    plan_item: dict[str, Any],
+    analysis_snapshot: dict[str, Any],
+    reference_manifest: list[dict[str, Any]],
+) -> int:
+    slot_id = str(plan_item.get("slot_id") or plan_item.get("role") or "").strip()
+    if slot_id not in {"detail", "proof_authority"}:
+        return 2
+    slot_types = {str(item.get("slot_type") or "").strip() for item in reference_manifest if isinstance(item, dict)}
+    risk_flags = {str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()}
+    if "side" in slot_types or ("extra" in slot_types and risk_flags & {"transparent_or_internal_structure", "control_panel_sensitive"}):
+        return 3
+    return 2
+
+
+def _selling_point_binding(
+    *,
+    copy_blocks: dict[str, Any],
+    analysis_snapshot: dict[str, Any],
+    feature_highlights: list[str],
+    focus_selling_point: Any,
+) -> dict[str, Any]:
+    entities = [str(item).strip() for item in (analysis_snapshot or {}).get("selling_point_entities", []) if str(item).strip()]
+    bound_focus = [
+        repair_broken_text(copy_blocks.get("headline")),
+        repair_broken_text(copy_blocks.get("supporting")),
+        repair_broken_text(focus_selling_point),
+        *[repair_broken_text(item) for item in (copy_blocks.get("proof_lines") or [])],
+        *[repair_broken_text(item) for item in (copy_blocks.get("matrix_lines") or [])],
+        *[repair_broken_text(item) for item in feature_highlights],
+    ]
+    return {
+        "entities": [item for item in entities[:4] if item],
+        "focus_texts": [item for item in bound_focus[:5] if item],
+    }
+
+
+def _truth_contract_constraints(slot_id: str, truth_contract: dict[str, Any]) -> list[str]:
+    if not isinstance(truth_contract, dict):
+        return []
+    constraints: list[str] = []
+    immutable = [repair_broken_text(item) for item in truth_contract.get("immutable_features", []) if repair_broken_text(item)]
+    forbidden = [repair_broken_text(item) for item in truth_contract.get("forbidden_drift", []) if repair_broken_text(item)]
+    entities = [repair_broken_text(item) for item in truth_contract.get("required_entities", []) if repair_broken_text(item)]
+    if immutable:
+        constraints.append("主体不可漂移：" + "；".join(immutable[:3]))
+    if forbidden:
+        constraints.append("关键结构不可换位：" + "；".join(forbidden[:3]))
+    if truth_contract.get("scale_anchor"):
+        constraints.append("比例与厚薄关系按参考图：" + repair_broken_text(truth_contract.get("scale_anchor")))
+    if not truth_contract.get("allow_structure_extrapolation", True):
+        constraints.append("证据不足时宁可保守，不补虚构结构。")
+    if slot_id in {"scene", "benefit_scene_or_compare"} and truth_contract.get("scene_grounding_rule"):
+        constraints.append(repair_broken_text(truth_contract.get("scene_grounding_rule")))
+    if entities:
+        constraints.append("若表达卖点，必须出现这些真实视觉证据：" + "、".join(entities[:3]))
+    return [item for item in constraints if item]
+
+
+def _sync_asset_plan_quality_metadata(asset_plan: list[dict[str, Any]], prompt_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prompt_by_slot = {str(item.get("slot_id") or item.get("role") or ""): item for item in prompt_plan if isinstance(item, dict)}
+    synced: list[dict[str, Any]] = []
+    for item in asset_plan:
+        slot_id = str(item.get("slot_id") or item.get("role") or "")
+        prompt_item = prompt_by_slot.get(slot_id, {})
+        synced.append(
+            {
+                **item,
+                "risk_flags": prompt_item.get("risk_flags", item.get("risk_flags", [])),
+                "truth_contract": prompt_item.get("truth_contract", item.get("truth_contract", {})),
+                "selling_point_binding": prompt_item.get("selling_point_binding", item.get("selling_point_binding", {})),
+                "reference_image_limit": int(prompt_item.get("reference_image_limit") or item.get("reference_image_limit") or 2),
+            }
+        )
+    return synced
 
 
 def _split_points(value: Any) -> list[str]:

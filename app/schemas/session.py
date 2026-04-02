@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -260,7 +261,7 @@ class CopySaveData(BaseModel):
 class CopyRegenerateRequest(BaseModel):
     targets: list[str] = Field(
         min_length=1,
-        description="需要重写的字段名列表。允许 headline/selling_points/usage_scenes/specs。",
+        description="需要重写的字段名列表。支持正式 Step4 字段 hero_scene/core_selling_points/key_parameters/product_advantages，也兼容 legacy headline/selling_points/usage_scenes/specs。",
     )
     instruction: str | None = Field(default=None, description="额外重写要求。")
     based_on_current_values: bool = Field(default=True, description="是否基于当前页面值而不是分析初稿。")
@@ -413,6 +414,13 @@ class DetailPromptPreviewItem(BaseModel):
     panel_id: str = Field(description="详情页 panel ID。")
     slot_id: str | None = Field(default=None, description="详情页固定槽位 ID。")
     panel_label: str = Field(description="panel 中文名。")
+    display_tags: list[str] = Field(default_factory=list, description="用户侧可直接展示的模块标签。")
+    display_module_title: str | None = Field(default=None, description="用户侧可直接展示的模块标题。")
+    display_module_kind: str | None = Field(default=None, description="用户侧模块类型说明。")
+    display_module_intent: str | None = Field(default=None, description="用户侧模块目标说明。")
+    narrative_section: str | None = Field(default=None, description="详情页叙事段落。")
+    panel_goal: str | None = Field(default=None, description="详情页 panel 目标。")
+    copy_focus: str | None = Field(default=None, description="详情页文案重点。")
     display_order: int = Field(description="显示顺序。")
     aspect_ratio: str = Field(description="固定为 21:9。")
     use_case: str = Field(description="固定为 amazon_detail。")
@@ -432,6 +440,8 @@ class DetailPromptPreviewItem(BaseModel):
     planner_source: str | None = Field(default=None, description="panel planner 来源，rule_based 或 llm。")
     planner_base: str | None = Field(default=None, description="panel 级 planner 基础语义。")
     rule_modules_used: list[str] = Field(default_factory=list, description="详情页规则模块列表。")
+    platform_overlay: dict[str, Any] | None = Field(default=None, description="详情页平台 overlay 元数据。")
+    copy_language: str | None = Field(default=None, description="当前详情页 panel 的图上文案语言策略。")
 
 
 class DetailPromptPreviewLatestAsset(BaseModel):
@@ -463,6 +473,8 @@ class DetailPromptPreviewData(BaseModel):
     image_size: str = Field(description="当前详情页预览输出尺寸。")
     product_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用商品参考图清单。")
     style_reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用详情页风格图清单。")
+    detail_story_brief: dict[str, str] = Field(default_factory=dict, description="详情页 8 段叙事摘要。")
+    detail_policy_version: str | None = Field(default=None, description="详情页语义分层策略版本。")
     prompts: list[DetailPromptPreviewItem] = Field(description="按 panel 顺序生成的 prompt 预览列表。")
     latest_assets: list[DetailPromptPreviewLatestAsset] = Field(description="最近一版详情页结果的执行快照。")
 
@@ -491,6 +503,10 @@ class ParameterSnapshotData(BaseModel):
     overwrite_mode: str = Field(default="replace_all", description="参数结果映射到 copy 的默认策略。")
 
 
+class ParameterCompletionRequest(BaseModel):
+    completion_instruction: str | None = Field(default=None, description="可选的二次补全指令。")
+
+
 class ParameterSnapshotUpdateRequest(BaseModel):
     relevance_status: str = Field(default="invalid", description="参数附件与当前商品的相关性状态。")
     rejection_reason: str = Field(default="", description="当相关性无效时的解释说明。")
@@ -499,7 +515,9 @@ class ParameterSnapshotUpdateRequest(BaseModel):
     key_parameters: list[dict[str, Any]] = Field(default_factory=list, description="提取出的结构化关键参数。")
     product_advantages: list[str] = Field(default_factory=list, description="提取出的产品优势列表。")
     feature_highlights: list[str] = Field(default_factory=list, description="提取出的附加亮点列表。")
-    source_summary: list[dict[str, Any]] = Field(default_factory=list, description="提取来源摘要。")
+    source_mode: str = Field(default="analysis_only", description="Step3 本次结果的来源模式。")
+    evidence_priority: str = Field(default="analysis_then_copy", description="Step3 证据优先级说明。")
+    evidence_summary: list[dict[str, Any]] = Field(default_factory=list, description="Step3 证据摘要。")
 
     @field_validator("hero_scene", "rejection_reason", mode="before")
     @classmethod
@@ -523,9 +541,6 @@ class GenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
     generation_round: int = Field(description="触发后预期进入的轮次。")
-    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
-    balance_after: int = Field(default=0, description="扣费后的余额。")
-    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
 
 
 class DetailGenerationJobData(BaseModel):
@@ -534,18 +549,12 @@ class DetailGenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
     session_id: str = Field(description="会话 ID。")
     detail_generation_round: int = Field(description="触发后预期进入的详情页轮次。")
-    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
-    balance_after: int = Field(default=0, description="扣费后的余额。")
-    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
 
 
 class GenericGenerationJobData(BaseModel):
     job_id: str = Field(description="任务 ID。")
     job_type: str = Field(description="任务类型。")
     status: str = Field(description="任务状态。")
-    charged_credits: int = Field(default=0, description="本次接受任务时扣减的额度。")
-    balance_after: int = Field(default=0, description="扣费后的余额。")
-    pricing_rule_id: str | None = Field(default=None, description="本次匹配的定价规则 ID。")
 
 
 class GalleryRegenerateRequest(BaseModel):
@@ -574,6 +583,9 @@ class AnalysisTriggerData(BaseModel):
 class AnalysisData(BaseModel):
     status: str = Field(description="当前 session 状态。")
     analysis_snapshot: dict[str, Any] = Field(description="图片分析结果快照。")
+    analysis_version: int = Field(description="分析结果版本号；仅在 analysis job 成功落库后递增。")
+    analysis_updated_at: datetime | None = Field(default=None, description="最近一次成功写入 analysis_snapshot 的时间。")
+    latest_analysis_job_id: str | None = Field(default=None, description="最近一次 analysis 任务 ID。")
 
 
 class SessionSnapshotData(BaseModel):
@@ -583,10 +595,13 @@ class SessionSnapshotData(BaseModel):
     selected_platform_ids: list[str] = Field(description="当前选中的平台列表。")
     active_platform_id: str | None = Field(default=None, description="当前生效平台。")
     analysis_snapshot: dict[str, Any] | None = Field(default=None, description="分析结果快照。")
+    analysis_version: int = Field(description="分析结果版本号。")
+    analysis_updated_at: datetime | None = Field(default=None, description="最近一次成功写入分析结果的时间。")
     parameter_snapshot: dict[str, Any] | None = Field(default=None, description="参数提取结果快照。")
     confirmed_copy: dict[str, Any] | None = Field(default=None, description="当前保存的 copy。")
     strategy_preview: dict[str, Any] | None = Field(default=None, description="当前保存的策略预览。")
     detail_strategy_preview: dict[str, Any] | None = Field(default=None, description="当前保存的详情页策略预览。")
+    latest_analysis_job_id: str | None = Field(default=None, description="最近一次分析任务 ID。")
     latest_generate_job_id: str | None = Field(default=None, description="最近一次生成任务 ID。")
     latest_detail_generate_job_id: str | None = Field(default=None, description="最近一次详情页生成任务 ID。")
     latest_parameter_job_id: str | None = Field(default=None, description="最近一次参数提取任务 ID。")

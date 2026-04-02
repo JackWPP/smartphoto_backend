@@ -21,15 +21,19 @@ def _as_utc(dt: datetime) -> datetime:
 def create_job(
     db: Session,
     session_id: str,
-    user_id: str,
     job_type: str,
     input_payload: dict | None = None,
     idempotency_key: str | None = None,
+    service_id: str | None = None,
+    user_id: str | None = None,
+    guest_id: str | None = None,
 ) -> JobModel:
     queued_at = now_utc()
     job = JobModel(
         session_id=session_id,
+        service_id=service_id or "default",
         user_id=user_id,
+        guest_id=guest_id,
         job_type=job_type,
         status="queued",
         progress=0,

@@ -5,6 +5,7 @@
 
 const API_BASE = import.meta.env.VITE_API_BASE || '/api/v2'
 const ACCESS_TOKEN_KEY = 'smartphoto_access_token'
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 let accessToken = localStorage.getItem(ACCESS_TOKEN_KEY) || ''
 let refreshPromise = null
@@ -151,6 +152,16 @@ async function request(method, path, options = {}) {
 }
 
 async function uploadWithPresign(sessionId, file, uploadKind, extra = {}) {
+  if (!file) {
+    throw { status: 400, code: 40001, message: '未选择上传文件' }
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw {
+      status: 400,
+      code: 40007,
+      message: `文件过大，当前仅支持 20MB 以内图片/附件。请压缩后重试。`,
+    }
+  }
   const normalizedDisplayOrder = Math.max(1, Number(extra.display_order) || 1)
   const presign = await request('POST', '/uploads/presign', {
     body: {
@@ -191,10 +202,21 @@ async function uploadWithPresign(sessionId, file, uploadKind, extra = {}) {
   }
 
   if (!uploadResponse.ok) {
+    let uploadMessage = ''
+    try {
+      uploadMessage = (await uploadResponse.text()).trim()
+    } catch {
+      uploadMessage = ''
+    }
+    const timeoutLike = uploadResponse.status === 524 || uploadResponse.status === 504
     throw {
       status: uploadResponse.status,
       code: uploadResponse.status,
-      message: 'Direct upload failed',
+      message:
+        uploadMessage ||
+        (timeoutLike
+          ? '上传超时，请压缩图片后重试；若仍失败，请检查生产环境是否仍经边缘层转发二进制上传。'
+          : uploadResponse.statusText || 'Direct upload failed'),
     }
   }
 

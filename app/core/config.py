@@ -39,8 +39,13 @@ class Settings(BaseSettings):
 
     test_user_id: str = "00000000-0000-0000-0000-000000000001"
     tasks_eager: bool = False
+    image_saas_default_app_id: str = "default"
+    image_saas_app_keys: str = '["default:local-dev-app-key"]'
     allow_dev_auth_bypass: bool = True
     user_jwt_secret: str = "smartphoto-user-dev-secret"
+    guest_cookie_name: str = "smartphoto_guest"
+    guest_cookie_ttl_days: int = Field(default=1, ge=1, le=365)
+    guest_trial_quota_total: int = Field(default=3, ge=1, le=20)
     user_access_token_exp_minutes: int = Field(default=120, ge=5, le=1440)
     user_refresh_token_exp_days: int = Field(default=14, ge=1, le=180)
     auth_rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
@@ -58,18 +63,55 @@ class Settings(BaseSettings):
     whatai_api_base: str = "https://api.whatai.cc"
     whatai_api_key: str = ""
     whatai_chat_model: str = "gpt-4.1-mini"
-    whatai_analysis_model: str = "gpt-4.1-mini"
-    whatai_planner_model: str = "gpt-4.1-mini"
-    whatai_image_model: str = "gpt-image-1"
-    whatai_parameter_model: str = "gemini-3.1-flash-lite-preview"
-    whatai_request_timeout_seconds: int = Field(default=180, ge=30, le=1800)
+    whatai_analysis_model: str = "gemini-3-pro-preview-thinking-high"
+    whatai_planner_model: str = "kimi-k2.5"
+    whatai_image_model: str = "gemini-3.1-flash-image-preview-2k"
+    whatai_parameter_model: str = "gemini-3-flash-preview"
+    whatai_request_timeout_seconds: int = Field(default=90, ge=30, le=1800)
+    whatai_image_edit_timeout_seconds: int = Field(default=120, ge=30, le=1800)
+    llm_provider: str = "whatai"
+    openrouter_api_base: str = "https://openrouter.ai/api/v1"
+    openrouter_api_key: str = ""
+    planner_profile: str = "harness_first"
+    llm_route_analysis: str = "whatai_gemini"
+    llm_route_main_planner: str = "whatai_gemini"
+    llm_route_detail_planner: str = "whatai_gemini"
+    llm_route_planner_light: str = "whatai_gemini"
+    planner_fallback_route: str = "whatai_gemini"
+    llm_route_parameter_visual: str = "whatai_gemini"
+    llm_route_parameter_completion: str = "openrouter_text"
+    llm_route_main_copy_design: str = "disabled"
+    llm_route_detail_copy_review: str = "openrouter_text"
+    llm_route_form_rewrite: str = "openrouter_text"
+    llm_route_text_review: str = "openrouter_text"
+    llm_route_text_presentation: str = "openrouter_text"
+    llm_analysis_model: str = "deepseek/deepseek-v3.2"
+    llm_main_planner_model: str = "deepseek/deepseek-v3.2"
+    llm_detail_planner_model: str = "minimax/minimax-m2.7"
+    llm_parameter_model: str = "deepseek/deepseek-v3.2"
+    llm_fallback_model: str = "deepseek/deepseek-v3.2"
+    whatai_planner_light_model: str = "gemini-3-flash-preview"
+    openrouter_planner_light_model: str = "moonshotai/kimi-k2.5"
+    openrouter_main_planner_model: str = "moonshotai/kimi-k2.5"
+    openrouter_detail_planner_model: str = "moonshotai/kimi-k2.5"
+    openrouter_parameter_completion_model: str = "deepseek/deepseek-v3.2"
+    openrouter_main_copy_design_model: str = "minimax/minimax-m2.7"
+    openrouter_detail_copy_review_model: str = "minimax/minimax-m2.7"
+    openrouter_form_rewrite_model: str = "deepseek/deepseek-v3.2"
+    openrouter_text_review_model: str = "minimax/minimax-m2.7"
+    openrouter_text_presentation_model: str = "minimax/minimax-m2.7"
 
     generation_lock_ttl_seconds: int = Field(default=600, ge=30)
     main_generation_concurrency: int = Field(default=4, ge=1, le=12)
     detail_generation_concurrency: int = Field(default=6, ge=1, le=16)
     generation_submit_concurrency: int = Field(default=6, ge=1, le=16)
+    detail_generation_submit_concurrency: int = Field(default=4, ge=1, le=16)
+    image_submit_batch_size: int = Field(default=5, ge=1, le=16)
+    detail_image_submit_batch_size: int = Field(default=4, ge=1, le=16)
+    image_submit_batch_interval_seconds: int = Field(default=5, ge=0, le=120)
+    image_poll_initial_delay_seconds: int = Field(default=45, ge=0, le=300)
     image_task_timeout_seconds: int = Field(default=450, ge=60, le=1800)
-    image_poll_profile: str = Field(default='[{"interval_seconds":5,"attempts":6},{"interval_seconds":10,"attempts":12},{"interval_seconds":15,"attempts":20}]')
+    image_poll_profile: str = Field(default='[{"interval_seconds":10,"attempts":6},{"interval_seconds":15,"attempts":8},{"interval_seconds":20,"attempts":10}]')
     credit_pricing_rules: str = Field(
         default='{"generate_gallery":{"credits":10,"description":"主图整组生成"},"generate_detail_page":{"credits":16,"description":"详情页整组生成"},"global_edit":{"credits":8,"description":"主图全局修改"},"regenerate_asset":{"credits":3,"description":"单张主图重生成"},"regenerate_detail_panel":{"credits":4,"description":"单张详情页 panel 重生成"},"regenerate_gallery":{"credits":10,"description":"主图整组重生成"}}'
     )
@@ -80,7 +122,7 @@ class Settings(BaseSettings):
         except json.JSONDecodeError:
             value = None
         if not isinstance(value, list):
-            return [{"interval_seconds": 5, "attempts": 6}, {"interval_seconds": 10, "attempts": 12}, {"interval_seconds": 15, "attempts": 20}]
+            return [{"interval_seconds": 10, "attempts": 6}, {"interval_seconds": 15, "attempts": 8}, {"interval_seconds": 20, "attempts": 10}]
         normalized: list[dict[str, int]] = []
         for item in value:
             if not isinstance(item, dict):
@@ -89,7 +131,7 @@ class Settings(BaseSettings):
             attempts = int(item.get("attempts") or 0)
             if interval_seconds > 0 and attempts > 0:
                 normalized.append({"interval_seconds": interval_seconds, "attempts": attempts})
-        return normalized or [{"interval_seconds": 5, "attempts": 6}, {"interval_seconds": 10, "attempts": 12}, {"interval_seconds": 15, "attempts": 20}]
+        return normalized or [{"interval_seconds": 10, "attempts": 6}, {"interval_seconds": 15, "attempts": 8}, {"interval_seconds": 20, "attempts": 10}]
 
     def parsed_credit_pricing_rules(self) -> dict[str, dict[str, object]]:
         try:
@@ -129,6 +171,32 @@ class Settings(BaseSettings):
                 continue
             normalized.append(item)
             seen.add(item)
+        return normalized
+
+    def parsed_image_saas_app_keys(self) -> dict[str, str]:
+        raw_value = (self.image_saas_app_keys or "").strip()
+        if not raw_value:
+            return {}
+        try:
+            value = json.loads(raw_value)
+        except json.JSONDecodeError:
+            value = None
+        normalized: dict[str, str] = {}
+        if isinstance(value, dict):
+            candidates = [f"{key}:{secret}" for key, secret in value.items()]
+        elif isinstance(value, list):
+            candidates = [str(item).strip() for item in value]
+        else:
+            candidates = [item.strip() for item in raw_value.split(",")]
+        for item in candidates:
+            if not item or ":" not in item:
+                continue
+            app_id, app_key = item.split(":", 1)
+            app_id = app_id.strip()
+            app_key = app_key.strip()
+            if not app_id or not app_key:
+                continue
+            normalized[app_id] = app_key
         return normalized
 
 
@@ -188,4 +256,18 @@ def get_settings() -> Settings:
     settings.admin_frontend_dist.mkdir(parents=True, exist_ok=True)
     settings.database_url = resolve_database_url(settings.database_url)
     settings.storage_backend = (settings.storage_backend or "local").strip().lower()
+    settings.llm_provider = (settings.llm_provider or "whatai").strip().lower()
+    settings.planner_profile = (settings.planner_profile or "harness_first").strip().lower()
+    settings.llm_route_analysis = (settings.llm_route_analysis or "whatai_gemini").strip().lower()
+    settings.llm_route_main_planner = (settings.llm_route_main_planner or "whatai_gemini").strip().lower()
+    settings.llm_route_detail_planner = (settings.llm_route_detail_planner or "whatai_gemini").strip().lower()
+    settings.llm_route_planner_light = (settings.llm_route_planner_light or "whatai_gemini").strip().lower()
+    settings.planner_fallback_route = (settings.planner_fallback_route or "whatai_gemini").strip().lower()
+    settings.llm_route_parameter_visual = (settings.llm_route_parameter_visual or "whatai_gemini").strip().lower()
+    settings.llm_route_parameter_completion = (settings.llm_route_parameter_completion or "openrouter_text").strip().lower()
+    settings.llm_route_main_copy_design = (settings.llm_route_main_copy_design or "disabled").strip().lower()
+    settings.llm_route_detail_copy_review = (settings.llm_route_detail_copy_review or "openrouter_text").strip().lower()
+    settings.llm_route_form_rewrite = (settings.llm_route_form_rewrite or "openrouter_text").strip().lower()
+    settings.llm_route_text_review = (settings.llm_route_text_review or "openrouter_text").strip().lower()
+    settings.llm_route_text_presentation = (settings.llm_route_text_presentation or "openrouter_text").strip().lower()
     return settings

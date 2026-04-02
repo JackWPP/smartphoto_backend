@@ -10,7 +10,9 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "sessions"
 
-    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    service_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    guest_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="created", index=True)
     current_step: Mapped[int] = mapped_column(Integer, default=1)
 
@@ -18,6 +20,8 @@ class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     active_platform_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     analysis_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    analysis_version: Mapped[int] = mapped_column(Integer, default=0)
+    analysis_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     parameter_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     confirmed_copy: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     strategy_preview: Mapped[dict | None] = mapped_column(JSON, nullable=True)

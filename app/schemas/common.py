@@ -25,6 +25,7 @@ OPENAPI_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     403: {"model": APIErrorResponse, "description": "无权限访问该资源。"},
     404: {"model": APIErrorResponse, "description": "资源不存在，例如 session/job/asset 不存在。"},
     409: {"model": APIErrorResponse, "description": "并发冲突或幂等冲突，例如 40901 / 40902。"},
+    410: {"model": APIErrorResponse, "description": "能力已下线，当前仓库不再提供该功能。"},
     422: {"model": APIErrorResponse, "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。"},
     500: {"model": APIErrorResponse, "description": "服务内部异常。"},
     502: {"model": APIErrorResponse, "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。"},

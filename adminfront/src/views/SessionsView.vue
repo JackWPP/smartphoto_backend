@@ -7,7 +7,7 @@
       </div>
       <div class="toolbar-actions">
         <input v-model="filters.session_id" class="compact-input" placeholder="session_id" />
-        <input v-model="filters.user_id" class="compact-input" placeholder="user_id" />
+        <input v-model="filters.service_id" class="compact-input" placeholder="service_id" />
         <button class="ghost-button" @click="loadSessions">刷新</button>
       </div>
     </div>
@@ -30,7 +30,7 @@
               <tr v-for="item in sessions.items || []" :key="item.session_id" :class="{ active: selectedSessionId === item.session_id }" @click="openSession(item.session_id)">
                 <td>
                   <strong>{{ item.session_id }}</strong>
-                  <small>{{ item.user_id }}</small>
+                  <small>{{ item.service_id }}</small>
                 </td>
                 <td>{{ item.active_platform_id || '-' }}</td>
                 <td><span class="status-chip">{{ item.status }}</span></td>
@@ -225,7 +225,7 @@ import JsonEditor from '../components/JsonEditor.vue'
 import { csvToList, listToMultiline, multilineToList, parseJsonInput, prettyJson } from '../lib/format'
 import { useConfirmAction } from '../lib/useConfirmAction'
 
-const filters = reactive({ session_id: '', user_id: '' })
+const filters = reactive({ session_id: '', service_id: '' })
 const sessions = ref({ items: [] })
 const detail = ref({})
 const selectedSessionId = ref('')
@@ -281,7 +281,25 @@ async function openSession(sessionId) {
   selectedSessionId.value = sessionId
   detail.value = await adminApi.getSession(sessionId)
   hydrateEditors(detail.value.session)
-  await Promise.all([loadResults(), loadDetailResults(), loadPreviews()])
+  await Promise.allSettled([loadResults(), loadDetailResults(), loadPreviews()])
+}
+
+function previewBlockedState(session) {
+  if (!session?.confirmed_copy) {
+    return {
+      blocked: true,
+      reason: 'copy not ready',
+      hint: '先在 Step4 Copy 面板补齐 copy，再刷新主图/详情页 prompt 预览。',
+    }
+  }
+  if (!session?.active_platform_id) {
+    return {
+      blocked: true,
+      reason: 'active platform required',
+      hint: '该 session 还没有 active_platform_id，暂时无法生成策略与 prompt 预览。',
+    }
+  }
+  return null
 }
 
 function buildCopyPayload() {
@@ -376,12 +394,24 @@ async function loadPreviews() {
   if (!selectedSessionId.value) {
     return
   }
-  const [mainPrompt, detailPrompt] = await Promise.all([
+  const blocked = previewBlockedState(detail.value.session)
+  if (blocked) {
+    promptPreview.value = blocked
+    detailPromptPreview.value = blocked
+    return
+  }
+  const [mainPrompt, detailPrompt] = await Promise.allSettled([
     adminApi.previewSessionPrompts(selectedSessionId.value, { instruction: actionForm.instruction, include_latest_assets: true }),
     adminApi.previewDetailPrompts(selectedSessionId.value, { instruction: actionForm.instruction, include_latest_assets: true }),
   ])
-  promptPreview.value = mainPrompt
-  detailPromptPreview.value = detailPrompt
+  promptPreview.value =
+    mainPrompt.status === 'fulfilled'
+      ? mainPrompt.value
+      : { error: mainPrompt.reason?.message || 'main prompt preview failed' }
+  detailPromptPreview.value =
+    detailPrompt.status === 'fulfilled'
+      ? detailPrompt.value
+      : { error: detailPrompt.reason?.message || 'detail prompt preview failed' }
 }
 
 async function loadResults() {

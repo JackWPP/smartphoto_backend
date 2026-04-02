@@ -3,7 +3,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-from redis import Redis
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -22,7 +21,15 @@ os.environ["STORAGE_BACKEND"] = "local"
 os.environ["STORAGE_ROOT"] = str(TEST_STORAGE)
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
 os.environ["WHATAI_API_KEY"] = ""
+os.environ["IMAGE_SAAS_APP_KEYS"] = '["default:test-app-key","partner-b:test-partner-key"]'
+os.environ["IMAGE_SAAS_DEFAULT_APP_ID"] = "default"
 
+if TEST_DB_PATH.exists():
+    TEST_DB_PATH.unlink()
+if ADMIN_TEST_DB_PATH.exists():
+    ADMIN_TEST_DB_PATH.unlink()
+if TEST_STORAGE.exists():
+    shutil.rmtree(TEST_STORAGE, ignore_errors=True)
 TMP_ROOT.mkdir(parents=True, exist_ok=True)
 TEST_STORAGE.mkdir(parents=True, exist_ok=True)
 
@@ -47,7 +54,7 @@ def setup_database():
     if ADMIN_TEST_DB_PATH.exists():
         ADMIN_TEST_DB_PATH.unlink()
     if TEST_STORAGE.exists():
-        shutil.rmtree(TEST_STORAGE)
+        shutil.rmtree(TEST_STORAGE, ignore_errors=True)
 
     engine = create_engine(TEST_DB, connect_args={"check_same_thread": False})
     testing_session_local = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
@@ -72,18 +79,18 @@ def setup_database():
     if ADMIN_TEST_DB_PATH.exists():
         ADMIN_TEST_DB_PATH.unlink()
     if TEST_STORAGE.exists():
-        shutil.rmtree(TEST_STORAGE)
+        shutil.rmtree(TEST_STORAGE, ignore_errors=True)
 
 
 @pytest.fixture
 def client(setup_database):
-    return TestClient(app)
+    client = TestClient(app)
+    client.headers.update({"X-App-Key": "test-app-key"})
+    return client
 
 
 @pytest.fixture(autouse=True)
 def reset_test_state(setup_database):
-    redis = Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
-    redis.flushdb()
     with db_session.SessionLocal() as db:
         for table in reversed(Base.metadata.sorted_tables):
             db.execute(table.delete())
@@ -93,7 +100,6 @@ def reset_test_state(setup_database):
             db.execute(table.delete())
         db.commit()
     if TEST_STORAGE.exists():
-        shutil.rmtree(TEST_STORAGE)
+        shutil.rmtree(TEST_STORAGE, ignore_errors=True)
     TEST_STORAGE.mkdir(parents=True, exist_ok=True)
     yield
-    redis.flushdb()

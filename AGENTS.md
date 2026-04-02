@@ -12,6 +12,12 @@
 - 状态真相：`jobs` 与 `sessions` 由数据库持久化；禁止仅依赖进程内内存状态。
 - 存储：通过 `StorageAdapter` 访问，本地实现为默认，后续可切 S3 兼容。
 
+## LLM 与 Prompt 固定原则
+- 视觉主链（`analysis` / 主图 planner / 详情页 planner / 视觉参数提取）默认保持 `WhatAI + Gemini`，不得因为引入 OpenRouter 就无说明替换稳定链路。
+- OpenRouter 的默认职责是文本辅助 Agent、多模型横向试配与 reviewer/rewrite，不是视觉主链替代者。
+- 对 LLM 输出优先做 `prompt 围墙 + schema validator + 同模型 repair 1 次 + fallback`，不要优先用 regex、业务硬编码或 normalize 偷改语义。
+- Step 2 品类识别优先消费后台“全局品类库”；客户新增品类时先配品类库，不要回到 analysis fallback 里硬编码。
+
 ## 代码分层约定
 - `app/api`: HTTP 路由层，仅处理请求解析与响应封装。
 - `app/services`: 业务服务层，含状态机、策略构建、幂等、锁、任务分发。
@@ -35,12 +41,32 @@
 - 联调真相文档：`docs/API_联调指南.md`
 - 生图执行语义文档：`docs/生图Agent协作逻辑.md`
 - 运维与排障文档：`docs/运行与排障手册.md`
+- 生产上线真相文档：`docs/生产上线SOP.md`
 - 触发条件与责任：
   - 新增/修改路由、请求参数、响应结构：必须更新 `docs/API_联调指南.md`
   - 新增/修改 job_type、事件流、版本语义、锁策略：必须更新 `docs/生图Agent协作逻辑.md`
   - 新增/修改错误码、诊断路径、运行命令：必须更新 `docs/运行与排障手册.md`
+  - 新增/修改发布流程、发包命令、备份步骤、回滚步骤、固定运维约束：必须更新 `docs/生产上线SOP.md`
   - 若实现行为与 SPEC 不一致：必须更新 `docs/API_联调指南.md` 的“实现 vs SPEC 差距清单”
   - 完成上述更新后，再更新 `AGENTS.md` 里程碑日志
+
+## 生产上线固定约束
+- 生产默认路径：`/opt/smartphoto_backend`
+- 生产 compose project 必须固定：`COMPOSE_PROJECT_NAME=smartphoto_backend`
+- 生产默认流程必须使用“新 release 目录解压 + 复制服务器 `.env.prod` + preflight + deploy/rollback”
+- 非必要不执行 `docker compose down`
+- 非必要不重建 `postgres` / `redis`
+- 改 `.env.prod` 后禁止只用 `docker compose restart`；必须 `up -d --force-recreate`
+- 有 Alembic migration 的发布必须先做 PostgreSQL 备份，再执行不带 `--skip-migrate` 的发布
+- 无 migration 的纯应用层发布必须优先使用 `./scripts/deploy-prod.sh --skip-migrate`
+- 但只要代码包包含新的 Alembic revision，或线上日志已出现 `UndefinedTable/UndefinedColumn`，就禁止继续使用 `--skip-migrate`
+- 运维/上线指导默认提供完整、可直接复制执行的命令块，不提供省略版片段
+- 发布后最少执行：
+  - `curl http://127.0.0.1:8000/healthz`
+  - `curl http://127.0.0.1:8000/api/admin/v1/auth/health`
+  - CORS 预检
+  - `docker compose logs --tail=... api worker`
+- 具体命令真相源见：`docs/生产上线SOP.md`
 
 ## 测试门禁
 - 至少通过以下检查：
@@ -188,3 +214,187 @@
   - 后台列表接口统一支持 `page/page_size/sort_by/sort_order`，审计日志扩展 `module/risk_level/operator_note`
   - 额度调整、手工补单、Prompt/Rule Pack 变更、Session 干预、资产归档/恢复/重生成、Job 重试统一写后台审计备注
   - 新增后台控制台集成测试，覆盖 Dashboard、System、用户通知、Session 预览/结果、Job 事件历史与审计留痕
+- 2026-03-23 API Reliability:
+  - `POST /api/v2/sessions/{session_id}/analysis` 在 session 仍为 `created` 但已存在上传图片时，会自动补正到 `images_uploaded -> analyzing`，避免 worker 侧再报 `cannot transition created -> analyzing`
+  - `run_analysis_job` 同步补充兜底修复，兼容历史脏状态任务
+  - `POST /api/v2/sessions/{session_id}/strategy/preview` 对同一份输入新增缓存复用：若 `input_hash` 未变化，直接返回已持久化的 `strategy_preview`，减少前端超时重试时重复触发同步 planner
+  - 同步更新 `docs/API_联调指南.md`、`docs/运行与排障手册.md` 与回归测试
+- 2026-03-24 Oncall:
+  - `POST /api/v2/sessions/{session_id}/copy/regenerate` 扩展为新旧字段双兼容：正式字段 `hero_scene/core_selling_points/key_parameters/product_advantages` 与 legacy `headline/selling_points/usage_scenes/specs` 都可下发到 worker，避免 `invalid_copy_field`
+  - `run_regenerate_copy_job` 对列表/结构化参数字段先规范化成可重写文本，再交给上游 copy regenerate，防止 `key_parameters/core_selling_points` 直接传 list/dict 进重写器
+  - 运行排障手册补充生产上传链路建议：前端若位于 ESA / CDN Worker 后，应优先走 `/api/v2/uploads/presign|complete`，避免二进制 multipart 经边缘代理返回 `524`
+- 2026-03-24 Guest Trial:
+  - 新增 `guest_identities` 模型与 `20260324_0011` 迁移；`sessions/jobs/idempotency_records` 改为 `user_id/guest_id` 二选一归属，并增加所有权约束
+  - 新增 `RequestActor` 与 guest cookie 识别逻辑：未登录浏览器可匿名完成 `POST /api/v2/sessions`、Step1~Step5 和首轮 `POST /api/v2/sessions/{session_id}/generations`
+  - `GET /api/v2/sessions/{session_id}` 与首轮生成响应新增 `auth_mode/guest_quota_remaining/login_required_actions/guest_trial/login_required_after_result`
+  - guest 首轮主图生成默认每浏览器 3 次；第 4 次返回 `40302 guest_trial_exhausted`；下载、全局修改、重生成、详情页生成等结果后动作返回 `40102 login_required`
+  - `POST /api/v2/auth/register|login` 现在会自动认领当前浏览器 guest 的 `sessions/jobs/idempotency_records`，登录后结果页与账户历史无缝续接
+  - 后台 `sessions/jobs` 列表与序列化兼容 guest owner，新增 `guest_id/owner_kind/owner_label` 字段
+- 2026-03-25 Guest Alignment:
+  - guest 能力扩展到详情页真实链路：`detail-pages/style-images|strategy/overrides|prompts/preview|generations|results` 全部支持 `RequestActor(kind=guest)`
+  - 新增显式认领接口 `POST /api/v2/guest/sessions/{session_id}/claim`；与登录/注册自动认领共用同一套 guest 迁移逻辑，并保持原 `session_id` 不变
+  - guest 门禁收口为“下载与结果后二次编辑再登录”：`download/detail-pages/download/results/global-edit/results/regenerate/assets/{id}/regenerate` 仍返回 `40102 login_required`
+  - guest 配额升级为主图与详情页共用同一浏览器 `3` 次匿名整组生成；`generate_detail_page` 响应同步补齐 `guest_trial/guest_quota_remaining/login_required_after_result`
+  - `GUEST_COOKIE_TTL_DAYS` 默认收口为 `1`（24 小时软失效），guest 过期后不可继续创作或认领
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/API_全量接口手册.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、OpenAPI 导出与 guest 回归测试
+- 2026-03-25 Guest First:
+  - guest 门禁进一步收口为“仅下载与历史要求登录”：当前 session 内的主图/详情页生成、全局修改、整组重生成、单图重生成全部对 guest 放开
+  - `POST /api/v2/auth/register|login` 不再自动认领当前浏览器 guest 资源；前端需在登录后显式调用 `POST /api/v2/guest/sessions/{session_id}/claim`
+  - `POST /api/v2/guest/sessions/{session_id}/claim` 改为只迁移当前 session 及其关联 jobs / idempotency_records，不再认领整浏览器 guest 身份
+  - `GET /api/v2/sessions/{session_id}` 的 guest 响应改为 `can_continue_editing=true`、`login_required_actions=["download","save_history"]`、`guest_quota_remaining=null`
+  - guest 产品级配额关闭；生成响应中的 `guest_trial/guest_quota_remaining/login_required_after_result` 仅保留兼容字段，固定返回 `false/null/false`
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/API_全量接口手册.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、SPEC、OpenAPI 导出与 guest 回归测试
+- 2026-03-25 Ops SOP:
+  - 新增 `docs/生产上线SOP.md`，固化单机 Docker Compose 生产发包、备份、预检、发布、冒烟、回滚和常见坑位
+  - `AGENTS.md` 新增生产上线固定约束，后续 session 默认按 `COMPOSE_PROJECT_NAME=smartphoto_backend + 新 release 目录` 路径执行
+  - `Readme.md` 与 `scripts/package-prod.sh` 同步挂入上线 SOP 文档入口，确保部署包内也包含该文档
+- 2026-03-26 Ops Lessons:
+  - 生产上线 SOP 与运行排障手册补充“`--skip-migrate` 前必须核对 alembic_version”和“误跳过 migration 后的补救命令”
+  - 新增构建阶段网络慢时的完整替代命令：临时 Dockerfile 同时切换 `npm/apt/pip` 到国内镜像源
+  - 新增 CORS `Disallowed CORS origin`、`guest_identities does not exist`、`POSTGRES_USER unbound variable`、`FileNotFoundError: Dockerfile` 的标准排障命令
+  - Readme 明确 `.env.prod` 中的 `PIP_*` 不会自动影响 `docker build`，默认引导到 `docs/生产上线SOP.md` 的完整命令块
+- 2026-03-26 Upload Reliability:
+  - 前端 `uploadWithPresign` 新增 `10MB` 本地预校验，超过上限直接返回 `40007 file_too_large`，避免用户在边缘层长时间等待后才看到 `524/504`
+  - 本地 `PUT /api/v2/uploads/direct/{upload_id}` 改为流式写盘，不再 `await request.body()` 一次性读完整文件，降低 local storage 部署下的大图上传超时与内存峰值风险
+  - 本地上传完成后的图片探测改为优先按文件路径读取，减少 `complete_upload` 阶段对本地大文件的额外全量读内存
+  - 运行排障手册补充“上传 `524/504` 时如何区分旧前端 multipart、local 伪直传与真实 S3/OSS 直传”的标准排查命令
+- 2026-03-26 M16:
+  - 新增 `LLMRouter` 与 `LLM_PROVIDER/OPENROUTER_API_*/LLM_*` 配置，analysis / 主图 planner / 详情页 planner / 参数提取支持按任务切 OpenRouter 模型；WhatAI 继续负责图片生成链路
+  - Step 2 `analysis_snapshot` 扩展 `analysis_source/category_candidates/scene_tags/detected_view_slots/supplement_image_recommendations/reanalysis_required`，fallback 默认类目改为 `其他`，不再把 `家居用品` 当成默认结论
+  - 商品图 upload/delete 与 `/api/v2/uploads/complete` 改为“只失效不自动分析”：仅置 `analysis_snapshot.reanalysis_required=true` 并清空 `strategy_preview/detail_strategy_preview`，分析改为必须显式调用 `POST /api/v2/sessions/{session_id}/analysis`
+  - 主图策略预览新增共享 reference load 的 `input_hash` 复用；详情页策略预览新增 `detail_story_brief`、`panel_plan.narrative_section/panel_goal/copy_focus/product_reference_ids/style_reference_ids` 与 `input_hash` 缓存复用
+  - 详情页执行链路改为优先消费 panel 级参考图，`assets.generation_snapshot` 记录 `effective_reference_image_ids`，grid 只作为辅助 fallback
+  - 参数提取与分析链路增加受控尺寸图片加载，上传完成对非本地存储优先走 object metadata/head，减少重复读图和远端整文件回读
+  - 同步更新 `.env.example`、`.env.prod.example`、`Readme.md`、`docs/API_联调指南.md`、`docs/API_全量接口手册.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、`docs/OSS_对接与上线指南.md`、`docs/生产上线SOP.md`、OpenAPI 导出与相关集成测试
+- 2026-03-27 M17:
+  - 系统定位收口为纯图片 SaaS：图片主链路统一通过 `X-App-Key` 鉴权，新增 `ServicePrincipal(app_id)`，`sessions/jobs/idempotency_records` 持久化 `service_id`
+  - `/api/v2/auth/*`、`/api/v2/account/*`、`/api/v2/guest/*` 下线为 `410 feature_removed`；图片接口继续保留在 `/api/v2`
+  - `sessions/jobs/uploads/assets/prompt-presets` 主链路全部按 `service_id + session_id` 做隔离，移除 user/guest owner 依赖；上传票据、幂等和下载全部改成服务端调用语义
+  - 主图与详情页统一复用同一个 `session_id`；详情页链路不再要求重复上传商品图
+  - 后台裁剪为图片运维台：移除 admin users、business/pricing 视角，Overview 改为 `runtime_cards/ops_cards/config_cards`，列表与序列化统一返回 `service_id`
+  - 新增 `20260327_0012_image_saas_decouple` 迁移，补齐 `service_id/session_id` 字段并移除 owner-xor 约束
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、`docs/生产上线SOP.md`、SPEC、OpenAPI 导出、后台前端测试与图片 SaaS 相关回归测试
+- 2026-03-27 Dev DX:
+  - `scripts/dev-api.sh` 改为本地开发稳态入口：启动前自动迁移、热更新仅监控 `app/scripts/alembic`、默认排除 `runtime/storage/.git`
+  - `scripts/dev-api.sh` 新增端口自检与自动顺延逻辑；当 `8000` 被 Docker 或其他本地服务占用时，会自动回退到后续空闲端口并打印实际监听地址
+  - `Readme.md` 与 `docs/运行与排障手册.md` 补充“无 Docker 本地开发”指南，明确 `SQLite + TASKS_EAGER=true` 轻量模式与 `PostgreSQL + Redis + Worker` 真实异步模式
+- 2026-03-27 M18:
+  - LLM 路由改为按任务显式选择：视觉主链默认 `WhatAI + Gemini`，OpenRouter 只保留给文本辅助任务
+  - `WhataiClient` 的 `analysis / 主图 planner / 详情页 planner / 参数提取` 新增 prompt-first validator+repair 流程：先 schema 校验，再同模型重问 1 次，仍失败才 fallback
+  - `analysis_snapshot / strategy_preview / detail_strategy_preview / parameter_snapshot` 补充 `provider/model/prompt_version/repair_round/source` 调试元数据
+  - 新增全局品类库 `category_catalogs`、后台管理接口 `/api/admin/v1/category-catalog*` 与后台页面，Step 2 analysis prompt 改为显式消费启用品类库
+  - fallback 默认类目继续保持 `其他`，不再把 `家居用品` 当成弱默认兜底；analysis 输出非法 `priority/slot_type/category` 时优先 repair，不再直接打挂 worker
+- 2026-03-27 M19:
+  - Step 2 `supplement_image_recommendations` 升级为“建议补传什么图片”的结构化清单，新增 `upload_goal/must_show/framing_hint/example_caption/image_kind`
+  - Step 3 新增同步二次补全接口 `POST /api/v2/sessions/{session_id}/parameters/complete`，参数链路改为 `extract -> complete` 两段式；`parameter_snapshot` 新增 `completion_status/completion_source/inferred_* / confidence_notes`
+  - 主图策略预览新增文本侧 `main copy design agent`，为每个槽位补充 `headline/supporting/proof_lines/matrix_lines/text_density/visual_emphasis`，并引入 `global_consistency_note` 约束局部图不得杜撰结构
+  - 详情页策略预览新增文本侧 `detail copy reviewer agent`，`panel_plan` 与结果补充 `visual_truth_mode/origin_note`，用于区分真实局部图与机制示意图
+  - 详情页 worker 事件流补充 `detail_strategy_ready/detail_panel_render_started/detail_panel_render_succeeded/detail_stitched_ready`，后台 runtime 卡片单独暴露 detail 队列运行态
+  - `SmartPhoto/dev2` 前端同步适配：AnalyzeStep 直接消费后端补图建议，UploadStep 展示补传卡片，GenerateStep 顺序调用 `extract -> complete`，详情页确认/结果页展示 `panel_goal/copy_focus/narrative_section/visual_truth_mode/origin_note`
+  - 同步更新 `Readme.md`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、OpenAPI 导出与 Step2/Step3/详情页相关回归测试
+- 2026-03-27 M20:
+  - 不再使用 `xiaomi/mimo` 作为默认 OpenRouter 文本模型；文本辅助默认收口为 `deepseek + minimax`
+  - 为避免额外时延与过度设计，`llm_route_main_copy_design` 与 `llm_route_detail_copy_review` 默认改为 `disabled`
+  - 视觉主链模型不因这次文本 Agent 收口而变更；Step 3 二次补全仍保留为唯一默认开启的 OpenRouter 文本链路
+- 2026-03-28 M21:
+  - Step 3 职责重定义为“单次调用的小型文案策划 Agent”：默认前端主链只使用 `POST /api/v2/sessions/{session_id}/parameters/extract`
+  - `POST /api/v2/sessions/{session_id}/parameters/extract` 不再要求必须先上传参数附件；无附件时改为基于 `analysis_snapshot + 当前 session 商品图 + confirmed_copy` 生成可编辑整页结果
+  - `parameter_snapshot` 收口为 Step 3 最终结果源，固定承载 `hero_scene/core_selling_points/key_parameters/product_advantages/feature_highlights`，并补充 `source_mode/evidence_priority/evidence_summary`
+  - `POST /api/v2/sessions/{session_id}/parameters/complete` 保留兼容，但退出默认前端流程
+  - `SmartPhoto` Step 3 页默认不再自动调用 `parameters/complete`，首次进入和补传附件后都只重跑一次 `parameters/extract`
+  - Step 3 本地/样例环境变量统一显式收口：`WHATAI_PARAMETER_MODEL` 默认改为 `gemini-3-flash-preview`，避免再出现实现与规划不一致
+- 2026-03-28 M22:
+  - Step 5 策略预览新增运行时 `planner_profile`，当前支持 `harness_first|light_model` 两档；`strategy_preview/detail_strategy_preview` 与对应 `input_hash` 均会记录当前 profile/provider/model
+  - 主图/详情页 planner 默认模型收口为 `WHATAI_PLANNER_MODEL=gemini-3.1-pro-preview-thinking-high`，轻量档默认 `WHATAI_PLANNER_LIGHT_MODEL=gemini-3-flash-preview`，OpenRouter 轻量备选为 `moonshotai/kimi-k2.5`
+  - 图片生成默认模型切换为 `WHATAI_IMAGE_MODEL=gemini-3.1-flash-image-preview-2k`
+  - `job status` 接口新增返回 `result_payload`；当上游返回 `429` 时，worker 会显式写入 `rate_limited (42901)` 与 `upstream_http_status/upstream_reason`
+  - `SmartPhoto` 主图/详情页结果页新增“上游限流”错误映射，不再把 `429` 一律展示成 `Job timed out`
+- 2026-03-28 M23:
+  - `POST /api/v2/sessions/{session_id}/generations` 进入 worker 后，会优先复用 session 上已持久化且 `input_hash` 未变化的 `strategy_preview`，不再为了正式生成再重跑 Step 5 planner
+  - `POST /api/v2/sessions/{session_id}/detail-pages/generations` 同样优先复用已持久化且 `input_hash` 未变化的 `detail_strategy_preview`
+  - 该改动用于消除“策略页已经成功，但正式生成时又被 planner 限流卡住”的重复耗时与重复失败源
+- 2026-03-28 M24:
+  - 主图/详情页 planner 默认临时切到 `WhatAI + kimi-k2.5`，并对 `kimi-k2.5` 请求自动追加 `enable_thinking=true`
+  - planner 命中 `429/超时` 时新增“一次轻量降级补救”：自动切到 `PLANNER_FALLBACK_ROUTE + WHATAI_PLANNER_LIGHT_MODEL` 再试 1 次，不做同模型多轮重试
+  - `strategy_preview/detail_strategy_preview` 新增 `planner_primary_* / planner_fallback_* / planner_attempt_count / planner_final_source` 调试元数据；job failure payload 增加 `planner_stage`
+  - 详情页 prompt 组装新增“planning context vs visible copy”隔离，过滤 `Proof/panel_goal/copy_focus/设计证明/【...】` 等内部规划标签，避免泄露到最终成图
+  - 修复 detail worker 复用预览时误读 `product_manifest` 字段的问题，确保 `detail_strategy_preview` 命中同一 `input_hash` 时不再重跑 planner/reviewer
+  - 生产 `docker-compose.prod.yml` 改为通过 `bash ./scripts/docker-{api,worker,migrate}.sh` 启动，避免容器内直接执行脚本时因执行位异常导致 `permission denied`
+- 2026-03-30 Hotfix:
+  - `1688/taobao` 主图 prompt 新增“图上 visible copy 必须为简体中文”的硬约束；`alibaba_intl` 继续保持英文站点语义
+  - 主图下载后、落库前新增图中文字语言验收：默认允许简体中文、数字、必要计量单位和 `confirmed_copy` 推导出的型号/缩写白名单
+  - 若 `1688/taobao` 结果图识别到非白名单英文，只对当前单图补提 1 次；二次仍失败时在 `assets.generation_snapshot.language_validation` 写入 `retry_applied/soft_failed/disallowed_latin_tokens`
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与阿里平台 prompt/worker 回归测试
+- 2026-03-30 Hardening:
+  - `1688/taobao` visible copy 策略收口为“prompt-first + validator 兜底”：国内平台 prompt 明确要求中文短句、少字、不要英文营销词；若中文不稳，宁可少字或无字
+  - visible copy 白名单仅保留 `confirmed_copy.product_name + key_parameters` 推导出的型号/缩写，不再从 headline / selling points / specs 自动放行英文营销词
+  - 图中文字验收改为“双层软补救”：先补 1 次更强中文约束，再补 1 次“少字/必要时无字”保守版本；两次后仍失败只写 `retry_applied/rescue_stage/soft_failed/reason` 留痕，不整组打挂
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与 visible copy 相关回归测试
+- 2026-03-30 Analysis Freshness:
+  - `sessions` 新增 `analysis_version/analysis_updated_at`，`GET /api/v2/sessions/{session_id}` 与 `GET /api/v2/sessions/{session_id}/analysis` 统一返回 freshness 契约
+  - analysis worker 仅在新 `analysis_snapshot` 与 freshness 字段成功落库后才写 job `succeeded`，并在 `job.result_payload` 回传本轮 freshness 元数据
+  - 商品图 upload/delete、`/api/v2/uploads/complete`、平台切换与显式重跑 analysis 改为统一清理下游陈旧产物：保留旧快照、置 `reanalysis_required=true`、清空 `parameter_snapshot/strategy_preview/detail_strategy_preview`
+  - Step 3 参数提取改为不再把旧 `parameter_snapshot` 合并回自己的输入；旧 session 回到 `2 -> 3` 时不会再被上一轮参数结果自我污染
+  - 补充旧 session 重跑分析、平台切换失效、图片补传失效与 Step 3 去旧值回归测试，并同步更新 API 联调、Agent 协作、运行排障文档与 OpenAPI 导出
+- 2026-03-30 Prompt Matrix:
+  - 新增统一 `prompt_safety` 层，形成 `Agent Prompt / Planner Prompt / Render Prompt / Sanitize/Validation Prompt` 四层 Prompt Matrix
+  - analysis / 主图 planner / 详情页 planner / Step3 / copy regenerate 的内部提示默认统一走中文表述，并补充“不输出思考过程、内部规划字段、流程说明”的共用约束
+  - 主图 `copy_blocks`、详情页 `copy_lines/copy_blocks`、Step3/Step4 默认编辑值、copy regenerate 返回值统一走清洗，过滤 `panel_goal/copy_focus/narrative_section/origin_note/visual_truth_mode/Proof/设计证明/规则模块/布局模板/【...】/思考过程`
+  - 主图与详情页 `generation_snapshot` 新增 `sanitized_fields/copy_safety_notes` 轻量调试痕迹；继续保持非阻断式治理，不新增整任务硬失败
+  - 同步更新 `docs/提示词汇总.md`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与相关回归测试
+- 2026-03-30 Performance Restore:
+  - 主图生成热路径明确保持“批量提交全部任务 -> 集中轮询 -> 并发下载结果”，不再在下载后、落库前追加图中文字语言验收或单图补救重生
+  - `1688/taobao` 中文 visible copy 改回纯 prompt-first：继续通过规则包、策略预览和最终 render prompt 强化“简体中文短句、若不稳宁可少字或无字、不要英文营销词、不要内部规划标签”
+  - 保留 `prompt_safety` 的文案清洗与白底能力标记校验，但不再为了语言审核拖慢整组主图生成时长
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与主图 worker 回归测试
+- 2026-03-30 Reliability Hotfix:
+  - `analysis / main_planner / detail_planner / Step3` 命中 `429` 时改为先做单请求内短退避重试；planner 若仍失败优先 fallback，不再直接进入整 job 长退避
+  - 主图下载阶段改为“单槽位补救优先”：单张失败先重试该槽位；若仍失败，当前版本允许以 `partial_succeeded` 落库，不再让整组结果归零
+  - `GET /api/v2/sessions/{session_id}/results` 新增 `summary.expected_count`、`expected_slot_ids`、`missing_slot_ids`，前端可直接复用 `slot_ids` 补齐缺失槽位
+  - 主图 `generation_snapshot` 新增 `download_retry_count / download_rescued / download_rescue_reason`，运行排障手册同步补充 `429` 与缺图排查口径
+- 2026-03-30 Prompt Refinement:
+  - 详情页默认链路移除独立 `detail copy reviewer` 调用，`copy_focus/panel_goal/visual_truth_mode/origin_note` 改为由 `detail_planner` 一次性产出，详情页默认 LLM 调用数减少 1 次
+  - `1688/taobao` visible copy 规则收口为“新增海报文案必须中文化，但商品本体原有英文、型号、logo、按钮字样和铭牌丝印属于保真范围，应尽量保留”
+  - 主图阿里 5 槽位约束进一步强化为“短而有信息密度”：首图强调主利益点，理由图至少 2 个理由维度，佐证图优先参数/部件/结构证据，场景图强调明确收益，尾屏负责总结收口
+  - Prompt Debug 的 `blocks.constraints/final_prompt`、提示词总表、API 联调指南、Agent 协作文档与运行排障手册同步更新到新口径，并补充主图/详情页定向回归测试
+- 2026-03-30 Detail Chinese Fix:
+  - 详情页中文站链路正式接入平台语言策略：`1688/淘宝/京东/拼多多/抖音/小红书/自定义中文站` 的新增 panel 文案、可编辑文案和 prompt 可见文案默认收口为简体中文
+  - 详情页 rule-based fallback 不再优先透传 legacy `selling_points/usage_scenes/specs`；改为优先消费 `hero_scene/core_selling_points/product_advantages/key_parameters`，并对 legacy 英文营销文案做过滤与降级
+  - `detail_strategy_preview` 新增 `platform_overlay/copy_language/language_policy_version` 元数据；旧英文 preview 若命中语言策略版本落后或中文站仍残留英文营销文案，会在再次预览或正式生成时自动重建
+  - `detail-pages/prompts/preview.prompts[*]` 新增 `platform_overlay/copy_language`，同步更新 API 联调指南、运行排障手册、Agent 协作文档、提示词总表与详情页中英文回归测试
+- 2026-03-30 Timeout Tuning:
+  - `WHATAI_REQUEST_TIMEOUT_SECONDS` 默认值从 `180s` 收紧到 `90s`，并让 `/v1/images/edits` 的 multipart 请求同样走该配置
+  - 保持 `IMAGE_EDIT_REQUEST_ATTEMPTS=4` 和现有 1/2/4s 短退避不变，仅缩短单次同步阻塞时间，降低 `read operation timed out` 的单次等待成本
+  - 同步更新 `.env.example`、`.env.prod.example`、`Readme.md`、`docs/运行与排障手册.md`、`docs/生图流程文档.md`、`docs/生图提速优化报告_客户版.md` 与相关回归测试
+- 2026-03-30 Detail Prompt Matrix:
+  - 详情页 render prompt 去规划化：`final_prompt` 不再直接暴露 `Panel 类型 / 布局模板 / 内部规划语义仅用于推理`，改为先归并为 `visual_contract / copy_contract / truth_contract`
+  - `detail_strategy_preview`、`detail-pages/prompts/preview` 与 `detail-pages/results` 新增 `detail_policy_version` 与 `display_module_title/display_module_kind/display_module_intent`，作为用户侧详情模块展示真相源
+  - 详情页进一步补充 `display_tags`，供前端直接展示中文 chip，不再渲染 `panel_type / narrative_section / visual_truth_mode` 原始内部值
+  - 详情页 `copy_lines/copy_blocks` 的 sanitize 进一步增强，额外过滤 `卖点槽位 / 场景卖点 / 产品类型 / 模块 / product_type / feature_* / parameter_* / kv_* / icon_*` 等内部模板词，优先重写为业务短句，无法稳定重写时直接降级为空
+  - `key_parameters` 若只有机器 key 没有正式 label，不再把 `product_type` 这类 schema key 直接拼进详情页可见文案；同时 `copy_lines` 会做去重与低信息降级，减少重复短句
+  - 旧详情页 preview 的自动重建判定扩展到 `detail_policy_version`、`display_module_*` 缺失和内部模板词残留；再次访问 preview 或正式生成时会自动升级并持久化
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、`docs/提示词汇总.md` 与详情页定向回归测试
+- 2026-03-30 Submit Cadence Hotfix:
+  - 主图与详情页的 `/images/edits` 链路改为“每批最多 5 个、批间隔 5 秒、提交后约 45 秒再开始轮询”，避免一次性把所有同步长请求同时打到上游
+  - 新增 `WHATAI_IMAGE_EDIT_TIMEOUT_SECONDS=120`，图片编辑请求不再与文本链路共用 `WHATAI_REQUEST_TIMEOUT_SECONDS=90`
+  - `IMAGE_POLL_PROFILE` 默认节奏改为 `10s x 6 + 15s x 8 + 20s x 10`；`generation_submit_concurrency` 收口为单批内部并发上限
+  - `generation_snapshot` 与 `job_progress` 新增 `submission_batch_no/submission_batch_size/submit_strategy_version/poll_started_after_ms` 等留痕，便于验收和排障确认后端已按新节奏执行
+  - 同步更新 `.env.example`、`.env.prod.example`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与提交节奏相关回归测试
+- 2026-04-02 Detail Partial Success:
+  - 详情页 submit 阶段从 fail-fast 改为“聚合成功 panel + 记录失败 panel”：单个 `/images/edits` 提交失败不再直接打崩整组 detail job
+  - `generate_detail_page/regenerate_detail_panel` 现在允许在仍有 ready panel 时写 `partial_succeeded`，并在 `job.result_payload` 与 `GET /api/v2/sessions/{session_id}/detail-pages/results` 回传 `expected_panel_ids/missing_panel_ids/expected_panel_count`
+  - 详情页新增事件 `detail_panel_render_failed`；partial 版本不再生成 stitched 长图，`stitched_asset` 显式允许为空
+  - 主图 submit 阶段失败也并入现有 `missing_slot_ids` 语义，不再因为单张 submit 失败跳过整版落库
+  - 新增 `DETAIL_GENERATION_SUBMIT_CONCURRENCY=4`、`DETAIL_IMAGE_SUBMIT_BATCH_SIZE=4`，后台 `/api/admin/v1/system/runtime` 同步暴露 detail 专属 submit 节奏
+  - 同步更新 `SmartPhoto_Backend_SPEC_v2 (1).md`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、OpenAPI 导出与详情页/主图回归测试
+- 2026-04-02 Quality Hardening:
+  - `analysis_snapshot` 新增 `selling_point_entities/risk_flags/evidence_scores`，`reference_summary` 扩展比例、面板、透明件、结构锚点与场景适配信息
+  - 主图 `strategy_preview.prompt_plan` 新增 `truth_contract/risk_flags/selling_point_binding`，结构敏感槽位会自动保真降级
+  - 主图与详情页 render prompt 统一补充“主体不可漂移 / 关键结构不可换位 / 比例按参考图 / 证据不足时保守降级”的保真约束
+  - `GET /api/v2/sessions/{session_id}/results` 与 `detail-pages/results` 的 `version_summaries` 扩展 `created_at/job_type/is_partial/cover_asset_id/cover_thumbnail_url/missing_*`
+  - 结果资产项扩展 `carry_forward/source_version_no/fidelity_validation_status`
+  - 后台 SQLite 新增 `quality_feedback_cases`，并开放 `POST|GET /api/admin/v1/assets/{asset_id}/quality-feedback` 作为轻量质量反馈闭环
+- 2026-04-02 Generation Hotpath Simplify:
+  - 主图与详情页生成链路移除下载后的逐张 `fidelity_validation` 与单槽位补救重生，job 在图片下载完成后直接进入收尾落库
+  - `truth_contract/risk_flags/selling_point_binding` 继续保留为 planner 与 render prompt 的前置约束，不再作为热路径复检触发器
+  - `assets.generation_snapshot.fidelity_validation` 与结果接口 `fidelity_validation_status` 保留兼容字段，当前默认返回 `null`

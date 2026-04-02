@@ -17,20 +17,14 @@ class RedisLockManager:
         self.redis.delete(key)
 
 
-def acquire_generation_locks(session_id: str, user_id: str) -> list[str]:
+def acquire_generation_locks(session_id: str) -> list[str]:
     manager = RedisLockManager()
     session_lock = f"lock:session:{session_id}:generation"
-    user_lock = f"lock:user:{user_id}:generation"
     acquired: list[str] = []
 
     try:
         if manager.acquire(session_lock):
             acquired.append(session_lock)
-        else:
-            raise AppError("job_already_running", http_status=409)
-
-        if manager.acquire(user_lock):
-            acquired.append(user_lock)
         else:
             raise AppError("job_already_running", http_status=409)
     except AppError:

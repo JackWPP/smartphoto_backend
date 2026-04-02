@@ -11,7 +11,9 @@ class JobModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "jobs"
 
     session_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("sessions.id"), index=True)
-    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    service_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    guest_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
     job_type: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)

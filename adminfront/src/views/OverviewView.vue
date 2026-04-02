@@ -3,7 +3,7 @@
     <div class="page-toolbar">
       <div>
         <span class="eyebrow">Overview</span>
-        <h3>经营与运行总览</h3>
+        <h3>运行与产出总览</h3>
       </div>
       <button class="ghost-button" @click="loadAll">刷新看板</button>
     </div>
@@ -27,36 +27,11 @@
       <article class="surface-card">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Business Snapshot</span>
-            <h4>经营快照</h4>
+            <span class="eyebrow">Ops Focus</span>
+            <h4>当前关注点</h4>
           </div>
         </div>
-        <div class="stats-list">
-          <div class="stats-row">
-            <span>累计用户</span>
-            <strong>{{ business.total_users }}</strong>
-          </div>
-          <div class="stats-row">
-            <span>7日活跃 Session</span>
-            <strong>{{ business.active_sessions_7d }}</strong>
-          </div>
-          <div class="stats-row">
-            <span>累计付费订单</span>
-            <strong>{{ business.paid_orders_total }}</strong>
-          </div>
-          <div class="stats-row">
-            <span>累计入账额度</span>
-            <strong>{{ business.credits_granted_total }}</strong>
-          </div>
-          <div class="stats-row">
-            <span>累计消耗额度</span>
-            <strong>{{ business.credits_consumed_total }}</strong>
-          </div>
-          <div class="stats-row">
-            <span>未读通知</span>
-            <strong>{{ business.unread_notifications_total }}</strong>
-          </div>
-        </div>
+        <p>只保留图片系统的运行指标、失败任务和高风险操作。用户、订单、额度类经营视角已从当前后台移除。</p>
       </article>
     </div>
 
@@ -110,13 +85,12 @@ import { computed, onMounted, ref } from 'vue'
 import { adminApi } from '../api'
 import TrendChart from '../components/TrendChart.vue'
 
-const overview = ref({ summary: {}, runtime_cards: [], business_cards: [], config_cards: [] })
+const overview = ref({ summary: {}, runtime_cards: [], ops_cards: [], config_cards: [] })
 const trends = ref({ points: [] })
-const business = ref({})
 
 const allCards = computed(() => [
   ...(overview.value.runtime_cards || []),
-  ...(overview.value.business_cards || []),
+  ...(overview.value.ops_cards || []),
   ...(overview.value.config_cards || []),
 ])
 
@@ -147,14 +121,12 @@ const trendSeries = computed(() => [
 ])
 
 async function loadAll() {
-  const [overviewData, trendData, businessData] = await Promise.all([
+  const [overviewData, trendData] = await Promise.all([
     adminApi.dashboardOverview(),
     adminApi.dashboardTrends({ days: 7 }),
-    adminApi.dashboardBusiness(),
   ])
   overview.value = overviewData
   trends.value = trendData
-  business.value = businessData
 }
 
 onMounted(loadAll)

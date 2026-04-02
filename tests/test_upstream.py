@@ -5,13 +5,17 @@ from pathlib import Path
 
 from PIL import Image
 
+from app.core.config import Settings
 from app.core.errors import AppError
 from app.services.copy_normalization import normalize_key_parameters
+from app.services.detail_pages import compose_detail_panel_prompt
+from app.services.llm_router import LLMRouter
 from app.services.main_gallery_rules import build_copy_blocks, get_main_gallery_slot_blueprints
 from app.services.pipeline import _apply_analysis_defaults_to_copy
 from app.services.reference_images import LoadedReferenceImage, select_reference_images_for_role
 from app.services.strategy import build_strategy_preview
 from app.services.upstream import WhataiClient
+from app.services.visible_copy_policy import build_visible_text_allowlist, filter_disallowed_latin_tokens
 from app.services.white_bg import validate_white_background
 
 
@@ -51,6 +55,14 @@ def test_compose_prompt_returns_structured_prompt_payload():
     assert "不要生成海报文字" in prompt["blocks"]["constraints"]
     assert "目标：" in prompt["final_prompt"]
     assert "参考画幅比例 1:1" in prompt["final_prompt"]
+
+
+def test_settings_default_whatai_request_timeout_seconds_is_90():
+    assert Settings(_env_file=None).whatai_request_timeout_seconds == 90
+
+
+def test_settings_default_whatai_image_edit_timeout_seconds_is_120():
+    assert Settings(_env_file=None).whatai_image_edit_timeout_seconds == 120
 
 
 def test_white_bg_prompt_has_strict_background_constraints():
@@ -164,6 +176,120 @@ def test_alibaba_prompt_exposes_slot_structure_and_copy_policy():
     assert "slot_guardrails" in prompt["prompt_sections_used"]
     assert "标题区 + 产品主体 + 背景结构 + 底部利益点" in prompt["blocks"]["composition"]
     assert prompt["slot_guardrails"]
+    assert "后加的图上文案必须为简体中文短句；只允许阿拉伯数字、必要计量单位，以及用户已提供的型号/缩写。" in prompt["blocks"]["constraints"]
+    assert "保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印，不要擅自汉化或改字。" in prompt["final_prompt"]
+    assert "图上文案和用户可编辑文案都必须是最终表达" in prompt["blocks"]["constraints"]
+    assert "Visible copy must stay short" not in prompt["blocks"]["constraints"]
+    assert "新增图上文案只能使用简体中文短句" in prompt["final_prompt"]
+
+
+def test_alibaba_intl_prompt_keeps_english_visible_copy_constraint():
+    from app.services.prompts import compose_prompt
+
+    strategy_preview = build_strategy_preview(
+        {
+            "product_name": "Air Purifier",
+            "headline": "Quiet Purification",
+            "core_selling_points": ["Quiet Sleep", "Fast Cleanup"],
+            "hero_scene": "Bedroom",
+            "product_advantages": ["Compact Body"],
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "style_choice": "Clean Studio",
+            "style_custom": "",
+        },
+        "alibaba_intl",
+    )
+
+    prompt = compose_prompt(
+        {
+            "product_name": "Air Purifier",
+            "headline": "Quiet Purification",
+            "core_selling_points": ["Quiet Sleep", "Fast Cleanup"],
+            "hero_scene": "Bedroom",
+            "product_advantages": ["Compact Body"],
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "style_choice": "Clean Studio",
+            "style_custom": "",
+        },
+        strategy_preview,
+        "primary_kv",
+    )
+
+    assert "Visible copy must stay short" in prompt["blocks"]["constraints"]
+    assert "图上可见文字必须保持简体中文短句" not in prompt["blocks"]["constraints"]
+
+
+def test_visible_text_allowlist_only_keeps_explicit_model_or_abbreviation_tokens():
+    allowlist = build_visible_text_allowlist(
+        {
+            "product_name": "空气净化器 H13",
+            "headline": "FAST CLEAN",
+            "core_selling_points": ["USB-C 快充", "IPX7 防水", "LIGHT MODE"],
+            "key_parameters": [
+                {"label": "CADR", "value": "500", "unit": "m3/h"},
+                {"label": "滤芯等级", "value": "HEPA", "unit": ""},
+            ],
+            "product_advantages": ["HEPA 过滤", "母婴可用"],
+        }
+    )
+
+    assert "H13" in allowlist
+    assert "HEPA" in allowlist
+    assert "CADR" in allowlist
+    assert "USB-C" in allowlist
+    assert "IPX7" in allowlist
+    assert "FAST" not in allowlist
+    assert "CLEAN" not in allowlist
+    assert "LIGHT" not in allowlist
+    assert filter_disallowed_latin_tokens(["CADR", "Night", "m3/h", "H13", "USB-C", "IPX7", "HEPA"], allowlist) == ["Night"]
+
+
+def test_visible_text_filter_rejects_mixed_alphanumeric_marketing_tokens_when_not_allowlisted():
+    assert filter_disallowed_latin_tokens(["24H", "360PROTECT", "5-Speed", "CADR"], ["CADR"]) == [
+        "24H",
+        "360PROTECT",
+        "5-Speed",
+    ]
+
+
+def test_inspect_visible_text_language_flags_only_non_whitelisted_english(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.llm_router, "is_available", lambda task: task == "analysis")
+    monkeypatch.setattr(
+        client,
+        "_run_structured_task",
+        lambda **kwargs: {
+            "result": {
+                "status": "failed",
+                "has_readable_text": True,
+                "detected_text_lines": ["HIGH EFFICIENCY", "CADR 150 m3/h"],
+                "latin_tokens": ["HIGH", "EFFICIENCY", "CADR", "m3/h"],
+                "reason": "detected english tokens",
+            },
+            "meta": {
+                "provider": "whatai",
+                "model": "gemini-3-flash-preview",
+                "prompt_version": "visible_text_language_v1",
+                "repair_round": 0,
+                "source": "primary",
+            },
+        },
+    )
+
+    image = Image.new("RGB", (320, 320), (255, 255, 255))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG")
+
+    result = client.inspect_visible_text_language(
+        image_bytes=buffer.getvalue(),
+        platform_id="1688",
+        allowed_abbreviations=["CADR"],
+    )
+
+    assert result["status"] == "failed"
+    assert result["passed"] is False
+    assert result["disallowed_latin_tokens"] == ["HIGH", "EFFICIENCY"]
+    assert result["allowed_latin_tokens"] == ["CADR"]
 
 
 def test_proof_authority_prompt_prefers_proof_elements_and_blocks_fake_certificates():
@@ -421,6 +547,60 @@ def test_request_json_with_retry_retries_remote_protocol_error(monkeypatch):
     assert calls["count"] == 2
 
 
+def test_llm_router_request_json_retries_rate_limit(monkeypatch):
+    router = LLMRouter(Settings(whatai_api_key="test-key"))
+    calls = {"count": 0}
+
+    class FakeResponse:
+        def __init__(self, status_code: int, *, text: str = "", headers: dict[str, str] | None = None):
+            self.status_code = status_code
+            self.text = text
+            self.headers = headers or {}
+            self.reason_phrase = "Too Many Requests" if status_code == 429 else "OK"
+
+        def raise_for_status(self) -> None:
+            if self.status_code >= 400:
+                request = httpx.Request("POST", "https://api.whatai.cc/v1beta/models/gemini-3-flash-preview:generateContent")
+                raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=self)
+
+        def json(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, *_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                return FakeResponse(429, text="busy", headers={"Retry-After": "1"})
+            return FakeResponse(200)
+
+    monkeypatch.setattr("app.services.llm_router.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.services.llm_router.time.sleep", lambda *_args: None)
+
+    result = router._request_json_with_retry(
+        base_url="https://api.whatai.cc",
+        method="POST",
+        path="/v1beta/models/gemini-3-flash-preview:generateContent",
+        payload={"contents": []},
+        headers={"Authorization": "Bearer test"},
+        error_key="upstream_llm_error",
+        attempts=3,
+        retryable_on_exhausted=True,
+    )
+
+    assert result == {"ok": "true"}
+    assert calls["count"] == 3
+    assert router._consume_retry_meta()["rate_limit_retry_count"] == 2
+
+
 def test_extract_image_result_supports_nested_async_payload():
     client = WhataiClient()
 
@@ -644,17 +824,134 @@ def test_request_multipart_json_with_retry_marks_transport_errors_retryable(monk
     assert exc_info.value.retryable is True
 
 
+def test_request_multipart_json_with_retry_uses_configured_timeout(monkeypatch):
+    client = WhataiClient()
+    client.settings.whatai_image_edit_timeout_seconds = 123
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.upstream.httpx.Client", FakeClient)
+
+    result = client._request_multipart_json_with_retry(
+        base_url="https://api.whatai.cc/v1",
+        path="/images/edits",
+        data={"model": "nano-banana-2-2k", "prompt": "test", "aspect_ratio": "1:1"},
+        files=[],
+        headers={"Authorization": "Bearer test"},
+        error_key="upstream_image_error",
+        attempts=1,
+        retryable_on_exhausted=True,
+    )
+
+    assert result == {"ok": "true"}
+    assert captured["kwargs"]["timeout"] == 123
+
+
+def test_poll_image_tasks_respects_initial_delay(monkeypatch):
+    client = WhataiClient()
+    sleep_calls: list[float] = []
+
+    monkeypatch.setattr("app.services.upstream.time.sleep", lambda delay: sleep_calls.append(delay))
+
+    def fake_request_json_with_retry(**_kwargs):
+        return {"data": {"status": "SUCCESS", "url": "https://example.com/out.jpg"}}
+
+    monkeypatch.setattr(client, "_request_json_with_retry", fake_request_json_with_retry)
+
+    results = client.poll_image_tasks(
+        [{"submission_id": "sub-1", "task_id": "task-1"}],
+        "upstream_image_error",
+        initial_delay_seconds=45,
+    )
+
+    assert results["task-1"]["url"] == "https://example.com/out.jpg"
+    assert sleep_calls[0] == 45
+
+
 def test_analyze_images_builds_inline_image_payload(monkeypatch):
     client = WhataiClient()
     monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
     monkeypatch.setattr(client.settings, "whatai_analysis_model", "analysis-fast-model")
+    monkeypatch.setattr(client.settings, "llm_route_analysis", "whatai_gemini")
     captured: dict[str, object] = {}
 
-    def fake_post_chat_json(payload, _error_key):
-        captured["payload"] = payload
-        return {"choices": [{"message": {"content": "{}"}}]}
+    def fake_complete_json(*, task, messages, error_key, temperature=0.2, model=None):
+        captured["task"] = task
+        captured["messages"] = messages
+        captured["model"] = model
+        return {
+            "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "image_type": "实物图", "confidence": 91},
+            "image_assessment": {"quality_score": 0.9, "summary": "清晰"},
+            "missing_views": ["angle45", "side"],
+            "suggestions": [],
+            "copy_draft": {"headline": "空气净化器"},
+            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+            "suggested_styles": ["现代简约"],
+            "reference_summary": {
+                "shape": "圆柱形",
+                "colors": "白色",
+                "materials": "塑料",
+                "structures": "进风格栅",
+                "must_keep": "外形不能变",
+                "proportion_note": "保持塔式比例",
+                "control_panel_note": "面板在机身正面上半区",
+                "transparent_parts_note": "",
+                "structure_anchor_points": "进风格栅、顶盖和面板位置",
+                "do_not_move_features": "面板和进风口不要换位",
+                "scene_fit_notes": "场景摆放需与地面自然接触",
+            },
+            "category_candidates": [
+                {"category": "空气净化器", "confidence": 91, "reason": "主体是空气净化器"},
+                {"category": "加湿器", "confidence": 25, "reason": "外形近似但无明显喷雾证据"},
+                {"category": "其他", "confidence": 10, "reason": "保底候选"},
+            ],
+            "scene_tags": ["白底产品"],
+            "evidence_scores": {"structure": 82, "proportion": 74, "scene": 60, "text": 78},
+            "risk_flags": ["control_panel_sensitive"],
+            "selling_point_entities": ["控制面板"],
+            "supplement_image_recommendations": [
+                {
+                    "slot_type": "angle45",
+                    "label": "45 度角图",
+                    "reason": "补充结构信息",
+                    "priority": 1,
+                    "upload_goal": "补齐立体结构和厚薄关系。",
+                    "must_show": "顶部、正面和一侧的真实连接关系。",
+                    "framing_hint": "45 度斜拍，完整带到顶部和侧边。",
+                    "example_caption": "45°结构更清楚",
+                }
+            ],
+            "detected_view_slots": ["front"],
+        }
 
-    monkeypatch.setattr(client, "_post_chat_json", fake_post_chat_json)
+    monkeypatch.setattr(client.llm_router, "complete_json", fake_complete_json)
+    monkeypatch.setattr(client.llm_router, "is_available", lambda task: True)
+    monkeypatch.setattr(
+        "app.services.upstream.list_active_category_catalog",
+        lambda db=None: [
+            {"name": "空气净化器", "aliases": ["净化器"], "sample_keywords": ["CADR"], "notes": "", "is_featured": True},
+            {"name": "加湿器", "aliases": ["加湿"], "sample_keywords": ["喷雾"], "notes": "", "is_featured": True},
+        ],
+    )
 
     image = LoadedReferenceImage(
         "img-front",
@@ -671,8 +968,8 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
     )
     client.analyze_images([image], "temu")
 
-    assert captured["payload"]["model"] == "analysis-fast-model"
-    message_content = captured["payload"]["messages"][0]["content"]
+    assert captured["model"] == "analysis-fast-model"
+    message_content = captured["messages"][0]["content"]
     assert any(part.get("type") == "image_url" for part in message_content)
     assert any("data:image/jpeg;base64," in part.get("image_url", {}).get("url", "") for part in message_content)
 
@@ -718,14 +1015,182 @@ def test_merge_analysis_result_normalizes_scalar_sections():
             "suggested_styles": "现代简约,清爽明亮",
             "key_parameters": ["300ml", "Type-C 充电"],
         },
+        category_catalog=[
+            {"name": "空气净化器"},
+            {"name": "加湿器"},
+        ],
     )
 
     assert merged["recognized_product"]["product_name"] == "便携榨汁杯"
     assert merged["copy_draft"]["headline"] == "鲜榨更方便"
     assert merged["reference_summary"]["must_keep"] == "保持杯体颜色和把手结构一致"
-    assert merged["missing_views"] == ["side", "detail"]
+    assert "proportion_note" in merged["reference_summary"]
+    assert merged["missing_views"] == ["side"]
     assert merged["suggested_styles"] == ["现代简约", "清爽明亮"]
     assert merged["key_parameters"][0]["label"] == "300ml"
+    assert isinstance(merged["evidence_scores"], dict)
+    assert isinstance(merged["risk_flags"], list)
+    assert isinstance(merged["selling_point_entities"], list)
+
+
+def test_analyze_images_repairs_invalid_priority_before_fallback(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    monkeypatch.setattr(client.settings, "llm_route_analysis", "whatai_gemini")
+    catalog = [
+        {"name": "空气净化器", "aliases": ["净化器"], "sample_keywords": ["CADR"], "notes": "", "is_featured": True},
+        {"name": "加湿器", "aliases": ["加湿"], "sample_keywords": ["喷雾"], "notes": "", "is_featured": True},
+    ]
+    monkeypatch.setattr("app.services.upstream.list_active_category_catalog", lambda db=None: catalog)
+    monkeypatch.setattr(client.llm_router, "is_available", lambda task: True)
+
+    responses = iter(
+        [
+            {
+                "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "image_type": "实物图", "confidence": 88},
+                "image_assessment": {"quality_score": 0.9, "summary": "清晰"},
+                "missing_views": ["angle45", "side"],
+                "suggestions": [],
+                "copy_draft": {"headline": "空气净化器"},
+                "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+                "suggested_styles": ["现代简约"],
+                "reference_summary": {
+                    "shape": "圆柱形",
+                    "colors": "白色",
+                    "materials": "塑料",
+                    "structures": "进风格栅",
+                    "must_keep": "外形不能变",
+                    "proportion_note": "保持正面高度比例",
+                    "control_panel_note": "面板位于正面上半区",
+                    "transparent_parts_note": "",
+                    "structure_anchor_points": "顶盖和进风格栅",
+                    "do_not_move_features": "不要改动面板位置",
+                    "scene_fit_notes": "场景图需保持落地接触",
+                },
+                "category_candidates": [
+                    {"category": "空气净化器", "confidence": 88, "reason": "主体明确"},
+                    {"category": "加湿器", "confidence": 18, "reason": "外形相近"},
+                    {"category": "其他", "confidence": 8, "reason": "保底"},
+                ],
+                "scene_tags": ["白底产品"],
+                "evidence_scores": {"structure": 78, "proportion": 72, "scene": 55, "text": 80},
+                "risk_flags": ["control_panel_sensitive"],
+                "selling_point_entities": ["控制面板"],
+                "supplement_image_recommendations": [
+                    {
+                        "slot_type": "angle45",
+                        "label": "45 度角图",
+                        "reason": "补充结构",
+                        "priority": "high",
+                        "upload_goal": "补齐立体结构信息。",
+                        "must_show": "机身顶部、前侧边界和主要开孔。",
+                        "framing_hint": "斜拍但不要过强透视。",
+                        "example_caption": "45°结构补全",
+                    }
+                ],
+                "detected_view_slots": ["front"],
+            },
+            {
+                "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "image_type": "实物图", "confidence": 88},
+                "image_assessment": {"quality_score": 0.9, "summary": "清晰"},
+                "missing_views": ["angle45", "side"],
+                "suggestions": [],
+                "copy_draft": {"headline": "空气净化器"},
+                "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+                "suggested_styles": ["现代简约"],
+                "reference_summary": {
+                    "shape": "圆柱形",
+                    "colors": "白色",
+                    "materials": "塑料",
+                    "structures": "进风格栅",
+                    "must_keep": "外形不能变",
+                    "proportion_note": "保持正面高度比例",
+                    "control_panel_note": "面板位于正面上半区",
+                    "transparent_parts_note": "",
+                    "structure_anchor_points": "顶盖和进风格栅",
+                    "do_not_move_features": "不要改动面板位置",
+                    "scene_fit_notes": "场景图需保持落地接触",
+                },
+                "category_candidates": [
+                    {"category": "空气净化器", "confidence": 88, "reason": "主体明确"},
+                    {"category": "加湿器", "confidence": 18, "reason": "外形相近"},
+                    {"category": "其他", "confidence": 8, "reason": "保底"},
+                ],
+                "scene_tags": ["白底产品"],
+                "evidence_scores": {"structure": 78, "proportion": 72, "scene": 55, "text": 80},
+                "risk_flags": ["control_panel_sensitive"],
+                "selling_point_entities": ["控制面板"],
+                "supplement_image_recommendations": [
+                    {
+                        "slot_type": "angle45",
+                        "label": "45 度角图",
+                        "reason": "补充结构",
+                        "priority": 1,
+                        "upload_goal": "补齐立体结构信息。",
+                        "must_show": "机身顶部、前侧边界和主要开孔。",
+                        "framing_hint": "斜拍但不要过强透视。",
+                        "example_caption": "45°结构补全",
+                    }
+                ],
+                "detected_view_slots": ["front"],
+            },
+        ]
+    )
+
+    def fake_complete_json(**_kwargs):
+        return next(responses)
+
+    monkeypatch.setattr(client.llm_router, "complete_json", fake_complete_json)
+
+    image = LoadedReferenceImage(
+        "img-front",
+        "front",
+        1,
+        "/storage/front.jpg",
+        100,
+        100,
+        "image/jpeg",
+        100,
+        "front.jpg",
+        Path("front.jpg"),
+        b"front-image",
+    )
+    snapshot = client.analyze_images([image], "temu")
+
+    assert snapshot["supplement_image_recommendations"][0]["priority"] == 1
+    assert snapshot["repair_round"] == 1
+    assert snapshot["source"] == "repair"
+
+
+def test_merge_analysis_result_filters_categories_outside_active_catalog():
+    client = WhataiClient()
+    fallback = client._fake_analysis(
+        "temu",
+        category_catalog=[
+            {"name": "空气净化器"},
+            {"name": "加湿器"},
+        ],
+    )
+
+    merged = client._merge_analysis_result(
+        fallback,
+        {
+            "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "confidence": 92},
+            "category_candidates": [
+                {"category": "家居用品", "confidence": 99, "reason": "错误泛化"},
+                {"category": "空气净化器", "confidence": 92, "reason": "主体明确"},
+                {"category": "加湿器", "confidence": 18, "reason": "外形相近"},
+                {"category": "其他", "confidence": 10, "reason": "保底"},
+            ],
+        },
+        category_catalog=[
+            {"name": "空气净化器"},
+            {"name": "加湿器"},
+        ],
+    )
+
+    assert merged["category_candidates"][0]["category"] == "空气净化器"
+    assert all(item["category"] != "家居用品" for item in merged["category_candidates"])
 
 
 def test_normalize_key_parameters_splits_label_value_and_unit():
@@ -762,3 +1227,204 @@ def _image_bytes(image: Image.Image) -> bytes:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def test_llm_router_adds_enable_thinking_for_kimi_whatai(monkeypatch):
+    captured: dict[str, object] = {}
+    router = LLMRouter(
+        Settings(
+            whatai_api_key="test-key",
+            llm_route_main_planner="whatai_gemini",
+            whatai_planner_model="kimi-k2.5",
+        )
+    )
+
+    def _fake_request_json_with_retry(**kwargs):
+        captured["payload"] = kwargs["payload"]
+        return {"choices": [{"message": {"content": "{\"ok\": true}"}}]}
+
+    monkeypatch.setattr(router, "_request_json_with_retry", _fake_request_json_with_retry)
+
+    response = router.complete_json_with_meta(
+        task="main_planner",
+        messages=[{"role": "user", "content": "hi"}],
+        error_key="upstream_llm_error",
+    )
+
+    assert response["result"] == {"ok": True}
+    assert captured["payload"]["enable_thinking"] is True
+    assert response["meta"]["provider"] == "whatai"
+    assert response["meta"]["model"] == "kimi-k2.5"
+
+
+def test_llm_router_planner_falls_back_to_whatai_light_model(monkeypatch):
+    router = LLMRouter(
+        Settings(
+            openrouter_api_key="test-openrouter",
+            whatai_api_key="test-whatai",
+            llm_route_main_planner="openrouter_text",
+            planner_fallback_route="whatai_gemini",
+            openrouter_main_planner_model="moonshotai/kimi-k2.5",
+            whatai_planner_light_model="gemini-3-flash-preview",
+        )
+    )
+
+    def _fake_post_chat_json(payload, error_key, *, route):
+        if route == router.OPENROUTER_TEXT_ROUTE:
+            raise AppError("rate_limited", "busy", 429)
+        assert route == router.WHATI_GEMINI_ROUTE
+        assert payload["model"] == "gemini-3-flash-preview"
+        return {"candidates": [{"content": {"parts": [{"text": "{\"ok\": true}"}]}}]}
+
+    monkeypatch.setattr(router, "_post_chat_json", _fake_post_chat_json)
+
+    response = router.complete_json_with_meta(
+        task="main_planner",
+        messages=[{"role": "user", "content": "hi"}],
+        error_key="upstream_llm_error",
+    )
+
+    assert response["result"] == {"ok": True}
+    assert response["meta"]["planner_primary_model"] == "moonshotai/kimi-k2.5"
+    assert response["meta"]["planner_fallback_model"] == "gemini-3-flash-preview"
+    assert response["meta"]["planner_attempt_count"] == 2
+    assert response["meta"]["planner_final_source"] == "fallback"
+
+
+def test_compose_detail_panel_prompt_filters_internal_planning_terms():
+    prompt = compose_detail_panel_prompt(
+        confirmed_copy={"product_name": "桌面迷你除湿机"},
+        strategy_preview={"style_summary": "clean detail page"},
+        panel_id="panel_1",
+        panel_plan_item={
+            "panel_id": "panel_1",
+            "slot_id": "panel_1",
+            "panel_label": "结构说明",
+            "display_order": 1,
+            "panel_type": "feature_proof",
+            "panel_type_label": "结构说明",
+            "layout_template": "feature_card",
+            "panel_goal": "设计证明 (Proof)",
+            "copy_focus": "panel_goal",
+            "planner_prompt_base": "【高效吸湿结构】 展示内部设计证明",
+            "layout_notes": "横版排布",
+            "copy_lines": ["【高效吸湿结构】", "设计证明 (Proof)", "桌面迷你除湿机"],
+            "copy_blocks": {
+                "headline": "【高效吸湿结构】",
+                "supporting": "设计证明 (Proof)",
+                "bullet_points": ["桌面迷你除湿机", "copy_focus"],
+                "proof_lines": ["panel_goal"],
+                "cta_line": "",
+            },
+            "product_reference_ids": ["img-front"],
+            "style_reference_ids": [],
+            "planner_source": "llm",
+        },
+    )
+
+    final_prompt = prompt["final_prompt"]
+    assert "Panel 类型" not in final_prompt
+    assert "布局模板" not in final_prompt
+    assert "内部规划语义仅用于推理" not in final_prompt
+    assert "Proof" not in final_prompt
+    assert "panel_goal" not in final_prompt
+    assert "copy_focus" not in final_prompt
+    assert "设计证明" not in final_prompt
+    assert "【高效吸湿结构】" not in final_prompt
+    assert "桌面迷你除湿机" in final_prompt
+    assert "请生成一张适用于电商详情页的单张横向 panel 图片" in final_prompt
+    assert prompt["display_module_title"] == "卖点佐证"
+    assert prompt["display_module_kind"] == "卖点佐证"
+
+
+def test_compose_detail_panel_prompt_enforces_chinese_visible_copy_for_domestic_detail():
+    prompt = compose_detail_panel_prompt(
+        confirmed_copy={
+            "product_name": "桌面迷你除湿机",
+            "hero_scene": "桌面角落防潮更安心",
+            "core_selling_points": ["免插电物理除湿", "可视化水位窗"],
+            "product_advantages": ["小巧不占地", "适合衣柜书柜"],
+            "key_parameters": [{"label": "除湿原理", "value": "物理吸湿"}],
+        },
+        strategy_preview={
+            "style_summary": "clean detail page",
+            "platform_overlay": {"overlay_id": "1688", "copy_language": "zh"},
+            "copy_language": "zh",
+        },
+        panel_id="panel_1",
+        panel_plan_item={
+            "panel_id": "panel_1",
+            "slot_id": "panel_1",
+            "panel_label": "首屏槽位",
+            "display_order": 1,
+            "panel_type": "kv_problem_solution",
+            "panel_type_label": "首屏KV",
+            "layout_template": "hero_kv",
+            "panel_goal": "桌面小型便携式除湿机",
+            "copy_focus": "桌面小型便携式除湿机",
+            "planner_prompt_base": "围绕产品核心卖点展开",
+            "layout_notes": "横版排布",
+            "copy_lines": ["Compact & Space-saving Design", "Portable Top Handle Design"],
+            "copy_blocks": {
+                "headline": "Compact & Space-saving Design",
+                "supporting": "Portable Top Handle Design",
+                "bullet_points": [],
+                "proof_lines": [],
+                "cta_line": "",
+            },
+            "product_reference_ids": ["img-front"],
+            "style_reference_ids": [],
+            "planner_source": "llm",
+        },
+    )
+
+    final_prompt = prompt["final_prompt"]
+    assert "后加的图上文案必须为简体中文短句" in final_prompt
+    assert "保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印" in final_prompt
+    assert "Compact & Space-saving Design" not in final_prompt
+    assert "Panel 类型" not in final_prompt
+    assert "布局模板" not in final_prompt
+    assert prompt["copy_language"] == "zh"
+    assert prompt["platform_overlay"]["overlay_id"] == "1688"
+    assert prompt["display_module_title"] == "首屏亮点"
+
+
+def test_compose_detail_panel_prompt_filters_machine_keys_and_duplicate_copy_lines():
+    prompt = compose_detail_panel_prompt(
+        confirmed_copy={
+            "product_name": "桌面除湿机",
+            "hero_scene": "卧室床头柜也能轻松放下",
+            "core_selling_points": ["物理循环除湿", "免插电设计"],
+            "key_parameters": [{"key": "product_type", "value": "物理循环除湿机"}],
+        },
+        strategy_preview={
+            "style_summary": "clean detail page",
+            "platform_overlay": {"overlay_id": "1688", "copy_language": "zh"},
+            "copy_language": "zh",
+        },
+        panel_id="panel_6",
+        panel_plan_item={
+            "panel_id": "panel_6",
+            "slot_id": "detail_slot_06",
+            "display_order": 6,
+            "panel_type": "feature_process_material",
+            "copy_lines": ["物理循环除湿", "product_type 物理循环除湿机", "物理循环除湿"],
+            "copy_blocks": {
+                "headline": "物理循环除湿",
+                "supporting": "product_type 物理循环除湿机",
+                "bullet_points": ["物理循环除湿"],
+                "proof_lines": [],
+                "cta_line": "",
+            },
+            "product_reference_ids": [],
+            "style_reference_ids": [],
+            "planner_source": "llm",
+        },
+    )
+
+    assert "product_type" not in prompt["final_prompt"]
+    assert "product_type" not in " ".join(prompt["copy_blocks"].get("bullet_points", []))
+    assert prompt["copy_blocks"]["headline"] == "物理循环除湿"
+    assert prompt["copy_blocks"]["supporting"] == "物理循环除湿机"
+    assert prompt["display_tags"]
+    assert all(not tag.startswith("feature_") for tag in prompt["display_tags"])

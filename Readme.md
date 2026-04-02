@@ -14,9 +14,15 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 - **批量异步提速链路**：主图和详情页都采用“批量提交上游任务 -> 集中轮询 -> 并发下载”的执行方式，默认拆分 `q.generation.main` / `q.generation.detail` 两个队列。
 - **上线级存储接入能力**：支持 `StorageAdapter` 切换到 S3 兼容对象存储，浏览器上传走 `presign -> 直传 -> complete`，结果图默认私有桶签名读。
 - **Step 3 参数附件链路**：支持说明书/参数图/PDF 上传、鲁棒参数提取和策略参考图补充输入。
-- **前台用户与账户中心能力**：支持邮箱密码登录、`/api/v2/account` 账户概览、资产历史、站内通知、密码修改、设置、购买记录与额度台账。
-- **用户商业化闭环**：已补齐额度价格规则、生成前余额校验、消费流水与失败自动退款，真实支付网关暂不接入。
-- **独立后台管理能力**：支持 `/api/admin/v1` 超级控制台接口、SQLite 管理员账号库、经营/运行仪表盘、用户运营、Session/Job/Asset 排障、模板与规则包后台化及高风险操作审计。
+- **Step 2 / Step 3 智能补强**：Step 2 现在直接返回“建议补传什么图片”的结构化清单；Step 3 已收口为单次 `extract` 的轻策划 Agent，基于 `analysis + 商品图 + confirmed_copy + 可选附件` 一次性产出可编辑整页内容。
+- **纯图片 SaaS 鉴权模型**：`/api/v2` 图片主链路统一通过 `X-App-Key` 做服务端调用鉴权，只保留 `session -> upload -> analysis -> strategy -> generation -> results`。
+- **主图/详情页同 Session 复用**：主图与详情页共用同一个 `session_id`、商品图与分析结果，详情页只额外接收风格图或已存在的对象存储路径。
+- **文本辅助 Agent 协同**：当前默认不再把 Step 3 拆成前台两段链路；主图文字设计与详情页 reviewer 默认关闭，避免额外时延与过度设计。
+- **Step 3 单模型默认值**：Step 3 当前默认仍走 WhatAI Gemini，`WHATAI_PARAMETER_MODEL` 默认值已收口为 `gemini-3-flash-preview`，由 `.env*` 显式管理。
+- **Step 5 / 详情页 Planner 临时切 Kimi**：主图与详情页 planner 当前默认走 `WhatAI + kimi-k2.5`，并对 `kimi-k2.5` 自动追加 `enable_thinking=true`；若命中 `429/超时`，会自动降级到 `WHATAI_PLANNER_LIGHT_MODEL` 再试 1 次。
+- **生图限流显式化**：图片生成阶段若上游返回 `429`，job 会明确写成 `rate_limited`，前端结果页会显示“上游限流”，不再笼统表现为 `Job timed out`。
+- **用户体系彻底解耦**：`/api/v2/auth/*`、`/api/v2/account/*`、`/api/v2/guest/*` 已下线并返回 `410 feature_removed`，外部用户映射交由接入方服务处理。
+- **独立后台管理能力**：支持 `/api/admin/v1` 图片运维控制台、SQLite 管理员账号库、运行/产出看板、Session/Job/Asset 排障、模板与规则包后台化及高风险操作审计。
 
 ## 架构选型
 
@@ -35,7 +41,7 @@ SmartPhoto Backend v2 是一个基于 FastAPI + Celery 架构的异步 AI 图像
 | **详情页生成闭环** | ✅ 已实现 | 独立的样式参考、14 类 panel_type 推荐/覆盖、8 panel 生成与全图无缝拼接下载 |
 | **重生成修图能力** | ✅ 已实现 | 整组重新生成(`regenerate_gallery`) / 局部单图重生成(`regenerate_asset`) / 批量属性修改(`global_edit`) |
 | **并发与防重幂等** | ✅ 已实现 | 基于 DB/Redis 的锁及 `Idempotency-Key` 校验机制 |
-| **认证与权限 (Auth)** | ✅ 已实现 | 支持 `/api/v2/auth/*`、Bearer + Refresh Cookie、dev bypass、本用户资源归属校验 |
+| **服务鉴权与隔离** | ✅ 已实现 | 图片主链路统一校验 `X-App-Key`，按 `service_id` 隔离 session/job/upload/download |
 | **合规与风控校验** | ❌ 未实现 | 当前版本中属于平台非核心诉求，主动剥离不实现 |
 
 ---
@@ -50,11 +56,19 @@ source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-### 2. 启动中间件基础设施 (Docker Compose)
+### 2. 启动中间件基础设施（可选）
 如果本地未安装 Postgres 或 Redis，可以通过 docker 一键启动。
 ```bash
 ./scripts/dev-up.sh
 ```
+
+如果你**不想用 Docker**，推荐两种本地模式：
+
+- 轻量调试模式：`SQLite + TASKS_EAGER=true`
+  - 只启动 API，不启动 Celery Worker
+  - 适合本地改接口、看页面流转、调 analysis/planner 返回结构
+- 接近真实链路模式：`PostgreSQL + Redis + Celery Worker`
+  - 更适合调 job、事件流、并发锁和真实异步行为
 
 ### 3. 配置核心环境变量
 通过 `.env` 对接真实的 LLM 和 Image Generation 上游接口。
@@ -63,18 +77,22 @@ cp .env.example .env
 # [必须修改] 配置真实的 API KEY，例如: 
 # WHATAI_API_KEY=sk-xxxxxx
 # WHATAI_API_BASE=https://api.whatai.cc
-# WHATAI_ANALYSIS_MODEL=gpt-4.1-mini
-# WHATAI_PLANNER_MODEL=gpt-4.1-mini
-# WHATAI_REQUEST_TIMEOUT_SECONDS=180
+# LLM_PROVIDER=openrouter
+# OPENROUTER_API_BASE=https://openrouter.ai/api/v1
+# OPENROUTER_API_KEY=sk-or-xxxxxx
+# LLM_ANALYSIS_MODEL=moonshotai/kimi-k2.5
+# LLM_MAIN_PLANNER_MODEL=xiaomi/mimo-v2-pro
+# LLM_DETAIL_PLANNER_MODEL=minimax/minimax-m2.7
+# WHATAI_REQUEST_TIMEOUT_SECONDS=90
 # [上线推荐] 切到对象存储：
 # STORAGE_BACKEND=s3
 # S3_ENDPOINT=https://your-oss-endpoint
 # S3_BUCKET=smartphoto-private
 # S3_ACCESS_KEY=xxx
 # S3_SECRET_KEY=xxx
-# [可选] 用户鉴权相关：
-# USER_JWT_SECRET=change-me
-# ALLOW_DEV_AUTH_BYPASS=true
+# [必须配置] 图片 SaaS 接入方密钥：
+# IMAGE_SAAS_APP_KEYS=["default:local-dev-app-key"]
+# IMAGE_SAAS_DEFAULT_APP_ID=default
 # CORS_ALLOW_ORIGINS=http://localhost:5173
 ```
 
@@ -100,6 +118,33 @@ cd /home/wppjkw/smartphoto_backend
 ./scripts/dev-worker.sh
 ```
 
+本地无 Docker 推荐：
+
+```bash
+cp .env.example .env
+```
+
+轻量调试模式 `.env` 最小建议：
+
+```env
+DATABASE_URL=sqlite:///./storage/app.sqlite3
+ADMIN_DATABASE_URL=sqlite:///./storage/admin.sqlite3
+TASKS_EAGER=true
+REDIS_URL=redis://localhost:6379/0
+STORAGE_BACKEND=local
+PUBLIC_BASE_URL=http://127.0.0.1:8000
+CORS_ALLOW_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
+```
+
+说明：
+
+- `TASKS_EAGER=true` 时，job 会在 API 进程内直接执行，本地可以不启动 Worker
+- `./scripts/dev-api.sh` 现在会：
+  - 启动前自动执行 `alembic upgrade head`
+  - 只监控 `app/ scripts/ alembic/`，不再扫描 `runtime/`，避免 Docker 残留的 `runtime/postgres` 权限报错
+  - 若 `8000` 已被占用，会自动顺延到下一个空闲端口，并在终端打印实际端口
+- 若你要调真实异步链路，把 `TASKS_EAGER=false` 并启动本机 Redis + `./scripts/dev-worker.sh`
+
 ## 生产部署（单机 Docker Compose）
 
 适用于“单机 Linux 服务器 + Docker Compose + Git tag 发布”的首发方案。
@@ -112,21 +157,38 @@ cp .env.prod.example .env.prod
 必须至少改这些值：
 - `PUBLIC_BASE_URL=http://<server_ip>:8000`
 - `CORS_ALLOW_ORIGINS=http://<frontend_host>:<port>`
-- `ALLOW_DEV_AUTH_BYPASS=false`
-- `USER_JWT_SECRET` / `ADMIN_JWT_SECRET`
+- `IMAGE_SAAS_APP_KEYS`
+- `IMAGE_SAAS_DEFAULT_APP_ID`
+- `ADMIN_JWT_SECRET`
 - `WHATAI_API_KEY`
-- `WHATAI_CHAT_MODEL` / `WHATAI_ANALYSIS_MODEL` / `WHATAI_PLANNER_MODEL` / `WHATAI_IMAGE_MODEL` / `WHATAI_PARAMETER_MODEL`
+- `WHATAI_PLANNER_LIGHT_MODEL` / `PLANNER_PROFILE` / `PLANNER_FALLBACK_ROUTE`
+- `WHATAI_IMAGE_MODEL` / `WHATAI_REQUEST_TIMEOUT_SECONDS`
+- `LLM_ROUTE_ANALYSIS` / `LLM_ROUTE_MAIN_PLANNER` / `LLM_ROUTE_DETAIL_PLANNER` / `LLM_ROUTE_PARAMETER_VISUAL`
+- `OPENROUTER_API_KEY` / `OPENROUTER_API_BASE`
+- `OPENROUTER_MAIN_PLANNER_MODEL` / `OPENROUTER_DETAIL_PLANNER_MODEL` / `OPENROUTER_PLANNER_LIGHT_MODEL`（仅在显式切 OpenRouter planner 时使用）
+- `LLM_ANALYSIS_MODEL` / `LLM_PARAMETER_MODEL`
+- `OPENROUTER_FORM_REWRITE_MODEL` / `OPENROUTER_TEXT_REVIEW_MODEL` / `OPENROUTER_TEXT_PRESENTATION_MODEL`
 - 全部 `S3_*`
 - `POSTGRES_PASSWORD`
 - `DATABASE_URL`
-- `PIP_INDEX_URL`（国内环境默认已指向清华镜像，可按需改）
-- `PIP_TRUSTED_HOST`（若继续用 HTTP 镜像地址，需保留为 `mirrors.tuna.tsinghua.edu.cn`）
 
 说明：
 - 生产默认推荐 `STORAGE_BACKEND=s3`
 - `ADMIN_DATABASE_URL` 默认继续使用 `sqlite:///./storage/admin.sqlite3`，但会随 `./runtime/storage` 持久化
-- 生产示例文件不再替你预填 WhatAI 模型，直接复用你当前已验证过的模型配置
+- 当前默认推荐：视觉主链保持 `WhatAI + Gemini`，OpenRouter 只给文本辅助任务或横向试模型用
+- 当前默认策略规划配置：
+  - `PLANNER_PROFILE=harness_first`
+  - `LLM_ROUTE_MAIN_PLANNER=whatai_gemini`
+  - `LLM_ROUTE_DETAIL_PLANNER=whatai_gemini`
+  - `WHATAI_PLANNER_MODEL=kimi-k2.5`
+  - `WHATAI_PLANNER_LIGHT_MODEL=gemini-3-flash-preview`
+  - `PLANNER_FALLBACK_ROUTE=whatai_gemini`
+- 当前默认生图模型：
+  - `WHATAI_IMAGE_MODEL=gemini-3.1-flash-image-preview-2k`
+- analysis 会优先消费后台“全局品类库”；客户新增品类时优先在后台配置，不要再回到后端 fallback 硬编码
+- 生产示例文件不再替你预填 WhatAI / OpenRouter 模型，直接复用你当前已验证过的配置
 - 生产不要继续使用开发态默认 secret
+- `.env.prod` 里的 `PIP_INDEX_URL/PIP_TRUSTED_HOST` 不会自动影响 `docker build`；若构建阶段卡在 `npm/apt/pip`，直接按 `docs/生产上线SOP.md` 的“构建网络慢时的完整替代命令”处理
 
 ### 2. 首次启动
 ```bash
@@ -150,7 +212,8 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 
 若预检输出包含以下任一项，先停止发布并处理数据库兼容问题：
 - `alembic_version` 含 `20260322_0007`
-- 缺少 `users` / `user_refresh_tokens` / `credit_wallets`
+- 新增 Alembic revision 但生产库版本未跟上
+- `service_id` 相关新列或索引未迁到位
 - `rule_packs` / `rule_pack_versions` 出现 `family/draft_payload/payload/change_note` 这一套 3/22 错误 schema
 
 ### 5. 热更新发布与回滚
@@ -173,37 +236,45 @@ export COMPOSE_PROJECT_NAME=smartphoto_backend
 - 新旧目录必须复用同一个 `COMPOSE_PROJECT_NAME`，这样才会继续使用原有 `postgres/redis/storage` 卷
 - `deploy-prod.sh` 会做：本机 `docker build` -> 可选 `migrate` -> 热更新 `api/worker`
 - `rollback-prod.sh` 只替换 `api/worker`，不会动 `postgres/redis/storage` 卷
-- 若这次只是恢复到正确代码线，且预检确认 DB 仍在用户版迁移链，优先使用 `--skip-migrate`
+- 只有在代码包不包含新 Alembic revision，且生产库已处于当前代码要求的 schema 时，才可使用 `--skip-migrate`
+- 详细生产上线顺序、备份命令、冒烟检查与常见坑位，以 `docs/生产上线SOP.md` 为准
 
 ## API 联调与排障手册索引
 
 遇到对接和运行问题，可以在这几份设计文档中找到完整答案，本系统严格贯彻**以代码为第一解释权，文档和逻辑强对齐**的原则。
 
 - 🚀 [API 接口字段字典、错误码与联调指南](./docs/API_联调指南.md)
+- 🧭 `docs/Guest_First_前端联调说明.md` 已归档，仅供回看用户版历史方案
 - ☁️ [OSS 对接与上线指南](./docs/OSS_对接与上线指南.md)
 - 🧠 [生图 Agent 工作流架构与长程协作逻辑分析](./docs/生图Agent协作逻辑.md)
 - ⚙️ [主线生图与调度系统技术深度解构报告](./docs/生图架构核心技术报告.md)
 - ⚡ [生图提速优化报告（客户版）](./docs/生图提速优化报告_客户版.md)
 - 🚢 [项目运行、本地报错诊断与生产部署排障手册](./docs/运行与排障手册.md)
+- 📋 [单机 Docker Compose 生产上线 SOP](./docs/生产上线SOP.md)
 - 🤝 [甲方框架手册项目对齐说明（对外版）](./docs/甲方框架手册_项目对齐说明_对外版.md)
 - 🧾 [甲方框架手册项目对齐说明（内部评估版）](./docs/甲方框架手册_项目对齐说明_内部评估版.md)
 - 📦 [开发规范约束与贡献者约定](./AGENTS.md)
 - 💾 `OpenAPI` JSON 规范定义可以直接在根目录脚本 `scripts/export_openapi.py` 导出。
+
+当前接入语义已经收口为“纯图片 SaaS”：
+- 所有图片主链路请求都必须带 `X-App-Key`
+- 后端只维护 `service_id + session_id`，不保存终端用户引用
+- `/api/v2/auth/*`、`/api/v2/account/*`、`/api/v2/guest/*` 统一返回 `410 feature_removed`
+- 主图与详情页必须复用同一个 `session_id`
 
 ## 后台管理
 
 - 后台 API：`/api/admin/v1`
 - 后台入口：`/admin`
 - 当前 `adminfront/` 已升级为路由化控制台，信息架构固定为：
-  - `Overview`：经营 + 运行概览、趋势图、失败任务与高风险操作
-  - `Users`：用户搜索、详情、通知、手工补单、额度调整
+  - `Overview`：运行 + 产出概览、趋势图、失败任务与高风险操作
   - `Sessions`：Session 检索、copy/parameters/overrides 编辑、预览与重跑
   - `Jobs`：任务详情、事件时间线、失败重试
   - `Assets`：图片预览、归档/恢复、单资产重生成
   - `Prompts`：Prompt Preset 列表、编辑、克隆、归档、样例 Session 预览
   - `Rule Packs`：规则包列表、版本历史、发布、克隆、样例 Session 预览
   - `Audit`：高风险操作审计、前后快照、备注与风险等级
-  - `System`：运行时配置只读视图、队列压力、定价规则
+  - `System`：运行时配置只读视图、队列压力、模型与存储观测
 - 初始化管理员账号：
 ```bash
 ./.venv/bin/python scripts/create_admin_user.py --username admin --password secret123 --display-name 管理员
@@ -229,8 +300,6 @@ npm run dev
 ```
 
 说明：
-- 调试前端已适配 `/api/v2/auth`，首次进入会先尝试 refresh-cookie 恢复登录
-- 登录后会显示账户概览、最近资产、最近通知，并继续复用原有 6 步调试流程
-- Job 事件流与 ZIP 下载已改为带鉴权请求，不再依赖匿名访问
+- 调试前端现在应直接带 `X-App-Key` 调图片主链路，不再依赖 `/api/v2/auth`
+- Job 事件流与 ZIP 下载同样走 `X-App-Key`，不再区分 user/guest
 - 浏览器上传默认改走 `/api/v2/uploads/presign -> 直传对象存储 -> /api/v2/uploads/complete`
-- 若用户钱包额度不足，生成类接口会直接返回 `40201 insufficient_credits`

@@ -73,7 +73,7 @@ class UploadTarget:
 class DecodedUploadToken:
     upload_id: str
     session_id: str
-    user_id: str
+    service_id: str
     upload_kind: str
     object_key: str
     original_name: str
@@ -125,7 +125,7 @@ class StorageAdapter:
         *,
         upload_id: str,
         session_id: str,
-        user_id: str,
+        service_id: str,
         upload_kind: str,
         object_key: str,
         original_name: str,
@@ -222,7 +222,7 @@ class LocalStorageAdapter(StorageAdapter):
         *,
         upload_id: str,
         session_id: str,
-        user_id: str,
+        service_id: str,
         upload_kind: str,
         object_key: str,
         original_name: str,
@@ -393,7 +393,7 @@ class S3CompatibleStorageAdapter(StorageAdapter):
         *,
         upload_id: str,
         session_id: str,
-        user_id: str,
+        service_id: str,
         upload_kind: str,
         object_key: str,
         original_name: str,
@@ -458,7 +458,7 @@ def public_url_for(value: str | None) -> str | None:
 def create_upload_token(
     *,
     session_id: str,
-    user_id: str,
+    service_id: str,
     upload_kind: str,
     object_key: str,
     original_name: str,
@@ -471,7 +471,7 @@ def create_upload_token(
     expires_at = (_now_utc() + timedelta(seconds=settings.s3_presign_upload_ttl_seconds)).isoformat()
     payload = {
         "session_id": session_id,
-        "user_id": user_id,
+        "service_id": service_id,
         "upload_kind": upload_kind,
         "object_key": _normalize_rel_key(object_key),
         "original_name": original_name,
@@ -508,7 +508,7 @@ def decode_upload_token(upload_id: str) -> DecodedUploadToken:
     return DecodedUploadToken(
         upload_id=upload_id,
         session_id=str(payload["session_id"]),
-        user_id=str(payload["user_id"]),
+        service_id=str(payload.get("service_id") or get_settings().image_saas_default_app_id),
         upload_kind=str(payload["upload_kind"]),
         object_key=_normalize_rel_key(str(payload["object_key"])),
         original_name=str(payload["original_name"]),
