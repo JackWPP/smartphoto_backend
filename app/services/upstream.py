@@ -23,6 +23,12 @@ from app.services.copy_normalization import (
 )
 from app.services.llm_router import LLMRouter
 from app.services.prompt_safety import prompt_matrix_guardrails, sanitize_generated_copy_fields, sanitize_parameter_snapshot
+from app.services.quality_signals import (
+    FIDELITY_ISSUE_TAXONOMY,
+    extract_selling_point_entities,
+    infer_evidence_scores,
+    infer_risk_flags,
+)
 from app.services.reference_images import LoadedReferenceImage
 from app.services.visible_copy_policy import (
     extract_latin_tokens,
@@ -59,6 +65,7 @@ PARAMETER_PROMPT_VERSION = "parameter_v2_prompt_first"
 PARAMETER_COMPLETION_PROMPT_VERSION = "parameter_completion_v1"
 MAIN_COPY_DESIGN_PROMPT_VERSION = "main_copy_design_v1"
 VISIBLE_TEXT_LANGUAGE_PROMPT_VERSION = "visible_text_language_v1"
+FIDELITY_VALIDATION_PROMPT_VERSION = "fidelity_validation_v1"
 
 
 def _sanitize_planner_freeform_text(value: Any) -> str:
@@ -148,7 +155,7 @@ class WhataiClient:
                         "只能返回 JSON 对象，不要输出解释性段落。"
                         "输出字段必须包含：recognized_product,image_assessment,missing_views,suggestions,copy_draft,"
                         "key_parameters,suggested_styles,reference_summary,category_candidates,scene_tags,"
-                        "supplement_image_recommendations,detected_view_slots。"
+                        "supplement_image_recommendations,detected_view_slots,evidence_scores,risk_flags,selling_point_entities。"
                         "recognized_product 必须包含 product_name,category,image_type,confidence。"
                         "category_candidates 至少返回 3 个候选项，每项包含 category,confidence,reason，并按置信度排序。"
                         "category_candidates 必须优先从给定的全局品类库中选择，只有完全无法归类时才允许使用“其他”。"
@@ -160,7 +167,12 @@ class WhataiClient:
                         "upload_goal 要描述补这张图是为了什么；must_show 要写清楚希望图里出现的真实结构元素；framing_hint 要说明构图建议；example_caption 给一句短标题示例。"
                         "建议数量控制在 2-4 条，优先覆盖当前缺失的视角和关键结构信息。"
                         "missing_views 和 detected_view_slots 只能使用 front,angle45,side,extra 这 4 个槽位。"
-                        "reference_summary 至少包含 shape,colors,materials,structures,must_keep。"
+                        "reference_summary 至少包含 shape,colors,materials,structures,must_keep,"
+                        "proportion_note,control_panel_note,transparent_parts_note,structure_anchor_points,"
+                        "do_not_move_features,scene_fit_notes。"
+                        "evidence_scores 必须包含 structure,proportion,scene,text，取值 0-100。"
+                        "risk_flags 必须是数组，用于描述透明结构、控制面板、尺寸敏感、场景落地等风险。"
+                        "selling_point_entities 必须是数组，只保留真实卖点实体，例如宠物、控制面板、透明水箱、滤芯。"
                         "如果某个候选品类置信度低，请在 reason 中明确指出不确定原因。"
                         "不要输出思考过程、推理过程、内部规划标签或流程说明。"
                         "copy_draft 和 example_caption 必须像可直接交给用户编辑或继续生成的最终候选，不要输出中间想法。"
@@ -199,6 +211,7 @@ class WhataiClient:
         asset_plan: list[dict[str, Any]],
         reference_images: list[LoadedReferenceImage],
         supplemental_reference_images: list[LoadedReferenceImage] | None = None,
+        analysis_snapshot: dict[str, Any] | None = None,
         reference_summary: dict[str, Any] | None,
         planner_instruction: str | None,
     ) -> dict[str, dict[str, Any]]:
@@ -243,6 +256,9 @@ class WhataiClient:
                         f"可用参考图：{json.dumps(manifest, ensure_ascii=False)}。"
                         f"补充策略参考图：{json.dumps(supplemental_manifest, ensure_ascii=False)}。"
                         f"参考图摘要：{json.dumps(reference_summary or {}, ensure_ascii=False)}。"
+                        f"风险信号：{json.dumps((analysis_snapshot or {}).get('risk_flags') or [], ensure_ascii=False)}。"
+                        f"卖点实体：{json.dumps((analysis_snapshot or {}).get('selling_point_entities') or [], ensure_ascii=False)}。"
+                        f"证据评分：{json.dumps((analysis_snapshot or {}).get('evidence_scores') or {}, ensure_ascii=False)}。"
                         f"额外策略指令：{planner_instruction or '无'}。"
                     ),
                 },
@@ -734,6 +750,84 @@ class WhataiClient:
         result.update(outcome["meta"])
         return result
 
+    def inspect_image_fidelity(
+        self,
+        *,
+        image_bytes: bytes,
+        reference_images: list[LoadedReferenceImage],
+        truth_contract: dict[str, Any],
+        risk_flags: list[str],
+        selling_point_binding: dict[str, Any] | None = None,
+        product_name: str,
+        category: str,
+        slot_id: str,
+    ) -> dict[str, Any]:
+        fallback = {
+            "status": "unknown",
+            "passed": True,
+            "issues": [],
+            "focus_findings": [],
+            "reason": "validator_unavailable",
+            "validator_source": "fallback",
+        }
+        if not image_bytes or not reference_images or not self.llm_router.is_available("analysis"):
+            fallback.update(
+                {
+                    "provider": self.llm_router.provider_for_task("analysis"),
+                    "model": self.llm_router.model_for_task("analysis"),
+                    "prompt_version": FIDELITY_VALIDATION_PROMPT_VERSION,
+                    "repair_round": 0,
+                    "source": "fallback",
+                }
+            )
+            return fallback
+
+        binding = selling_point_binding or {}
+        messages = [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "你是 SmartPhoto 的生图保真验收器。"
+                        "请比较目标图与参考图，只返回 JSON 对象。"
+                        "字段必须包含：status,issues,focus_findings,reason。"
+                        "status 只能是 passed、failed、unknown。"
+                        f"issues 只能从以下 taxonomy 中选择：{json.dumps(FIDELITY_ISSUE_TAXONOMY, ensure_ascii=False)}。"
+                        "只在肉眼可辨识的结构、比例、场景接触关系、卖点实体和文字问题上做判断。"
+                        "如果证据不足，请优先返回 insufficient_reference_evidence，而不是臆造其他问题。"
+                        "不要输出思考过程、推理标签、内部规划字段或 markdown。"
+                        f"{_prompt_matrix_guardrail_text()}"
+                        f"商品名：{product_name}。"
+                        f"品类：{category or '其他'}。"
+                        f"槽位：{slot_id}。"
+                        f"truth_contract：{json.dumps(truth_contract or {}, ensure_ascii=False)}。"
+                        f"risk_flags：{json.dumps(risk_flags or [], ensure_ascii=False)}。"
+                        f"selling_point_binding：{json.dumps(binding, ensure_ascii=False)}。"
+                        "图片 1 是待验收结果图，后续图片是商品参考图。"
+                    ),
+                },
+                {"type": "text", "text": "图片 1：待验收结果图。"},
+                {"type": "image_url", "image_url": {"url": self._optimized_data_uri_from_bytes(image_bytes, "image/jpeg")}},
+                *self._build_chat_image_parts(reference_images),
+            ],
+        }]
+        outcome = self._run_structured_task(
+            task="analysis",
+            messages=messages,
+            temperature=0.0,
+            error_key="upstream_llm_error",
+            prompt_version=FIDELITY_VALIDATION_PROMPT_VERSION,
+            validator=self._validate_fidelity_result,
+            fallback_result=fallback,
+        )
+        parsed = outcome["result"]
+        result = self._merge_fidelity_result(fallback, parsed) if isinstance(parsed, dict) else fallback
+        result.update(outcome["meta"])
+        if not result.get("validator_source"):
+            result["validator_source"] = "llm_vision"
+        return result
+
     def regenerate_copy(
         self,
         current_copy: dict[str, Any],
@@ -1099,6 +1193,15 @@ class WhataiClient:
                     response.raise_for_status()
                     return response.json()
             except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "Upstream multipart request failed: path=%s attempt=%s/%s status=%s has_api_key=%s response=%s",
+                    path,
+                    attempt,
+                    attempts,
+                    exc.response.status_code,
+                    bool(str(self.settings.whatai_api_key).strip()),
+                    exc.response.text[:500],
+                )
                 if exc.response.status_code == 429:
                     if attempt < attempts:
                         self._sleep_before_rate_limit_retry(path, attempt, attempts, exc.response)
@@ -1569,6 +1672,44 @@ class WhataiClient:
                 for key in ("reason", "upload_goal", "must_show", "framing_hint", "example_caption"):
                     if not repair_broken_text(item.get(key)):
                         errors.append(self._validation_error(f"supplement_image_recommendations[{index}].{key}", "required", f"{key} 不能为空", item.get(key)))
+        reference_summary = parsed.get("reference_summary")
+        if reference_summary is not None and not isinstance(reference_summary, dict):
+            errors.append(self._validation_error("reference_summary", "object", "reference_summary 必须是对象", reference_summary))
+        elif isinstance(reference_summary, dict):
+            for key in (
+                "shape",
+                "colors",
+                "materials",
+                "structures",
+                "must_keep",
+                "proportion_note",
+                "control_panel_note",
+                "transparent_parts_note",
+                "structure_anchor_points",
+                "do_not_move_features",
+                "scene_fit_notes",
+            ):
+                if key in reference_summary and not isinstance(reference_summary.get(key), str):
+                    errors.append(self._validation_error(f"reference_summary.{key}", "string", f"{key} 必须是字符串", reference_summary.get(key)))
+        evidence_scores = parsed.get("evidence_scores")
+        if evidence_scores is not None and not isinstance(evidence_scores, dict):
+            errors.append(self._validation_error("evidence_scores", "object", "evidence_scores 必须是对象", evidence_scores))
+        elif isinstance(evidence_scores, dict):
+            for key in ("structure", "proportion", "scene", "text"):
+                value = evidence_scores.get(key)
+                if value is None:
+                    continue
+                try:
+                    score = int(value)
+                except (TypeError, ValueError):
+                    errors.append(self._validation_error(f"evidence_scores.{key}", "integer", f"{key} 必须是 0-100 的整数", value))
+                    continue
+                if score < 0 or score > 100:
+                    errors.append(self._validation_error(f"evidence_scores.{key}", "range", f"{key} 必须在 0-100 之间", value))
+        for key in ("risk_flags", "selling_point_entities"):
+            value = parsed.get(key)
+            if value is not None and not isinstance(value, list):
+                errors.append(self._validation_error(key, "list", f"{key} 必须是数组", value))
         return errors
 
     def _validate_main_planner_result(
@@ -1779,6 +1920,25 @@ class WhataiClient:
             errors.append(self._validation_error("has_readable_text", "bool", "has_readable_text 必须是布尔值", has_readable_text))
         return errors
 
+    def _validate_fidelity_result(self, parsed: Any) -> list[dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return [self._validation_error("$", "json_object", "fidelity validation 必须返回 JSON 对象", parsed)]
+        errors: list[dict[str, Any]] = []
+        status = str(parsed.get("status") or "").strip().lower()
+        if status not in {"passed", "failed", "unknown"}:
+            errors.append(self._validation_error("status", "enum", "status 只能是 passed/failed/unknown", parsed.get("status")))
+        issues = parsed.get("issues")
+        if not isinstance(issues, list):
+            errors.append(self._validation_error("issues", "list", "issues 必须是数组", issues))
+        else:
+            invalid = [item for item in issues if str(item).strip() not in FIDELITY_ISSUE_TAXONOMY]
+            if invalid:
+                errors.append(self._validation_error("issues", "enum", "issues 只能使用固定 taxonomy", invalid))
+        findings = parsed.get("focus_findings")
+        if findings is not None and not isinstance(findings, list):
+            errors.append(self._validation_error("focus_findings", "list", "focus_findings 必须是数组", findings))
+        return errors
+
     def _merge_analysis_result(
         self,
         fallback: dict[str, Any],
@@ -1800,6 +1960,9 @@ class WhataiClient:
             "scene_tags",
             "supplement_image_recommendations",
             "detected_view_slots",
+            "evidence_scores",
+            "risk_flags",
+            "selling_point_entities",
         }
         for key, value in parsed.items():
             if key in handled_keys or value is None:
@@ -1862,12 +2025,41 @@ class WhataiClient:
             parsed.get("scene_tags"),
             fallback.get("scene_tags", []),
         )
+        merged["selling_point_entities"] = self._normalize_string_list(
+            parsed.get("selling_point_entities"),
+            fallback.get("selling_point_entities", []),
+        )
+        if not merged["selling_point_entities"]:
+            merged["selling_point_entities"] = extract_selling_point_entities(
+                merged.get("scene_tags"),
+                merged.get("copy_draft"),
+                merged.get("key_parameters"),
+                merged.get("reference_summary"),
+            )
+        merged["risk_flags"] = self._normalize_risk_flags(
+            parsed.get("risk_flags"),
+            fallback.get("risk_flags", []),
+            category=merged["recognized_product"].get("category"),
+            reference_summary=merged["reference_summary"],
+            scene_tags=merged["scene_tags"],
+            selling_point_entities=merged["selling_point_entities"],
+            detected_view_slots=merged["detected_view_slots"],
+        )
+        merged["evidence_scores"] = self._normalize_evidence_scores(
+            parsed.get("evidence_scores"),
+            fallback.get("evidence_scores", {}),
+            reference_summary=merged["reference_summary"],
+            detected_view_slots=merged["detected_view_slots"],
+            risk_flags=merged["risk_flags"],
+        )
         merged["supplement_image_recommendations"] = self._normalize_supplement_recommendations(
             parsed.get("supplement_image_recommendations"),
             merged["missing_views"],
             fallback.get("supplement_image_recommendations", []),
             recognized_product=merged["recognized_product"],
             reference_summary=merged["reference_summary"],
+            risk_flags=merged["risk_flags"],
+            selling_point_entities=merged["selling_point_entities"],
         )
         if not merged["suggestions"]:
             merged["suggestions"] = [
@@ -1912,6 +2104,27 @@ class WhataiClient:
         )
         return merged
 
+    def _merge_fidelity_result(self, fallback: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
+        merged = {**fallback}
+        issues = [str(item).strip() for item in parsed.get("issues", []) if str(item).strip() in FIDELITY_ISSUE_TAXONOMY]
+        findings = self._normalize_flat_text_list(parsed.get("focus_findings"))
+        status = str(parsed.get("status") or "").strip().lower()
+        if status not in {"passed", "failed", "unknown"}:
+            status = "failed" if issues else "unknown"
+        if not issues and status == "failed":
+            status = "unknown"
+        merged.update(
+            {
+                "status": status,
+                "passed": status != "failed",
+                "issues": issues,
+                "focus_findings": findings,
+                "reason": repair_broken_text(parsed.get("reason")) or fallback.get("reason") or "",
+                "validator_source": "llm_vision",
+            }
+        )
+        return merged
+
     def _normalize_analysis_dict(
         self,
         value: Any,
@@ -1936,16 +2149,31 @@ class WhataiClient:
 
     def _normalize_reference_summary(self, value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
         parsed = self._decode_json_like(value)
+        default_summary = {
+            "shape": "",
+            "colors": "",
+            "materials": "",
+            "structures": "",
+            "must_keep": "",
+            "proportion_note": "",
+            "control_panel_note": "",
+            "transparent_parts_note": "",
+            "structure_anchor_points": "",
+            "do_not_move_features": "",
+            "scene_fit_notes": "",
+        }
         if isinstance(parsed, dict):
-            return {**fallback, **parsed}
+            merged = {**default_summary, **fallback, **parsed}
+            return {key: repair_broken_text(value) for key, value in merged.items()}
         if isinstance(parsed, str) and parsed.strip():
             text = parsed.strip()
             return {
+                **default_summary,
                 **fallback,
                 "shape": fallback.get("shape") or text,
                 "must_keep": text,
             }
-        return dict(fallback)
+        return {key: repair_broken_text(value) for key, value in {**default_summary, **fallback}.items()}
 
     def _normalize_string_list(self, value: Any, fallback: list[Any]) -> list[str]:
         parsed = self._decode_json_like(value)
@@ -2054,6 +2282,50 @@ class WhataiClient:
             seen.add(slot)
         return normalized
 
+    def _normalize_risk_flags(
+        self,
+        value: Any,
+        fallback: list[Any],
+        *,
+        category: Any,
+        reference_summary: dict[str, Any],
+        scene_tags: list[str],
+        selling_point_entities: list[str],
+        detected_view_slots: list[str],
+    ) -> list[str]:
+        normalized = self._normalize_string_list(value, fallback)
+        inferred = infer_risk_flags(
+            category=category,
+            reference_summary=reference_summary,
+            scene_tags=scene_tags,
+            selling_point_entities=selling_point_entities,
+            detected_view_slots=detected_view_slots,
+        )
+        return self._normalize_string_list(normalized + inferred, [])
+
+    def _normalize_evidence_scores(
+        self,
+        value: Any,
+        fallback: dict[str, Any],
+        *,
+        reference_summary: dict[str, Any],
+        detected_view_slots: list[str],
+        risk_flags: list[str],
+    ) -> dict[str, int]:
+        parsed = self._decode_json_like(value)
+        base = infer_evidence_scores(
+            reference_summary=reference_summary,
+            detected_view_slots=detected_view_slots,
+            risk_flags=risk_flags,
+        )
+        merged = {**base, **(fallback if isinstance(fallback, dict) else {})}
+        if isinstance(parsed, dict):
+            merged.update(parsed)
+        return {
+            key: max(0, min(int(merged.get(key) or base.get(key) or 0), 100))
+            for key in ("structure", "proportion", "scene", "text")
+        }
+
     def _normalize_supplement_recommendations(
         self,
         value: Any,
@@ -2062,12 +2334,19 @@ class WhataiClient:
         *,
         recognized_product: dict[str, Any],
         reference_summary: dict[str, Any],
+        risk_flags: list[str],
+        selling_point_entities: list[str],
     ) -> list[dict[str, Any]]:
         parsed = self._decode_json_like(value)
         items = parsed if isinstance(parsed, list) else fallback
         normalized: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         category = repair_broken_text(recognized_product.get("category"))
+        preferred_extra_image_kinds = self._risk_driven_extra_image_kinds(
+            category=category,
+            risk_flags=risk_flags,
+            selling_point_entities=selling_point_entities,
+        )
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -2114,7 +2393,7 @@ class WhataiClient:
             )
             seen.add(signature)
 
-        for image_kind in self._recommended_extra_image_kinds(category):
+        for image_kind in preferred_extra_image_kinds:
             signature = ("extra", image_kind)
             if signature in seen or len(normalized) >= 4:
                 continue
@@ -2174,6 +2453,28 @@ class WhataiClient:
         if normalized in {"小风扇", "取暖器", "吸尘器", "扫地机", "洗地机"}:
             return ["detail_closeup", "use_scene_real"]
         return ["detail_closeup"]
+
+    def _risk_driven_extra_image_kinds(
+        self,
+        *,
+        category: str,
+        risk_flags: list[str],
+        selling_point_entities: list[str],
+    ) -> list[str]:
+        recommended: list[str] = []
+        entity_set = {str(item).strip() for item in selling_point_entities if str(item).strip()}
+        flag_set = {str(item).strip() for item in risk_flags if str(item).strip()}
+        if "transparent_or_internal_structure" in flag_set or "透明水箱" in entity_set:
+            recommended.append("water_tank")
+        if "transparent_or_internal_structure" in flag_set or "滤芯" in entity_set:
+            recommended.append("filter_structure")
+        if "scale_sensitive" in flag_set or "尺寸感" in entity_set:
+            recommended.append("size_in_hand")
+        if "scene_entity_sensitive" in flag_set or "scene_grounding_sensitive" in flag_set or entity_set & {"宠物", "儿童"}:
+            recommended.append("use_scene_real")
+        recommended.append("detail_closeup")
+        recommended.extend(self._recommended_extra_image_kinds(category))
+        return self._normalize_string_list(recommended, [])
 
     def _extra_image_kind_label(self, image_kind: str) -> str:
         return {
@@ -2282,6 +2583,32 @@ class WhataiClient:
                     "reason": f"仅作为弱候选，来自当前启用品类库：{str(item['name']).strip()}。",
                 }
             )
+        reference_summary = {
+            "shape": f"当前参考图包含 {slot_hint} 视角，建议保持商品整体轮廓、比例和边角特征一致",
+            "colors": "保持参考图中的主色、辅色和明暗关系",
+            "materials": "按照参考图中的真实材质和表面纹理表达，不要臆造材质",
+            "structures": "保留商品的开孔、按钮、接口、边缘结构和装配关系",
+            "must_keep": "商品外观、比例、核心结构和主色不能漂移",
+            "proportion_note": "当前缺少精确尺寸参照，先按参考图默认比例保守处理。",
+            "control_panel_note": "若商品有控制面板或显示区，应保持原始位置和朝向。",
+            "transparent_parts_note": "若商品含透明件、水箱或滤芯区，只能按真实连接关系表达。",
+            "structure_anchor_points": "主体轮廓、主要边角、开孔、按钮和装配缝。",
+            "do_not_move_features": "不要改动面板、把手、盖体、容器和主要结构位置。",
+            "scene_fit_notes": "场景图中商品需要与桌面/地面真实接触，保持合理透视和阴影。",
+        }
+        selling_point_entities = extract_selling_point_entities(reference_summary, ["控制面板", "尺寸感"] if "side" not in slots else [])
+        risk_flags = infer_risk_flags(
+            category="其他",
+            reference_summary=reference_summary,
+            scene_tags=["白底产品"] if "front" in slots else ["基础产品图"],
+            selling_point_entities=selling_point_entities,
+            detected_view_slots=[slot for slot in ("front", "angle45", "side", "extra") if slot in slots],
+        )
+        evidence_scores = infer_evidence_scores(
+            reference_summary=reference_summary,
+            detected_view_slots=[slot for slot in ("front", "angle45", "side", "extra") if slot in slots],
+            risk_flags=risk_flags,
+        )
         return {
             "analysis_source": "fallback",
             "recognized_product": {
@@ -2296,6 +2623,9 @@ class WhataiClient:
                 "clarity": "good",
                 "background_cleanliness": "medium",
             },
+            "evidence_scores": evidence_scores,
+            "risk_flags": risk_flags,
+            "selling_point_entities": selling_point_entities,
             "category_candidates": category_candidates,
             "missing_views": missing_views,
             "detected_view_slots": [slot for slot in ("front", "angle45", "side", "extra") if slot in slots],
@@ -2329,13 +2659,7 @@ class WhataiClient:
             },
             "key_parameters": [],
             "suggested_styles": ["现代简约", "科技感"],
-            "reference_summary": {
-                "shape": f"当前参考图包含 {slot_hint} 视角，建议保持商品整体轮廓、比例和边角特征一致",
-                "colors": "保持参考图中的主色、辅色和明暗关系",
-                "materials": "按照参考图中的真实材质和表面纹理表达，不要臆造材质",
-                "structures": "保留商品的开孔、按钮、接口、边缘结构和装配关系",
-                "must_keep": "商品外观、比例、核心结构和主色不能漂移",
-            },
+            "reference_summary": reference_summary,
         }
 
     def _slot_label(self, slot_type: str) -> str:

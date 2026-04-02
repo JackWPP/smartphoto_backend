@@ -551,6 +551,8 @@ def recommend_expression_mode(
     specs = _split_points(confirmed_copy.get("specs"))
     key_parameters = _key_parameter_strings(confirmed_copy.get("key_parameters"))
     must_keep = _safe_analysis_value(analysis_snapshot, "reference_summary", "must_keep")
+    evidence_scores = (analysis_snapshot or {}).get("evidence_scores") if isinstance((analysis_snapshot or {}).get("evidence_scores"), dict) else {}
+    risk_flags = {str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()}
     overlay = get_platform_overlay(platform_id)
 
     if slot_id == "white_bg":
@@ -564,12 +566,16 @@ def recommend_expression_mode(
             return "mechanism_card", "当前 copy 含参数/机制信息，优先做机制卡说明为什么有效。"
         return "reason_card", "理由图默认用理由卡承接首图点击后的疑问。"
     if slot_id == "proof_authority":
+        if "insufficient_panel_evidence" in risk_flags:
+            return "spec_proof", "面板/结构证据不足时，优先做更保守的参数佐证，不走虚构机构或实验场景。"
         if "cert" in must_keep.lower() or any("证" in item or "认" in item for item in selling_points + specs + key_parameters):
             return "certificate_proof", "检测到认证/证书语义，优先做证书佐证图。"
         if specs or key_parameters:
             return "spec_proof", "存在明显参数信息，优先用参数佐证支撑最强卖点。"
         return "lab_proof", "默认使用实验/能力证明型佐证图。"
     if slot_id == "benefit_scene_or_compare":
+        if "scene_entity_sensitive" in risk_flags or "insufficient_scale_evidence" in risk_flags:
+            return "real_scene_benefit", "场景/比例证据偏弱，优先用更保守的利益场景表达，避免复杂互动或夸张对比。"
         if usage_scenes:
             return "real_scene_benefit", "存在使用场景文案，优先用真实场景承接消费者利益点。"
         if overlay.get("allow_compare_overlay"):
@@ -590,10 +596,14 @@ def recommend_expression_mode(
             return "benefit_proof_card", "卖点图存在参数支撑信息，优先用卖点佐证卡。"
         return "single_feature_focus", "默认聚焦单卖点做功能化构图。"
     if slot_id == "scene":
+        if "scene_entity_sensitive" in risk_flags or "insufficient_scale_evidence" in risk_flags:
+            return "benefit_scene", "当前缺少稳定的人物/尺寸证据，场景槽位降级为更轻的利益场景。"
         if usage_scenes:
             return "immersive_scene", "场景槽位优先按真实使用场景来推荐。"
         return "benefit_scene", "无明确场景时，退回利益点场景表达。"
     if slot_id == "detail":
+        if int(evidence_scores.get("structure") or 0) < 60 or risk_flags & {"transparent_or_internal_structure", "insufficient_panel_evidence"}:
+            return "macro_texture_closeup", "结构证据不足或存在透明/面板敏感风险，细节图降级为保守特写。"
         if specs or key_parameters:
             return "structure_cutaway", "检测到结构/参数语义，优先使用结构拆解式细节图。"
         return "macro_texture_closeup", "默认使用材质微距特写。"

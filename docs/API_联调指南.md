@@ -68,12 +68,13 @@
 
 ### 1.3 关键状态与枚举
 - Session 状态：`created` `images_uploaded` `analyzing` `analyzed` `platform_selected` `copy_ready` `strategy_ready` `generating` `completed` `failed`
-- Job 状态：`queued` `running` `succeeded` `failed`
-- 通用任务事件：`job_queued` `job_started` `job_progress` `asset_ready` `job_succeeded` `job_failed`
+- Job 状态：`queued` `running` `succeeded` `partial_succeeded` `failed`
+- 通用任务事件：`job_queued` `job_started` `job_progress` `asset_ready` `job_partial_succeeded` `job_succeeded` `job_failed`
 - 详情页专属事件：
   - `detail_strategy_ready`
   - `detail_panel_render_started`
   - `detail_panel_render_succeeded`
+  - `detail_panel_render_failed`
   - `detail_stitched_ready`
 
 ### 1.4 常用错误码
@@ -160,6 +161,9 @@
     - `analysis_source`
     - `category_candidates[{category,confidence,reason}]`
     - `scene_tags`
+    - `selling_point_entities`
+    - `risk_flags`
+    - `evidence_scores[{structure,proportion,scene,text}]`
     - `detected_view_slots`
     - `supplement_image_recommendations[{slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption,image_kind?}]`
     - `reanalysis_required`
@@ -187,6 +191,16 @@
     - `materials`
     - `structures`
     - `must_keep`
+    - `proportion_note`
+    - `control_panel_note`
+    - `transparent_parts_note`
+    - `structure_anchor_points`
+    - `do_not_move_features`
+    - `scene_fit_notes`
+  - `selling_point_entities/risk_flags/evidence_scores` 会作为后续 Step 5 策略预览和生成阶段的 prompt/harness 约束输入：
+    - `selling_point_entities` 用于绑定宠物、透明水箱、控制面板、滤芯、尺寸等真实卖点实体
+    - `risk_flags` 用于提示结构敏感、比例敏感、场景落地敏感等风险
+    - `evidence_scores` 用于控制保守表达和保真降级，不再在生成后触发逐张复检
   - 若 `confirmed_copy` 为空，自动写入草稿默认值
 - 常见错误：`40008`（无可用图片）
 - 幂等：支持 `Idempotency-Key`
@@ -316,6 +330,21 @@
   - `POST /sessions/{session_id}/generations` 现在会优先复用已持久化且 `input_hash` 未变化的 `strategy_preview`，不会在 worker 里再次补跑 planner
   - planner 当前允许由 LLM 主导输出 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包只负责 guardrail 和 fallback
   - `main copy design agent` 当前默认关闭，不再作为主图预览默认时延来源
+  - `strategy_preview.prompt_plan[*]` 现在还会补充：
+    - `risk_flags`
+    - `selling_point_binding`
+    - `truth_contract`
+  - `truth_contract` 至少包含：
+    - `immutable_features`
+    - `forbidden_drift`
+    - `required_entities`
+    - `evidence_level`
+    - `allow_structure_extrapolation`
+    - `scene_grounding_rule`
+    - `scale_anchor`
+  - 当证据不足时，主图策略会主动保真降级：
+    - `detail/proof_authority` 不再默认走强结构拆解或机制示意
+    - `scene/benefit_scene_or_compare` 会优先退回轻场景/利益场景，不强做人宠互动或夸张尺寸表达
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”：
     - 默认平台仍输出 5 张：`hero` `white_bg` `selling_point` `scene` `detail`
     - 阿里系（`1688` / `taobao` / `alibaba_intl`）输出 5 个阿里槽位：`primary_kv` `reason_why` `proof_authority` `benefit_scene_or_compare` `closing_selling_point`
@@ -665,13 +694,19 @@
     - `detail_strategy_ready`
     - `detail_panel_render_started`
     - `detail_panel_render_succeeded`
+    - `detail_panel_render_failed`
     - `detail_stitched_ready`
   - 单 panel 重生：`POST /assets/{asset_id}/regenerate`
     - 当 `asset_family=detail_page` 且 `asset_kind=panel` 时，会转成 `job_type=regenerate_detail_panel`
     - carry-forward 基线取 `parent_asset.version_no`；未改动 panel 与最终 stitched 长图都按该版本物化
-  - 固定产出：
+  - 默认完整产出：
     - 8 张 `panel`
     - 1 张竖向拼接长图 `stitched`
+  - 当前实现补充：
+    - 若提交阶段或下载阶段只有部分 panel 失败，但当前版本仍有 ready panel，则 job 会写成 `partial_succeeded`
+    - `GET /sessions/{id}/detail-pages/results` 会返回 `expected_panel_ids / missing_panel_ids / summary.expected_panel_count`
+    - `partial_succeeded` 的详情页版本允许 `stitched_asset=null`；只有 panel 全齐时才会产出 stitched
+    - 前端应把 `missing_panel_ids` 当作当前版本仍待补齐的真相源，不要把 `stitched_asset=null` 误判成接口异常
   - 结果里的每个 panel 当前会额外回传：
     - `display_tags`
     - `display_module_title`
@@ -728,6 +763,7 @@
   - `requested_version`
   - `available_versions`
   - `version_summaries`
+  - `version_summaries[*].created_at/job_type/is_partial/cover_asset_id/cover_thumbnail_url/missing_slot_ids/missing_panel_ids`
   - `assets[].role`
   - `assets[].slot_id`
   - `assets[].expression_mode`
@@ -736,6 +772,9 @@
   - `assets[].display_order`
   - `assets[].version_no`
   - `assets[].render_total_ms`
+  - `assets[].carry_forward`
+  - `assets[].source_version_no`
+  - `assets[].fidelity_validation_status`
 - 版本规则：
   - `generate_gallery` / `global_edit` / `regenerate_gallery`：`round_no + 1` 且 `version_no + 1`
   - `regenerate_asset`：`version_no + 1`，`round_no` 保持当前轮次，且写 `parent_asset_id`
@@ -750,9 +789,11 @@
   - `detail`/`proof_authority` 默认优先 `front + side`，其余槽位默认优先 `front + angle45`
   - 并发与轮询改为配置化：
     - `generation_submit_concurrency`
+    - `detail_generation_submit_concurrency`
     - `main_generation_concurrency`
     - `detail_generation_concurrency`
     - `image_submit_batch_size`
+    - `detail_image_submit_batch_size`
     - `image_submit_batch_interval_seconds`
     - `image_poll_initial_delay_seconds`
     - `image_poll_profile`
@@ -770,9 +811,18 @@
     - job 状态会写成 `partial_succeeded`
     - `GET /sessions/{id}/results` 会返回 `expected_slot_ids / missing_slot_ids / summary.expected_count`
     - 前端后续可直接复用 `POST /sessions/{id}/generations` 的 `slot_ids` 补齐缺失槽位
+  - 详情页当前也允许部分成功：
+    - 提交阶段或下载阶段只要还有 ready panel，job 会写成 `partial_succeeded`
+    - `GET /sessions/{id}/detail-pages/results` 会返回 `expected_panel_ids / missing_panel_ids / summary.expected_panel_count`
+    - `detail_panel_render_failed` 会写入失败 panel 的 `slot_id/display_order/failure_stage/upstream_http_status`
+    - `stitched_asset` 仅在 panel 全齐时生成；partial 版本下载 ZIP 只包含 ready panel
   - 主图与详情页 `generation_snapshot` 现在还会补充：
     - `sanitized_fields`
     - `copy_safety_notes`
+    - `truth_contract`
+    - `risk_flags`
+    - `selling_point_binding`
+    - `fidelity_validation`
     - `download_retry_count`
     - `download_rescued`
     - `download_rescue_reason`
@@ -781,6 +831,8 @@
     - `submit_strategy_version`
     - `timing.poll_started_after_ms`
   - 实际提交给上游的快照会落到 `assets.generation_snapshot`
+  - `truth_contract/risk_flags/selling_point_binding` 当前用于生成前约束与结果追溯，不再在下载后串行触发逐张 `fidelity_validation` 或补救重生
+  - `fidelity_validation` 与 `assets[].fidelity_validation_status` 当前仅保留兼容字段，默认可能为 `null`
 - 并发保护：
   - 同 session 同时只允许 1 个运行中生图任务
   - 冲突返回 `40901`
@@ -930,7 +982,7 @@ data: {"event":"job_succeeded","job_id":"..."}
 2. `regenerate_copy` 仍返回占位重写结果，尚未解析上游真实输出。
 3. `global_edit` 的 `scope=selected` 参数已接收，但执行时仍按整组处理。
 4. 当前已实现“风格参考图单独上传 + 详情页独立首次生成 + 动态 panel_type 推荐/覆盖”，但未实现详情页 `global_edit`、单 panel 重生成、ComfyUI 节点级调试信息。
-5. Job 状态虽然定义了 `partial_succeeded`/`canceled`，当前实现不会产出这两种状态。
+5. 当前实现已经会产出 `partial_succeeded`（主图缺槽位、详情页缺 panel 时）；`canceled` 仍未实现。
 6. 上传图片未实现“建议尺寸 >= 1000x1000”的强校验。
 7. 阿里规则当前支持短 headline / supporting / proof lines 的 prompt 级植入，并已为 `1688/taobao` 增加更强的中文 visible copy 前置约束；当前仍不包含画布级文字编辑器。
 8. `adminfront/` 已升级为可运营、可排障、可配置的后台控制台；当前仍未做 RBAC、多级审批流、运行时敏感配置在线编辑和任务强制取消。

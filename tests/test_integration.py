@@ -553,7 +553,7 @@ def test_partial_gallery_results_expose_missing_slot_ids_and_slot_fill_carries_f
     def broken_download(self, submission, *_args, **_kwargs):
         if submission["submission_id"] == "main:scene:4":
             raise AppError("upstream_image_error", "download failed", 502)
-        return b"fake-image"
+        return make_image_bytes()
 
     monkeypatch.setattr("app.services.upstream.WhataiClient.download_image_bytes", broken_download)
 
@@ -568,7 +568,7 @@ def test_partial_gallery_results_expose_missing_slot_ids_and_slot_fill_carries_f
     assert results["missing_slot_ids"] == ["scene"]
     assert len(results["assets"]) == 4
 
-    monkeypatch.setattr("app.services.upstream.WhataiClient.download_image_bytes", lambda self, *_args, **_kwargs: b"fake-image")
+    monkeypatch.setattr("app.services.upstream.WhataiClient.download_image_bytes", lambda self, *_args, **_kwargs: make_image_bytes())
 
     fill = client.post(
         f"/api/v2/sessions/{sid}/generations",
@@ -986,6 +986,58 @@ def test_detail_page_full_pipeline_keeps_main_gallery_untouched(client):
         assert len(zf.namelist()) == 9
 
 
+def test_detail_page_partial_results_expose_missing_panel_ids_when_submit_fails(client, monkeypatch):
+    sid = create_ready_session(client)
+    preview = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert preview.status_code == 200
+    panel_plan = preview.json()["data"]["detail_strategy_preview"]["panel_plan"]
+    target_slot_id = panel_plan[3]["slot_id"]
+
+    def fake_submit_image_request_with_retry(**kwargs):
+        submission_id = kwargs["submission_id"]
+        if submission_id.startswith(f"detail:{target_slot_id}:"):
+            raise AppError("upstream_image_error", "submit failed", 502)
+        return {
+            "submission_id": submission_id,
+            "task_id": None,
+            "upstream_endpoint": "/v1/images/edits",
+            "result": {"fake_bytes": make_image_bytes(size=(1600, 685))},
+        }
+
+    monkeypatch.setattr("app.services.pipeline._submit_image_request_with_retry", fake_submit_image_request_with_retry)
+
+    gen = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "保留整体风格"})
+    assert gen.status_code == 200
+    job_id = gen.json()["data"]["job_id"]
+
+    job = client.get(f"/api/v2/jobs/{job_id}").json()["data"]
+    assert job["status"] == "partial_succeeded"
+    assert job["result_payload"]["missing_panel_ids"] == [target_slot_id]
+    assert job["result_payload"]["expected_panel_count"] == 8
+    assert job["result_payload"]["stitched_asset_id"] is None
+
+    detail_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results").json()["data"]
+    assert detail_results["summary"]["panel_count"] == 7
+    assert detail_results["summary"]["expected_panel_count"] == 8
+    assert detail_results["missing_panel_ids"] == [target_slot_id]
+    assert target_slot_id in detail_results["expected_panel_ids"]
+    assert detail_results["stitched_asset"] is None
+    assert len(detail_results["panels"]) == 7
+
+    with db_session.SessionLocal() as db:
+        event_types = [
+            item.event_type
+            for item in db.query(JobEventModel).filter(JobEventModel.job_id == job_id).order_by(JobEventModel.seq_no.asc()).all()
+        ]
+    assert "detail_panel_render_failed" in event_types
+    assert "job_partial_succeeded" in event_types
+
+    dl = client.get(f"/api/v2/sessions/{sid}/detail-pages/download")
+    assert dl.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(dl.content)) as zf:
+        assert len(zf.namelist()) == 7
+
+
 def test_detail_page_generation_idempotency_and_conflict(client, monkeypatch):
     sid = create_ready_session(client)
     client.post(f"/api/v2/sessions/{sid}/strategy/preview")
@@ -1147,10 +1199,15 @@ def test_regenerate_asset_preserves_history_and_materializes_full_version(client
     assert latest_results["requested_version"] == 2
     assert latest_results["available_versions"] == [2, 1]
     assert len(latest_results["assets"]) == len(v1_results["assets"])
+    assert latest_results["version_summaries"][0]["cover_asset_id"] is not None
+    assert latest_results["version_summaries"][0]["job_type"] in {"regenerate_asset", "generate_gallery", "regenerate_gallery", "global_edit"}
+    assert isinstance(latest_results["assets"][0]["carry_forward"], bool)
+    assert "fidelity_validation_status" in latest_results["assets"][0]
 
     v1_again = client.get(f"/api/v2/sessions/{sid}/results?version=1").json()["data"]
     assert v1_again["requested_version"] == 1
     assert len(v1_again["assets"]) == len(v1_results["assets"])
+    assert v1_again["version_summaries"][-1]["created_at"] is not None
 
 
 def test_regenerate_asset_from_historical_version_uses_parent_asset_version(client):

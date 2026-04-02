@@ -1017,6 +1017,27 @@ def _job_failure_payload(exc: AppError, *, planner_stage: str | None = None) -> 
     return payload
 
 
+def _failed_render_spec_payload(
+    render_spec: dict[str, Any],
+    exc: AppError,
+    *,
+    failure_stage: str,
+    retry_count: int = 0,
+) -> dict[str, Any]:
+    slot_id = str(render_spec.get("slot_id") or render_spec.get("panel_id") or render_spec.get("role") or "").strip()
+    return {
+        "role": str(render_spec.get("role") or render_spec.get("panel_id") or "").strip(),
+        "panel_id": str(render_spec.get("panel_id") or render_spec.get("role") or "").strip(),
+        "slot_id": slot_id,
+        "display_order": int(render_spec.get("display_order") or 0),
+        "error_message": exc.message,
+        "error_code": exc.error.code,
+        "upstream_http_status": exc.http_status,
+        "retry_count": retry_count,
+        "failure_stage": failure_stage,
+    }
+
+
 def _render_assets_concurrently(
     *,
     confirmed_copy: dict[str, object],
@@ -1053,11 +1074,16 @@ def _render_assets_concurrently(
         batch_interval_seconds=settings.image_submit_batch_interval_seconds,
     )
     submitted_specs = submit_bundle["submitted_specs"]
+    submit_failed_specs = list(submit_bundle.get("failed_specs") or [])
     poll_started = time.perf_counter()
-    results_by_submission = client.poll_image_tasks(
-        [spec["submission"] for spec in submitted_specs],
-        "upstream_image_error",
-        initial_delay_seconds=settings.image_poll_initial_delay_seconds,
+    results_by_submission = (
+        client.poll_image_tasks(
+            [spec["submission"] for spec in submitted_specs],
+            "upstream_image_error",
+            initial_delay_seconds=settings.image_poll_initial_delay_seconds,
+        )
+        if submitted_specs
+        else {}
     )
     poll_ms = int((time.perf_counter() - poll_started) * 1000)
     rendered_specs = _materialize_render_specs(
@@ -1090,7 +1116,7 @@ def _render_assets_concurrently(
     return {
         "rendered_assets": finalized,
         "expected_slot_ids": expected_slot_ids,
-        "missing_slots": rendered_specs["failed_specs"],
+        "missing_slots": submit_failed_specs + rendered_specs["failed_specs"],
         "submit_batches": submit_bundle["submit_batches"],
         "submit_strategy_version": submit_bundle["submit_strategy_version"],
         "poll_initial_delay_ms": int(settings.image_poll_initial_delay_seconds * 1000),
@@ -1111,7 +1137,11 @@ def _prepare_main_render_spec(
     aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
     image_size = _resolve_image_size(aspect_ratio)
     reference_role = str(plan_item.get("reference_role_hint") or slot_id or role)
-    reference_images = select_reference_images_for_role(loaded_reference_images, reference_role)
+    reference_images = select_reference_images_for_role(
+        loaded_reference_images,
+        reference_role,
+        max_images=int(plan_item.get("reference_image_limit") or 2),
+    )
     prompt_payload = compose_prompt(
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
@@ -1130,6 +1160,7 @@ def _prepare_main_render_spec(
         "prompt_payload": prompt_payload,
         "reference_images": reference_images,
         "planner_instruction": str(strategy_preview.get("planner_instruction") or "") or None,
+        "instruction": instruction,
     }
 
 
@@ -1142,9 +1173,15 @@ def _submit_render_specs(
     batch_interval_seconds: int,
 ) -> dict[str, Any]:
     if not render_specs:
-        return {"submitted_specs": [], "submit_batches": [], "submit_strategy_version": SUBMIT_STRATEGY_VERSION}
+        return {
+            "submitted_specs": [],
+            "failed_specs": [],
+            "submit_batches": [],
+            "submit_strategy_version": SUBMIT_STRATEGY_VERSION,
+        }
 
     submitted: list[dict[str, Any]] = []
+    failed_specs: list[dict[str, Any]] = []
     submit_batches: list[dict[str, int]] = []
     normalized_batch_size = max(1, min(batch_size, len(render_specs)))
     worker_limit = max(1, min(max_workers, normalized_batch_size, len(render_specs)))
@@ -1173,7 +1210,28 @@ def _submit_render_specs(
                 for render_spec in batch
             }
             for future in as_completed(future_map):
-                submitted.append(future.result())
+                render_spec = future_map[future]
+                try:
+                    submitted.append(future.result())
+                except AppError as exc:
+                    logger.warning(
+                        "Render submission failed: submission_id=%s slot_id=%s display_order=%s batch=%s/%s status=%s retryable=%s error=%s",
+                        render_spec.get("submission_id"),
+                        render_spec.get("slot_id") or render_spec.get("panel_id") or render_spec.get("role"),
+                        render_spec.get("display_order"),
+                        batch_index,
+                        total_batches,
+                        exc.http_status,
+                        exc.retryable,
+                        exc.message,
+                    )
+                    failed_specs.append(
+                        _failed_render_spec_payload(
+                            render_spec,
+                            exc,
+                            failure_stage="submit",
+                        )
+                    )
         submit_batches.append({"batch_index": batch_index, "batch_size": len(batch)})
         if batch_index < total_batches and batch_interval_seconds > 0:
             logger.info(
@@ -1185,6 +1243,7 @@ def _submit_render_specs(
             time.sleep(batch_interval_seconds)
     return {
         "submitted_specs": submitted,
+        "failed_specs": failed_specs,
         "submit_batches": submit_batches,
         "submit_strategy_version": SUBMIT_STRATEGY_VERSION,
     }
@@ -1246,12 +1305,7 @@ def _materialize_render_specs(
                 rendered.append(future.result())
             except AppError as exc:
                 failed_specs.append(
-                    {
-                        "render_spec": render_spec,
-                        "error_message": exc.message,
-                        "error_code": exc.error.code,
-                        "upstream_http_status": exc.http_status,
-                    }
+                    {"render_spec": render_spec, **_failed_render_spec_payload(render_spec, exc, failure_stage="download")}
                 )
 
     rescued: list[dict[str, Any]] = []
@@ -1269,15 +1323,12 @@ def _materialize_render_specs(
         except AppError as rescue_exc:
             render_spec = failed_spec["render_spec"]
             remaining_failures.append(
-                {
-                    "role": str(render_spec.get("role") or ""),
-                    "slot_id": str(render_spec.get("slot_id") or render_spec.get("role") or ""),
-                    "display_order": int(render_spec.get("display_order") or 0),
-                    "error_message": rescue_exc.message,
-                    "error_code": rescue_exc.error.code,
-                    "upstream_http_status": rescue_exc.http_status,
-                    "retry_count": 1,
-                }
+                _failed_render_spec_payload(
+                    render_spec,
+                    rescue_exc,
+                    failure_stage="download",
+                    retry_count=1,
+                )
             )
 
     rendered.extend(rescued)
@@ -1340,7 +1391,7 @@ def _apply_main_gallery_post_validations(
     image_size: str,
     aspect_ratio: str,
     reference_images: list,
-) -> tuple[dict[str, Any], bytes, dict[str, Any] | None, dict[str, Any] | None]:
+) -> tuple[dict[str, Any], bytes, dict[str, Any] | None]:
     current_prompt_payload = prompt_payload
     current_image_bytes = image_bytes
     white_bg_validation = None
@@ -1379,7 +1430,7 @@ def _apply_main_gallery_post_validations(
                     diagnostics,
                 )
 
-    return current_prompt_payload, current_image_bytes, white_bg_validation, None
+    return current_prompt_payload, current_image_bytes, white_bg_validation
 
 
 def _inspect_visible_text_language(
@@ -1421,6 +1472,7 @@ def _inspect_visible_text_language(
         "reason": "validator_error",
     }
 
+
 def _finalize_main_rendered_asset(
     *,
     client: WhataiClient,
@@ -1433,7 +1485,7 @@ def _finalize_main_rendered_asset(
     image_bytes = render_spec["image_bytes"]
     plan_item = render_spec["plan_item"]
     reference_images = render_spec["reference_images"]
-    prompt_payload, image_bytes, white_bg_validation, language_validation = _apply_main_gallery_post_validations(
+    prompt_payload, image_bytes, white_bg_validation = _apply_main_gallery_post_validations(
         client=client,
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
@@ -1468,9 +1520,13 @@ def _finalize_main_rendered_asset(
         "size": render_spec["image_size"],
         "planner_source": prompt_payload.get("planner_source"),
         "white_bg_validation": white_bg_validation,
-        "language_validation": language_validation,
+        "language_validation": None,
+        "truth_contract": prompt_payload.get("truth_contract") or {},
+        "risk_flags": prompt_payload.get("risk_flags") or [],
+        "fidelity_validation": None,
         "slot_id": render_spec["slot_id"],
         "expression_mode": prompt_payload.get("expression_mode") or plan_item.get("expression_mode"),
+        "selling_point_binding": prompt_payload.get("selling_point_binding") or {},
         "rule_pack_id": plan_item.get("platform_rule_pack"),
         "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
         "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
@@ -1510,7 +1566,11 @@ def _render_single_asset(
     aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
     image_size = _resolve_image_size(aspect_ratio)
     reference_role = str(plan_item.get("reference_role_hint") or slot_id or role)
-    reference_images = select_reference_images_for_role(loaded_reference_images, reference_role)
+    reference_images = select_reference_images_for_role(
+        loaded_reference_images,
+        reference_role,
+        max_images=int(plan_item.get("reference_image_limit") or 2),
+    )
     prompt_payload = compose_prompt(
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
@@ -1529,7 +1589,7 @@ def _render_single_asset(
         role=role,
         display_order=display_order,
     )
-    prompt_payload, image_bytes, white_bg_validation, language_validation = _apply_main_gallery_post_validations(
+    prompt_payload, image_bytes, white_bg_validation = _apply_main_gallery_post_validations(
         client=client,
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
@@ -1564,9 +1624,13 @@ def _render_single_asset(
         "size": image_size,
         "planner_source": prompt_payload.get("planner_source"),
         "white_bg_validation": white_bg_validation,
-        "language_validation": language_validation,
+        "language_validation": None,
+        "truth_contract": prompt_payload.get("truth_contract") or {},
+        "risk_flags": prompt_payload.get("risk_flags") or [],
+        "fidelity_validation": None,
         "slot_id": slot_id,
         "expression_mode": prompt_payload.get("expression_mode") or plan_item.get("expression_mode"),
+        "selling_point_binding": prompt_payload.get("selling_point_binding") or {},
         "rule_pack_id": plan_item.get("platform_rule_pack"),
         "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
         "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
@@ -1637,7 +1701,18 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
         last_version = session.detail_latest_result_version
         version_no = last_version + 1
         round_no = session.detail_generation_round + 1
-        plan = effective_strategy_preview.get("panel_plan") or []
+        full_plan = [
+            item
+            for item in (effective_strategy_preview.get("panel_plan") or [])
+            if isinstance(item, dict)
+        ]
+        expected_panel_order = {
+            str(item.get("slot_id") or item.get("panel_id") or "").strip(): int(item.get("display_order") or 0)
+            for item in full_plan
+            if str(item.get("slot_id") or item.get("panel_id") or "").strip()
+        }
+        expected_panel_ids = [slot_id for slot_id, _ in sorted(expected_panel_order.items(), key=lambda item: item[1])]
+        plan = list(full_plan)
         carry_forward_sources: list[AssetModel] = []
         if job.job_type == "regenerate_detail_panel" and last_version > 0:
             requested = payload.get("panel_plan_item") or {}
@@ -1664,6 +1739,9 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 if slot_id == requested_slot_id:
                     continue
                 carry_forward_sources.append(asset)
+                if slot_id and slot_id not in expected_panel_order:
+                    expected_panel_order[slot_id] = int(asset.display_order or 0)
+            expected_panel_ids = [slot_id for slot_id, _ in sorted(expected_panel_order.items(), key=lambda item: item[1])]
 
         for item in plan:
             if not isinstance(item, dict):
@@ -1718,6 +1796,7 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             },
         )
         rendered_panels = list(detail_render_bundle["rendered_panels"])
+        missing_panels = list(detail_render_bundle.get("missing_panels") or [])
         detail_render_ms = int(
             sum(
                 int(((item.get("generation_snapshot") or {}).get("timing") or {}).get("render_total_ms") or 0)
@@ -1725,7 +1804,14 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
             )
         )
 
-        total_assets = max(len(rendered_panels) + len(carry_forward_sources) + 1, 1)
+        if not rendered_panels and not carry_forward_sources:
+            raise AppError("upstream_image_error", "no ready detail panels produced for current version", 502)
+
+        missing_panel_set = {str(item.get("slot_id") or item.get("panel_id") or "").strip() for item in missing_panels if str(item.get("slot_id") or item.get("panel_id") or "").strip()}
+        missing_panel_ids = [slot_id for slot_id in expected_panel_ids if slot_id in missing_panel_set]
+        should_stitch = not missing_panel_ids
+
+        total_assets = max(len(rendered_panels) + len(carry_forward_sources) + (1 if should_stitch else 0), 1)
         created_assets: list[AssetModel] = []
         panel_bytes_for_stitch: list[tuple[int, bytes]] = []
         progress_index = 0
@@ -1842,66 +1928,68 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
                 },
             )
 
-        update_job_status(db, job, status="running", progress=90, stage="stitching")
-        append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 90, "stage": "stitching"})
+        stitched_asset: AssetModel | None = None
+        if should_stitch:
+            update_job_status(db, job, status="running", progress=90, stage="stitching")
+            append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 90, "stage": "stitching"})
 
-        stitched_bytes = _stitch_detail_panels([item[1] for item in sorted(panel_bytes_for_stitch, key=lambda value: value[0])])
-        image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
-            session_id=session.id,
-            round_no=round_no,
-            version_no=version_no,
-            role="detail_page_long",
-            display_order=len(rendered_panels) + 1,
-            image_bytes=stitched_bytes,
-            ext=".jpg",
-        )
-        stitched_asset = AssetModel(
-            session_id=session.id,
-            job_id=job.id,
-            round_no=round_no,
-            version_no=version_no,
-            parent_asset_id=None,
-            platform_id=session.active_platform_id,
-            asset_family="detail_page",
-            asset_kind="stitched",
-            asset_role="detail_page_long",
-            slot_id=None,
-            expression_mode=None,
-            rule_pack_id=effective_strategy_preview.get("detail_rule_pack"),
-            display_order=len(rendered_panels) + 1,
-            image_url=image_url,
-            thumbnail_url=thumb_url,
-            width=width,
-            height=height,
-            mime_type=mime_type,
-            file_size=file_size,
-            prompt_snapshot=None,
-            edit_instruction=payload.get("instruction"),
-            generation_snapshot={
-                "asset_family": "detail_page",
-                "asset_kind": "stitched",
-                "source_panel_asset_ids": [asset.id for asset in created_assets],
-                "panel_count": len(created_assets),
-                "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
-                "rule_pack_id": effective_strategy_preview.get("detail_rule_pack"),
-            },
-            status="ready",
-        )
-        db.add(stitched_asset)
-        db.flush()
-        created_assets.append(stitched_asset)
-        append_job_event(
-            db,
-            job.id,
-            "detail_stitched_ready",
-            {
-                "event": "detail_stitched_ready",
-                "asset_id": stitched_asset.id,
-                "asset_kind": "stitched",
-                "display_order": stitched_asset.display_order,
-                "detail_render_ms": detail_render_ms,
-            },
-        )
+            stitched_bytes = _stitch_detail_panels([item[1] for item in sorted(panel_bytes_for_stitch, key=lambda value: value[0])])
+            image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
+                session_id=session.id,
+                round_no=round_no,
+                version_no=version_no,
+                role="detail_page_long",
+                display_order=len(panel_bytes_for_stitch) + 1,
+                image_bytes=stitched_bytes,
+                ext=".jpg",
+            )
+            stitched_asset = AssetModel(
+                session_id=session.id,
+                job_id=job.id,
+                round_no=round_no,
+                version_no=version_no,
+                parent_asset_id=None,
+                platform_id=session.active_platform_id,
+                asset_family="detail_page",
+                asset_kind="stitched",
+                asset_role="detail_page_long",
+                slot_id=None,
+                expression_mode=None,
+                rule_pack_id=effective_strategy_preview.get("detail_rule_pack"),
+                display_order=len(panel_bytes_for_stitch) + 1,
+                image_url=image_url,
+                thumbnail_url=thumb_url,
+                width=width,
+                height=height,
+                mime_type=mime_type,
+                file_size=file_size,
+                prompt_snapshot=None,
+                edit_instruction=payload.get("instruction"),
+                generation_snapshot={
+                    "asset_family": "detail_page",
+                    "asset_kind": "stitched",
+                    "source_panel_asset_ids": [asset.id for asset in created_assets],
+                    "panel_count": len(created_assets),
+                    "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+                    "rule_pack_id": effective_strategy_preview.get("detail_rule_pack"),
+                },
+                status="ready",
+            )
+            db.add(stitched_asset)
+            db.flush()
+            created_assets.append(stitched_asset)
+            append_job_event(
+                db,
+                job.id,
+                "detail_stitched_ready",
+                {
+                    "event": "detail_stitched_ready",
+                    "asset_id": stitched_asset.id,
+                    "asset_kind": "stitched",
+                    "display_order": stitched_asset.display_order,
+                    "detail_render_ms": detail_render_ms,
+                },
+            )
 
         session.detail_generation_round = round_no
         session.detail_latest_result_version = version_no
@@ -1909,23 +1997,57 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
         update_session_last_generated_at(session)
         refresh_session_search_cache(session)
 
+        result_payload = {
+            "asset_ids": [asset.id for asset in created_assets if asset.asset_kind == "panel"],
+            "stitched_asset_id": stitched_asset.id if stitched_asset is not None else None,
+            "detail_generation_round": round_no,
+            "version_no": version_no,
+            "detail_render_ms": detail_render_ms,
+            "detail_planner_ms": effective_strategy_preview.get("detail_planner_ms"),
+            "detail_reviewer_ms": effective_strategy_preview.get("detail_reviewer_ms"),
+            "expected_panel_ids": expected_panel_ids,
+            "missing_panel_ids": missing_panel_ids,
+            "expected_panel_count": len(expected_panel_ids),
+        }
+        terminal_status = "partial_succeeded" if missing_panel_ids else "succeeded"
         update_job_status(
             db,
             job,
-            status="succeeded",
+            status=terminal_status,
             progress=100,
             stage="done",
-            result_payload={
-                "asset_ids": [asset.id for asset in created_assets if asset.asset_kind == "panel"],
-                "stitched_asset_id": stitched_asset.id,
-                "detail_generation_round": round_no,
-                "version_no": version_no,
-                "detail_render_ms": detail_render_ms,
-                "detail_planner_ms": effective_strategy_preview.get("detail_planner_ms"),
-                "detail_reviewer_ms": effective_strategy_preview.get("detail_reviewer_ms"),
-            },
+            result_payload=result_payload,
         )
-        append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+        if missing_panel_ids:
+            for missing in missing_panels:
+                append_job_event(
+                    db,
+                    job.id,
+                    "detail_panel_render_failed",
+                    {
+                        "event": "detail_panel_render_failed",
+                        "panel_id": missing.get("panel_id"),
+                        "slot_id": missing.get("slot_id"),
+                        "display_order": missing.get("display_order"),
+                        "error": missing.get("error_message"),
+                        "error_code": missing.get("error_code"),
+                        "upstream_http_status": missing.get("upstream_http_status"),
+                        "retry_count": missing.get("retry_count"),
+                        "failure_stage": missing.get("failure_stage"),
+                    },
+                )
+            append_job_event(
+                db,
+                job.id,
+                "job_partial_succeeded",
+                {
+                    "event": "job_partial_succeeded",
+                    "job_id": job.id,
+                    "missing_panel_ids": missing_panel_ids,
+                },
+            )
+        else:
+            append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
         if session.user_id:
             create_job_completion_notification(
                 db,
@@ -2144,7 +2266,7 @@ def _render_detail_panels_concurrently(
     loaded_style_images: list,
     product_grid,
     style_grid,
-) -> list[dict[str, object]]:
+) -> dict[str, Any]:
     if not plan:
         return []
 
@@ -2167,16 +2289,21 @@ def _render_detail_panels_concurrently(
     submit_bundle = _submit_render_specs(
         client=client,
         render_specs=render_specs,
-        max_workers=settings.generation_submit_concurrency,
-        batch_size=settings.image_submit_batch_size,
+        max_workers=settings.detail_generation_submit_concurrency,
+        batch_size=settings.detail_image_submit_batch_size,
         batch_interval_seconds=settings.image_submit_batch_interval_seconds,
     )
     submitted_specs = submit_bundle["submitted_specs"]
+    submit_failed_specs = list(submit_bundle.get("failed_specs") or [])
     poll_started = time.perf_counter()
-    results_by_submission = client.poll_image_tasks(
-        [spec["submission"] for spec in submitted_specs],
-        "upstream_image_error",
-        initial_delay_seconds=settings.image_poll_initial_delay_seconds,
+    results_by_submission = (
+        client.poll_image_tasks(
+            [spec["submission"] for spec in submitted_specs],
+            "upstream_image_error",
+            initial_delay_seconds=settings.image_poll_initial_delay_seconds,
+        )
+        if submitted_specs
+        else {}
     )
     poll_ms = int((time.perf_counter() - poll_started) * 1000)
     rendered_specs = _materialize_render_specs(
@@ -2195,15 +2322,9 @@ def _render_detail_panels_concurrently(
         results_by_submission=results_by_submission,
         max_workers=settings.detail_generation_concurrency,
     )
-    if rendered_specs["failed_specs"]:
-        first_failure = rendered_specs["failed_specs"][0]
-        raise AppError(
-            "upstream_image_error",
-            str(first_failure.get("error_message") or "detail panel download failed"),
-            int(first_failure.get("upstream_http_status") or 502),
-        )
     return {
         "rendered_panels": [_finalize_detail_rendered_panel(render_spec, strategy_preview) for render_spec in rendered_specs["rendered_specs"]],
+        "missing_panels": submit_failed_specs + rendered_specs["failed_specs"],
         "submit_batches": submit_bundle["submit_batches"],
         "submit_strategy_version": submit_bundle["submit_strategy_version"],
         "poll_initial_delay_ms": int(settings.image_poll_initial_delay_seconds * 1000),
@@ -2264,6 +2385,7 @@ def _finalize_detail_rendered_panel(
     plan_item = render_spec["plan_item"]
     prompt_payload = render_spec["prompt_payload"]
     confirmed_copy = render_spec.get("confirmed_copy") or {}
+    image_bytes = render_spec["image_bytes"]
     generation_snapshot = {
         "asset_family": "detail_page",
         "asset_kind": "panel",
@@ -2277,6 +2399,10 @@ def _finalize_detail_rendered_panel(
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
         "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
         "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
+        "truth_contract": prompt_payload.get("truth_contract") or {},
+        "risk_flags": prompt_payload.get("risk_flags") or [],
+        "fidelity_validation": None,
+        "selling_point_binding": prompt_payload.get("selling_point_binding") or {},
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
         "style_preset_id": confirmed_copy.get("style_preset_id"),
@@ -2310,7 +2436,7 @@ def _finalize_detail_rendered_panel(
         "display_order": render_spec["display_order"],
         "panel_type": prompt_payload.get("panel_type"),
         "rule_pack_id": strategy_preview.get("detail_rule_pack"),
-        "image_bytes": render_spec["image_bytes"],
+        "image_bytes": image_bytes,
         "prompt_payload": prompt_payload,
         "generation_snapshot": generation_snapshot,
     }
@@ -2328,6 +2454,7 @@ def _resolve_detail_reference_images(
     style_by_id = {image.image_id: image for image in loaded_style_images}
     selected: list = []
     seen: set[str] = set()
+    max_images = 3 if str(plan_item.get("panel_type") or "") in {"feature_exploded_view", "feature_process_material", "detail_closeup", "parameter_explainer"} else 2
 
     for image_id in [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)]:
         image = product_by_id.get(image_id)
@@ -2335,7 +2462,7 @@ def _resolve_detail_reference_images(
             continue
         selected.append(image)
         seen.add(image.image_id)
-        if len(selected) >= 2:
+        if len(selected) >= max_images:
             return selected
 
     for image_id in [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)]:
@@ -2344,14 +2471,14 @@ def _resolve_detail_reference_images(
             continue
         selected.append(image)
         seen.add(image.image_id)
-        if len(selected) >= 2:
+        if len(selected) >= max_images:
             return selected
 
     if not selected:
         selected.append(product_grid)
-    if style_grid is not None and len(selected) < 2:
+    if style_grid is not None and len(selected) < max_images:
         selected.append(style_grid)
-    return selected[:2]
+    return selected[:max_images]
 
 
 def _render_single_detail_panel(
@@ -2400,6 +2527,10 @@ def _render_single_detail_panel(
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
         "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
         "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
+        "truth_contract": prompt_payload.get("truth_contract") or {},
+        "risk_flags": prompt_payload.get("risk_flags") or [],
+        "fidelity_validation": None,
+        "selling_point_binding": prompt_payload.get("selling_point_binding") or {},
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
         "applied_preset_id": prompt_payload.get("applied_preset_id"),
         "style_preset_id": confirmed_copy.get("style_preset_id"),

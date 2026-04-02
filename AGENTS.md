@@ -380,3 +380,21 @@
   - `IMAGE_POLL_PROFILE` 默认节奏改为 `10s x 6 + 15s x 8 + 20s x 10`；`generation_submit_concurrency` 收口为单批内部并发上限
   - `generation_snapshot` 与 `job_progress` 新增 `submission_batch_no/submission_batch_size/submit_strategy_version/poll_started_after_ms` 等留痕，便于验收和排障确认后端已按新节奏执行
   - 同步更新 `.env.example`、`.env.prod.example`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md` 与提交节奏相关回归测试
+- 2026-04-02 Detail Partial Success:
+  - 详情页 submit 阶段从 fail-fast 改为“聚合成功 panel + 记录失败 panel”：单个 `/images/edits` 提交失败不再直接打崩整组 detail job
+  - `generate_detail_page/regenerate_detail_panel` 现在允许在仍有 ready panel 时写 `partial_succeeded`，并在 `job.result_payload` 与 `GET /api/v2/sessions/{session_id}/detail-pages/results` 回传 `expected_panel_ids/missing_panel_ids/expected_panel_count`
+  - 详情页新增事件 `detail_panel_render_failed`；partial 版本不再生成 stitched 长图，`stitched_asset` 显式允许为空
+  - 主图 submit 阶段失败也并入现有 `missing_slot_ids` 语义，不再因为单张 submit 失败跳过整版落库
+  - 新增 `DETAIL_GENERATION_SUBMIT_CONCURRENCY=4`、`DETAIL_IMAGE_SUBMIT_BATCH_SIZE=4`，后台 `/api/admin/v1/system/runtime` 同步暴露 detail 专属 submit 节奏
+  - 同步更新 `SmartPhoto_Backend_SPEC_v2 (1).md`、`docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`、OpenAPI 导出与详情页/主图回归测试
+- 2026-04-02 Quality Hardening:
+  - `analysis_snapshot` 新增 `selling_point_entities/risk_flags/evidence_scores`，`reference_summary` 扩展比例、面板、透明件、结构锚点与场景适配信息
+  - 主图 `strategy_preview.prompt_plan` 新增 `truth_contract/risk_flags/selling_point_binding`，结构敏感槽位会自动保真降级
+  - 主图与详情页 render prompt 统一补充“主体不可漂移 / 关键结构不可换位 / 比例按参考图 / 证据不足时保守降级”的保真约束
+  - `GET /api/v2/sessions/{session_id}/results` 与 `detail-pages/results` 的 `version_summaries` 扩展 `created_at/job_type/is_partial/cover_asset_id/cover_thumbnail_url/missing_*`
+  - 结果资产项扩展 `carry_forward/source_version_no/fidelity_validation_status`
+  - 后台 SQLite 新增 `quality_feedback_cases`，并开放 `POST|GET /api/admin/v1/assets/{asset_id}/quality-feedback` 作为轻量质量反馈闭环
+- 2026-04-02 Generation Hotpath Simplify:
+  - 主图与详情页生成链路移除下载后的逐张 `fidelity_validation` 与单槽位补救重生，job 在图片下载完成后直接进入收尾落库
+  - `truth_contract/risk_flags/selling_point_binding` 继续保留为 planner 与 render prompt 的前置约束，不再作为热路径复检触发器
+  - `assets.generation_snapshot.fidelity_validation` 与结果接口 `fidelity_validation_status` 保留兼容字段，当前默认返回 `null`

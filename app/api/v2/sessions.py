@@ -306,12 +306,26 @@ def _version_summaries(db: Session, session_id: str, *, asset_family: str) -> li
             )
             .all()
         )
+        ordered_assets = sorted(assets, key=lambda item: (item.display_order, item.created_at or item.updated_at))
         ready_count = len([asset for asset in assets if asset.status == "ready"])
+        cover_asset = next((asset for asset in ordered_assets if asset.asset_kind != "stitched"), ordered_assets[0] if ordered_assets else None)
+        job = db.query(JobModel).filter(JobModel.id == assets[0].job_id).one_or_none() if assets and assets[0].job_id else None
+        result_payload = dict(job.result_payload or {}) if job is not None and isinstance(job.result_payload, dict) else {}
         summaries.append(
             {
                 "version_no": version_no,
                 "asset_count": len(assets),
                 "ready_count": ready_count,
+                "created_at": max(
+                    [asset.created_at.isoformat() for asset in assets if asset.created_at],
+                    default=None,
+                ),
+                "job_type": job.job_type if job is not None else None,
+                "is_partial": str(job.status or "") == "partial_succeeded" if job is not None else False,
+                "cover_asset_id": cover_asset.id if cover_asset is not None else None,
+                "cover_thumbnail_url": _signed_url(cover_asset.thumbnail_url) if cover_asset is not None and cover_asset.thumbnail_url else None,
+                "missing_slot_ids": [str(item).strip() for item in result_payload.get("missing_slot_ids", []) if str(item).strip()],
+                "missing_panel_ids": [str(item).strip() for item in result_payload.get("missing_panel_ids", []) if str(item).strip()],
             }
         )
     return summaries
@@ -347,6 +361,38 @@ def _main_gallery_version_expectation(
     ]
     expected_count = int(result_payload.get("expected_count") or len(expected_slot_ids))
     return expected_slot_ids, missing_slot_ids, expected_count
+
+
+def _detail_page_version_expectation(
+    db: Session,
+    assets: list[AssetModel],
+) -> tuple[list[str], list[str], int]:
+    if not assets:
+        return [], [], 0
+    job_id = str(assets[0].job_id or "").strip()
+    result_payload: dict[str, Any] = {}
+    if job_id:
+        job = db.query(JobModel).filter(JobModel.id == job_id).one_or_none()
+        if job is not None and isinstance(job.result_payload, dict):
+            result_payload = dict(job.result_payload)
+    expected_panel_ids = [
+        str(item).strip()
+        for item in result_payload.get("expected_panel_ids", [])
+        if str(item).strip()
+    ]
+    if not expected_panel_ids:
+        expected_panel_ids = [
+            str(asset.slot_id or asset.asset_role or "").strip()
+            for asset in sorted(assets, key=lambda item: item.display_order)
+            if asset.asset_kind == "panel" and str(asset.slot_id or asset.asset_role or "").strip()
+        ]
+    missing_panel_ids = [
+        str(item).strip()
+        for item in result_payload.get("missing_panel_ids", [])
+        if str(item).strip()
+    ]
+    expected_panel_count = int(result_payload.get("expected_panel_count") or len(expected_panel_ids))
+    return expected_panel_ids, missing_panel_ids, expected_panel_count
 
 
 def _serialized_session_overrides(db: Session, session_id: str, *, asset_family: str = "main_gallery", user_id: str | None = None) -> list[dict]:
@@ -2058,6 +2104,9 @@ def get_results(
                     "width": asset.width,
                     "height": asset.height,
                     "version_no": asset.version_no,
+                    "carry_forward": bool((asset.generation_snapshot or {}).get("carry_forward")),
+                    "source_version_no": (asset.generation_snapshot or {}).get("source_version_no"),
+                    "fidelity_validation_status": ((asset.generation_snapshot or {}).get("fidelity_validation") or {}).get("status"),
                 }
                 for asset in assets
             ],
@@ -2091,6 +2140,7 @@ def get_detail_page_results(
     }
     panels = [asset for asset in assets if asset.asset_kind == "panel"]
     stitched_asset = next((asset for asset in assets if asset.asset_kind == "stitched"), None)
+    expected_panel_ids, missing_panel_ids, expected_panel_count = _detail_page_version_expectation(db, assets)
 
     return success_response(
         {
@@ -2108,7 +2158,10 @@ def get_detail_page_results(
                 "total_count": len(assets),
                 "ready_count": len(assets),
                 "panel_count": len(panels),
+                "expected_panel_count": expected_panel_count,
             },
+            "expected_panel_ids": expected_panel_ids,
+            "missing_panel_ids": missing_panel_ids,
             "panels": [
                 {
                     "asset_id": asset.id,
@@ -2133,6 +2186,9 @@ def get_detail_page_results(
                     "width": asset.width,
                     "height": asset.height,
                     "version_no": asset.version_no,
+                    "carry_forward": bool((asset.generation_snapshot or {}).get("carry_forward")),
+                    "source_version_no": (asset.generation_snapshot or {}).get("source_version_no"),
+                    "fidelity_validation_status": ((asset.generation_snapshot or {}).get("fidelity_validation") or {}).get("status"),
                 }
                 for asset in panels
             ],

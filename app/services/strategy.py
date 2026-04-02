@@ -21,6 +21,7 @@ from app.services.main_gallery_rules import (
 )
 from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
 from app.services.prompt_specs import get_prompt_role_spec
+from app.services.quality_signals import build_truth_contract
 from app.services.reference_images import (
     LoadedReferenceImage,
     build_reference_manifest,
@@ -140,6 +141,7 @@ def build_strategy_preview(
         asset_plan=asset_plan,
         reference_manifest=reference_manifest,
         analysis_snapshot=analysis_snapshot or {},
+        parameter_snapshot=parameter_snapshot or {},
         planner_instruction=planner_instruction,
         platform_overlay=overlay,
         llm_plan=llm_slot_plan,
@@ -152,6 +154,7 @@ def build_strategy_preview(
     )
     if copy_design_plan:
         asset_plan, prompt_plan = _apply_main_copy_design(asset_plan, prompt_plan, copy_design_plan)
+    asset_plan = _sync_asset_plan_quality_metadata(asset_plan, prompt_plan)
 
     return {
         "product_name": normalized_copy.get("product_name", ""),
@@ -250,6 +253,7 @@ def normalize_strategy_preview(
         confirmed_copy=confirmed_copy,
         reference_manifest=normalized["reference_manifest"],
         analysis_snapshot=strategy_preview.get("analysis_snapshot") or {},
+        parameter_snapshot=parameter_snapshot or {},
         active_platform_id=active_platform_id,
         planner_instruction=strategy_preview.get("planner_instruction"),
         platform_overlay=normalized.get("platform_overlay") or get_platform_overlay(active_platform_id),
@@ -333,6 +337,8 @@ def _build_asset_plan(
                 "applied_preset_id": override.get("applied_preset_id"),
                 "applied_preset": preset or None,
                 "locked": bool(chosen.get("locked")),
+                "reference_image_limit": _reference_image_limit_for_plan(slot, analysis_snapshot, []),
+                "risk_flags": [str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()],
             }
         )
     return sorted(plan, key=lambda item: int(item.get("display_order") or 0))
@@ -346,6 +352,7 @@ def _build_prompt_plan(
     asset_plan: list[dict[str, Any]],
     reference_manifest: list[dict[str, Any]],
     analysis_snapshot: dict[str, Any],
+    parameter_snapshot: dict[str, Any],
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
     llm_plan: dict[str, dict[str, Any]] | None = None,
@@ -357,6 +364,7 @@ def _build_prompt_plan(
             plan_item=plan_item,
             reference_manifest=reference_manifest,
             analysis_snapshot=analysis_snapshot,
+            parameter_snapshot=parameter_snapshot,
             planner_instruction=planner_instruction,
             platform_overlay=platform_overlay,
         )
@@ -393,6 +401,7 @@ def _plan_main_gallery(
         asset_plan=asset_plan,
         reference_images=loaded_reference_images,
         supplemental_reference_images=loaded_strategy_reference_images,
+        analysis_snapshot=analysis_snapshot or {},
         reference_summary=_safe_analysis_section(analysis_snapshot, "reference_summary"),
         planner_instruction=planner_instruction,
     )
@@ -504,14 +513,22 @@ def _build_default_prompt_plan_item(
     plan_item: dict[str, Any],
     reference_manifest: list[dict[str, Any]],
     analysis_snapshot: dict[str, Any],
+    parameter_snapshot: dict[str, Any],
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
 ) -> dict[str, Any]:
     role_hint = str(plan_item.get("reference_role_hint") or plan_item["role"])
-    reference_images = reference_images_used_for_role(reference_manifest, role_hint)
+    reference_images = reference_images_used_for_role(
+        reference_manifest,
+        role_hint,
+        max_images=_reference_image_limit_for_plan(plan_item, analysis_snapshot, reference_manifest),
+    )
     reference_image_ids = [item["image_id"] for item in reference_images]
     reference_slots = [item["slot_type"] for item in reference_images]
     reference_summary = _safe_analysis_section(analysis_snapshot, "reference_summary")
+    risk_flags = [str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()]
+    selling_point_entities = [str(item).strip() for item in (analysis_snapshot or {}).get("selling_point_entities", []) if str(item).strip()]
+    feature_highlights = [str(item).strip() for item in (parameter_snapshot or {}).get("feature_highlights", []) if str(item).strip()]
 
     slot_id = str(plan_item["slot_id"])
     product_name = confirmed_copy.get("product_name") or "商品"
@@ -535,6 +552,19 @@ def _build_default_prompt_plan_item(
     )
     rule_modules_used = [str(item) for item in plan_item.get("rule_modules_used", []) if str(item).strip()]
     global_consistency_note = repair_broken_text(plan_item.get("global_consistency_note")) or _fallback_text(reference_summary.get("must_keep"), "")
+    truth_contract = build_truth_contract(
+        slot_id=slot_id,
+        analysis_snapshot=analysis_snapshot,
+        copy_focus=plan_item.get("copy_focus"),
+        focus_selling_point=plan_item.get("focus_selling_point"),
+        product_name=product_name,
+    )
+    selling_point_binding = _selling_point_binding(
+        copy_blocks=copy_blocks,
+        analysis_snapshot=analysis_snapshot,
+        feature_highlights=feature_highlights,
+        focus_selling_point=plan_item.get("focus_selling_point"),
+    )
     slot_guardrails_map = {
         "primary_kv": [
             "主体占画面约 45%-60%，必须预留主标题区",
@@ -653,6 +683,7 @@ def _build_default_prompt_plan_item(
         resolved_constraints.append(f"全局一致性锚点：{global_consistency_note}")
     if slot_id in {"detail", "proof_authority"}:
         resolved_constraints.append("局部图只能放大解释上传参考图里可验证的结构，不可杜撰不属于真实商品的内部细节。")
+    resolved_constraints.extend(_truth_contract_constraints(slot_id, truth_contract))
 
     return {
         "slot_id": slot_id,
@@ -678,6 +709,9 @@ def _build_default_prompt_plan_item(
         "platform_rule_pack": plan_item.get("platform_rule_pack"),
         "reference_image_ids": reference_image_ids,
         "reference_slots": reference_slots,
+        "reference_image_limit": int(plan_item.get("reference_image_limit") or len(reference_image_ids) or 2),
+        "risk_flags": risk_flags,
+        "selling_point_binding": selling_point_binding,
         "must_keep": must_keep,
         "must_avoid": must_avoid,
         "slot_guardrails": slot_guardrails,
@@ -691,6 +725,7 @@ def _build_default_prompt_plan_item(
         "white_bg_mode": bool(plan_item.get("requires_white_bg_validation")),
         "rule_modules_used": rule_modules_used,
         "global_consistency_note": global_consistency_note,
+        "truth_contract": truth_contract,
         "resolved_constraints": resolved_constraints,
         "text_policy": plan_item.get("text_policy"),
     }
@@ -811,6 +846,7 @@ def _normalize_prompt_plan(
     confirmed_copy: dict[str, Any],
     reference_manifest: list[dict[str, Any]],
     analysis_snapshot: dict[str, Any],
+    parameter_snapshot: dict[str, Any],
     active_platform_id: str,
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
@@ -824,6 +860,7 @@ def _normalize_prompt_plan(
             plan_item=plan_item,
             reference_manifest=reference_manifest,
             analysis_snapshot=analysis_snapshot,
+            parameter_snapshot=parameter_snapshot,
             planner_instruction=planner_instruction,
             platform_overlay=platform_overlay,
         )
@@ -851,11 +888,15 @@ def _normalize_prompt_plan(
                 "display_order": int(item.get("display_order") or base["display_order"]),
                 "reference_image_ids": [str(v) for v in item.get("reference_image_ids", base["reference_image_ids"])],
                 "reference_slots": _normalize_phrase_list(item.get("reference_slots", base["reference_slots"])),
+                "reference_image_limit": int(item.get("reference_image_limit") or base.get("reference_image_limit") or 2),
                 "must_keep": _normalize_text_list(item.get("must_keep", base["must_keep"])),
                 "must_avoid": _normalize_text_list(item.get("must_avoid", base["must_avoid"])),
                 "slot_guardrails": _normalize_text_list(item.get("slot_guardrails", base.get("slot_guardrails", []))),
                 "rule_modules_used": [str(v) for v in item.get("rule_modules_used", base["rule_modules_used"])],
                 "global_consistency_note": repair_broken_text(item.get("global_consistency_note", base.get("global_consistency_note"))),
+                "risk_flags": _normalize_text_list(item.get("risk_flags", base.get("risk_flags", []))),
+                "selling_point_binding": item.get("selling_point_binding", base.get("selling_point_binding", {})),
+                "truth_contract": item.get("truth_contract", base.get("truth_contract", {})),
                 "resolved_constraints": _normalize_text_list(item.get("resolved_constraints", base["resolved_constraints"])),
                 "background_rule": repair_broken_text(item.get("background_rule", base["background_rule"])),
                 "composition_rule": repair_broken_text(item.get("composition_rule", base["composition_rule"])),
@@ -887,8 +928,87 @@ def find_prompt_plan_item(strategy_preview: dict[str, Any], asset_role: str) -> 
 def select_loaded_reference_images_for_role(
     loaded_reference_images: list[LoadedReferenceImage],
     role: str,
+    *,
+    max_images: int = 2,
 ) -> list[LoadedReferenceImage]:
-    return [item for item in select_reference_images_for_role(loaded_reference_images, role) if isinstance(item, LoadedReferenceImage)]
+    return [item for item in select_reference_images_for_role(loaded_reference_images, role, max_images=max_images) if isinstance(item, LoadedReferenceImage)]
+
+
+def _reference_image_limit_for_plan(
+    plan_item: dict[str, Any],
+    analysis_snapshot: dict[str, Any],
+    reference_manifest: list[dict[str, Any]],
+) -> int:
+    slot_id = str(plan_item.get("slot_id") or plan_item.get("role") or "").strip()
+    if slot_id not in {"detail", "proof_authority"}:
+        return 2
+    slot_types = {str(item.get("slot_type") or "").strip() for item in reference_manifest if isinstance(item, dict)}
+    risk_flags = {str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()}
+    if "side" in slot_types or ("extra" in slot_types and risk_flags & {"transparent_or_internal_structure", "control_panel_sensitive"}):
+        return 3
+    return 2
+
+
+def _selling_point_binding(
+    *,
+    copy_blocks: dict[str, Any],
+    analysis_snapshot: dict[str, Any],
+    feature_highlights: list[str],
+    focus_selling_point: Any,
+) -> dict[str, Any]:
+    entities = [str(item).strip() for item in (analysis_snapshot or {}).get("selling_point_entities", []) if str(item).strip()]
+    bound_focus = [
+        repair_broken_text(copy_blocks.get("headline")),
+        repair_broken_text(copy_blocks.get("supporting")),
+        repair_broken_text(focus_selling_point),
+        *[repair_broken_text(item) for item in (copy_blocks.get("proof_lines") or [])],
+        *[repair_broken_text(item) for item in (copy_blocks.get("matrix_lines") or [])],
+        *[repair_broken_text(item) for item in feature_highlights],
+    ]
+    return {
+        "entities": [item for item in entities[:4] if item],
+        "focus_texts": [item for item in bound_focus[:5] if item],
+    }
+
+
+def _truth_contract_constraints(slot_id: str, truth_contract: dict[str, Any]) -> list[str]:
+    if not isinstance(truth_contract, dict):
+        return []
+    constraints: list[str] = []
+    immutable = [repair_broken_text(item) for item in truth_contract.get("immutable_features", []) if repair_broken_text(item)]
+    forbidden = [repair_broken_text(item) for item in truth_contract.get("forbidden_drift", []) if repair_broken_text(item)]
+    entities = [repair_broken_text(item) for item in truth_contract.get("required_entities", []) if repair_broken_text(item)]
+    if immutable:
+        constraints.append("主体不可漂移：" + "；".join(immutable[:3]))
+    if forbidden:
+        constraints.append("关键结构不可换位：" + "；".join(forbidden[:3]))
+    if truth_contract.get("scale_anchor"):
+        constraints.append("比例与厚薄关系按参考图：" + repair_broken_text(truth_contract.get("scale_anchor")))
+    if not truth_contract.get("allow_structure_extrapolation", True):
+        constraints.append("证据不足时宁可保守，不补虚构结构。")
+    if slot_id in {"scene", "benefit_scene_or_compare"} and truth_contract.get("scene_grounding_rule"):
+        constraints.append(repair_broken_text(truth_contract.get("scene_grounding_rule")))
+    if entities:
+        constraints.append("若表达卖点，必须出现这些真实视觉证据：" + "、".join(entities[:3]))
+    return [item for item in constraints if item]
+
+
+def _sync_asset_plan_quality_metadata(asset_plan: list[dict[str, Any]], prompt_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prompt_by_slot = {str(item.get("slot_id") or item.get("role") or ""): item for item in prompt_plan if isinstance(item, dict)}
+    synced: list[dict[str, Any]] = []
+    for item in asset_plan:
+        slot_id = str(item.get("slot_id") or item.get("role") or "")
+        prompt_item = prompt_by_slot.get(slot_id, {})
+        synced.append(
+            {
+                **item,
+                "risk_flags": prompt_item.get("risk_flags", item.get("risk_flags", [])),
+                "truth_contract": prompt_item.get("truth_contract", item.get("truth_contract", {})),
+                "selling_point_binding": prompt_item.get("selling_point_binding", item.get("selling_point_binding", {})),
+                "reference_image_limit": int(prompt_item.get("reference_image_limit") or item.get("reference_image_limit") or 2),
+            }
+        )
+    return synced
 
 
 def _split_points(value: Any) -> list[str]:

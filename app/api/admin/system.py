@@ -45,8 +45,11 @@ def get_runtime(_admin_user=Depends(get_current_admin_user)) -> dict:
                 "main_generation_concurrency": settings.main_generation_concurrency,
                 "detail_generation_concurrency": settings.detail_generation_concurrency,
                 "generation_submit_concurrency": settings.generation_submit_concurrency,
+                "detail_generation_submit_concurrency": settings.detail_generation_submit_concurrency,
+                "image_submit_batch_size": settings.image_submit_batch_size,
+                "detail_image_submit_batch_size": settings.detail_image_submit_batch_size,
+                "image_submit_batch_interval_seconds": settings.image_submit_batch_interval_seconds,
                 "image_task_timeout_seconds": settings.image_task_timeout_seconds,
             },
         }
     )
-

@@ -186,3 +186,34 @@ def test_admin_category_catalog_crud_and_audit(client):
     assert "补充关键词" in notes
     assert "暂时下线测试品类" in notes
     assert "恢复测试品类" in notes
+
+
+def test_admin_asset_quality_feedback_roundtrip(client):
+    session_id = create_ready_session(client)
+    client.post(f"/api/v2/sessions/{session_id}/generations", json={"instruction": None})
+    asset_id = client.get(f"/api/v2/sessions/{session_id}/results").json()["data"]["assets"][0]["asset_id"]
+    admin_headers = admin_headers_for(client)
+
+    created = client.post(
+        f"/api/admin/v1/assets/{asset_id}/quality-feedback",
+        json={
+            "issue_codes": ["control_panel_misplaced", "scene_grounding_failed"],
+            "severity": "high",
+            "operator_note": "复盘上线首批反馈案例",
+            "resolution_status": "triaged",
+        },
+        headers=admin_headers,
+    )
+    assert created.status_code == 200, created.text
+    created_items = created.json()["data"]["items"]
+    assert created_items[0]["issue_codes"] == ["control_panel_misplaced", "scene_grounding_failed"]
+    assert created_items[0]["severity"] == "high"
+    assert created_items[0]["resolution_status"] == "triaged"
+
+    listed = client.get(f"/api/admin/v1/assets/{asset_id}/quality-feedback", headers=admin_headers)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["data"]["items"][0]["operator_note"] == "复盘上线首批反馈案例"
+
+    audit = client.get("/api/admin/v1/audit-logs?module=assets", headers=admin_headers)
+    assert audit.status_code == 200, audit.text
+    assert any(item["action"] == "asset.quality_feedback.create" for item in audit.json()["data"]["items"])

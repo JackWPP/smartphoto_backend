@@ -78,6 +78,9 @@
     - `analysis_source`
     - `category_candidates[{category,confidence,reason}]`
     - `scene_tags`
+    - `selling_point_entities`
+    - `risk_flags`
+    - `evidence_scores[{structure,proportion,scene,text}]`
     - `detected_view_slots`
     - `supplement_image_recommendations[{slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption,image_kind?}]`
     - `reanalysis_required`
@@ -158,6 +161,9 @@
   - `prompt_plan` / `asset_plan` 现在还会带 `global_consistency_note`：
     - 用于约束局部图和结构图必须与参考图整体结构一致
     - 如果没有内部结构证据，就不能直接生成强结构剖面图
+  - `prompt_plan` 现在还会带 `truth_contract/risk_flags/selling_point_binding`：
+    - `truth_contract` 把“主体不可漂移 / 关键结构不可换位 / 比例按参考图 / 证据不足时保守降级”固化到 render prompt
+    - `selling_point_binding` 用于把宠物、透明水箱、控制面板、滤芯、尺寸等实体卖点绑定成必须出现的真实视觉证据
   - 详情页 prompt 组装新增“内部规划语义 vs 可见文案”边界：
     - `panel_goal/copy_focus/planner_prompt_base/visual_truth_mode/origin_note` 只作为内部 planning context
     - 最终上图文案会过滤 `Proof/panel_goal/copy_focus/设计证明/【...】` 等规划标签，避免泄露到成图
@@ -166,7 +172,9 @@
 - 输入：copy、strategy、slot/role、可选 instruction、参考图
 - 输出：单图结构化 prompt 预览与图片字节
 - 状态变更：job `running`，逐图产出 `asset_ready`
-- 失败处理：上游失败 `50202`，任务写 `job_failed`
+- 失败处理：
+  - 若整组没有任何 ready 资产，上游失败 `50202`，任务写 `job_failed`
+  - 若主图仍有 ready 槽位，或详情页仍有 ready panel，任务允许写成 `partial_succeeded`
 - 限流补充：
   - 若上游返回 `429 Too Many Requests`，当前会直接写成 `rate_limited (42901)`
   - `jobs.result_payload` 会补 `upstream_http_status=429` 与 `upstream_reason=rate_limited`
@@ -184,6 +192,7 @@
   - `/images/edits` 若在提交阶段出现传输层断连或读超时，会先做请求级重试；重试带轻量 jitter，若仍失败，只对当前单张图做内部重试
   - 图片下载遇到传输层异常时，会做请求级重试
   - 生图链路默认不再因为 `upstream_image_error` 进入 Celery 整任务重试，避免重复消费上游额度
+  - `/images/edits` 若返回 opaque `400`（例如上游误报 `API Key not found`），当前不自动重提该张图，优先收敛已成功提交的结果并暴露缺失槽位/panel，避免重复计费
 - 参考图选择规则：
   - 参考图优先级：`front > angle45 > side > extra`
   - `hero` / `white_bg` / `selling_point` / `scene`：优先 `front + angle45`
@@ -193,6 +202,9 @@
   - 主图默认并发 `main_generation_concurrency=4`
   - 详情页默认并发 `detail_generation_concurrency=6`
   - 上游任务提交默认单批内部并发上限 `generation_submit_concurrency=6`
+  - 详情页提交节奏单独收口为：
+    - `detail_generation_submit_concurrency=4`
+    - `detail_image_submit_batch_size=4`
   - 但真正对上游的发包节奏优先由 `image_submit_batch_size/image_submit_batch_interval_seconds` 控制
   - 即使内部并发执行，Asset 最终持久化顺序仍按 `display_order`
 - Prompt 结构：
@@ -248,6 +260,16 @@
   - 白底校验不再依赖 `role == white_bg`，而依赖 `requires_white_bg_validation=true`
   - 若校验失败，只对当前槽位内部追加更强白底约束再尝试 1 次
   - 若二次仍失败，当前只做 `soft_failed` 标记，不整组打挂
+- 保真约束当前策略：
+  - `truth_contract/risk_flags/selling_point_binding` 只用于 planner 和 render prompt 的前置约束，不再在图片下载后追加逐张 `fidelity_validation`
+  - 当前优先通过一次成功的 harness、参考图选择和 prompt 约束提高命中率，而不是用生成后 LLM 复检拖慢整组完成时间
+    - `control_panel_misplaced`
+    - `scene_grounding_failed`
+    - `selling_point_not_rendered`
+    - `text_mismatch`
+    - `insufficient_reference_evidence`
+  - 若首次验收失败，只对当前单槽位/单 panel 追加更强保真约束并补救 1 次
+  - 二次仍失败时写 `retry_applied/soft_failed/issues[]`，结果保留但可复盘
 
 ### 3.5.1 Detail Page Planner + Detail Prompt Composer
 - 输入：copy、商品图、可选风格图、可选 `planner_instruction`、可选本轮 `instruction`
@@ -297,13 +319,19 @@
   - 详情页执行阶段优先消费 panel 级参考图，grid 只作为 fallback/辅助参考，不再让所有 panel 共用同一组主参考输入
 - Job / 事件语义：
   - `job_type = generate_detail_page`
-  - 通用事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_succeeded|job_failed`
+  - 通用事件流仍为 `job_queued/job_started/job_progress/asset_ready/job_partial_succeeded|job_succeeded|job_failed`
   - 当前会额外写入详情页专属阶段事件：
     - `detail_strategy_ready`
     - `detail_panel_render_started`
     - `detail_panel_render_succeeded`
+    - `detail_panel_render_failed`
     - `detail_stitched_ready`
-  - `asset_ready` 会产出 9 次：8 次 panel + 1 次 stitched
+  - 完整成功时 `asset_ready` 会产出 9 次：8 次 panel + 1 次 stitched
+  - 详情页若缺 panel 但仍有 ready panel：
+    - job 终态写 `partial_succeeded`
+    - `result_payload` 写入 `expected_panel_ids/missing_panel_ids/expected_panel_count`
+    - `GET /sessions/{id}/detail-pages/results` 也会回传同名字段
+    - `stitched_asset` 不生成，避免把不完整详情页伪装成完整长图
 
 ### 3.6 Storage/Versioning Agent
 - 输入：图片字节、session_id、round/version、role/order

@@ -127,6 +127,9 @@ def compose_prompt(
         "expression_label": str(prompt_plan.get("expression_label") or plan.get("expression_label") or ""),
         "rule_modules_used": [str(item) for item in prompt_plan.get("rule_modules_used", []) if str(item).strip()],
         "platform_overlay": prompt_plan.get("platform_overlay"),
+        "risk_flags": [str(item) for item in prompt_plan.get("risk_flags", []) if str(item).strip()],
+        "selling_point_binding": prompt_plan.get("selling_point_binding") or {},
+        "truth_contract": prompt_plan.get("truth_contract") or {},
         "resolved_constraints": _normalized_text_entries(prompt_plan.get("resolved_constraints")),
         "copy_safety_notes": copy_safety_notes,
         "sanitized_fields": sanitized_fields,
@@ -272,8 +275,13 @@ def _compose_subject_block(
         base += " 优先围绕面板、参数、结构或证据性细节来组织主体。"
     if must_keep:
         consistency = _clean_text(prompt_plan.get("global_consistency_note"))
+        scale_anchor = _clean_text((prompt_plan.get("truth_contract") or {}).get("scale_anchor"))
+        if consistency and scale_anchor:
+            return f"{base} 必须保留：{must_keep}。全局一致性锚点：{consistency}。比例锚点：{scale_anchor}"
         if consistency:
             return f"{base} 必须保留：{must_keep}。全局一致性锚点：{consistency}"
+        if scale_anchor:
+            return f"{base} 必须保留：{must_keep}。比例锚点：{scale_anchor}"
         return f"{base} 必须保留：{must_keep}"
     return base
 
@@ -347,16 +355,23 @@ def _compose_style_block(style: str, plan: dict[str, Any], prompt_plan: dict[str
 def _compose_selling_points_block(slot_id: str, prompt_plan: dict[str, Any], copy_blocks: dict[str, Any], text_policy: str) -> str:
     must_keep = _normalized_text_entries(prompt_plan.get("must_keep"))
     copy_text = _copy_blocks_to_text(copy_blocks)
+    selling_point_binding = prompt_plan.get("selling_point_binding") if isinstance(prompt_plan.get("selling_point_binding"), dict) else {}
+    required_entities = [str(item).strip() for item in selling_point_binding.get("entities", []) if str(item).strip()]
     copy_policy = _copy_policy_summary(_copy_policy_for_slot(slot_id, text_policy))
     if text_policy != "no_text" and copy_text:
+        if required_entities:
+            return f"画面重点表达：{copy_text}。必须出现这些真实视觉证据：{'、'.join(required_entities[:3])}。图上文案策略：{copy_policy}。"
         return f"画面重点表达：{copy_text}。图上文案策略：{copy_policy}。"
     if must_keep:
+        if required_entities:
+            return "画面重点表达：" + "；".join(must_keep[:3]) + f"。同时必须出现这些真实视觉证据：{'、'.join(required_entities[:3])}。"
         return "画面重点表达：" + "；".join(must_keep[:3]) + "。"
     return "通过画面突出商品核心优势。"
 
 
 def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[str, Any], text_policy: str) -> str:
     role_constraints = list(BASE_CONSTRAINTS)
+    truth_contract = prompt_plan.get("truth_contract") if isinstance(prompt_plan.get("truth_contract"), dict) else {}
     if requires_simplified_chinese_visible_copy((prompt_plan.get("platform_overlay") or {}).get("overlay_id")):
         role_constraints.extend(simplified_chinese_visible_copy_constraints())
     resolved_constraints = _normalized_text_entries(prompt_plan.get("resolved_constraints"))
@@ -391,6 +406,7 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
         role_constraints.append("不要使用远景，不要让场景信息抢占主体")
     elif asset_role in {"scene", "benefit_scene_or_compare"}:
         role_constraints.append("不要让背景过度复杂，商品主体必须清晰")
+        role_constraints.append("产品必须与台面、地面、手部或真实承载物形成自然接触，保留接触阴影和合理透视")
     else:
         role_constraints.append("不要过度特效化，不要做夸张广告海报")
     if slot_id == "proof_authority":
@@ -399,6 +415,13 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
         role_constraints.append("不能做平铺直叙的白底陈列图，必须有明显视觉强化区")
     role_constraints.extend(_normalized_text_entries(prompt_plan.get("slot_guardrails")))
     role_constraints.extend(_normalized_text_entries(prompt_plan.get("must_avoid")))
+    role_constraints.extend(_normalized_text_entries(truth_contract.get("forbidden_drift")))
+    if _clean_text(truth_contract.get("scale_anchor")):
+        role_constraints.append("比例与厚薄关系按参考图：" + _clean_text(truth_contract.get("scale_anchor")))
+    if truth_contract and not truth_contract.get("allow_structure_extrapolation", True):
+        role_constraints.append("证据不足时宁可保守，不补虚构结构")
+    if asset_role in {"scene", "benefit_scene_or_compare"} and _clean_text(truth_contract.get("scene_grounding_rule")):
+        role_constraints.append(_clean_text(truth_contract.get("scene_grounding_rule")))
     role_constraints.extend(trailing_resolved_constraints)
     return "；".join(_unique_texts(role_constraints)[:14])
 

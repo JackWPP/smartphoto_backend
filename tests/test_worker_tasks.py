@@ -620,6 +620,35 @@ def test_submit_render_specs_batches_requests_with_interval(monkeypatch):
     assert bundle["submit_strategy_version"] == "batched_submit_v1"
 
 
+def test_submit_render_specs_collects_submit_failures_without_aborting_batch(monkeypatch):
+    def fake_submit_single_render_spec(*, client, render_spec):
+        if render_spec["submission_id"] == "spec-3":
+            raise AppError("upstream_image_error", "submit failed", 502)
+        return {
+            **render_spec,
+            "submission": {"submission_id": render_spec["submission_id"], "task_id": f"task:{render_spec['submission_id']}"},
+            "timing": {"submit_ms": 1},
+        }
+
+    monkeypatch.setattr("app.services.pipeline._submit_single_render_spec", fake_submit_single_render_spec)
+
+    bundle = _submit_render_specs(
+        client=object(),
+        render_specs=[
+            {"submission_id": f"spec-{idx}", "slot_id": f"slot-{idx}", "display_order": idx}
+            for idx in range(1, 6)
+        ],
+        max_workers=5,
+        batch_size=5,
+        batch_interval_seconds=0,
+    )
+
+    assert len(bundle["submitted_specs"]) == 4
+    assert len(bundle["failed_specs"]) == 1
+    assert bundle["failed_specs"][0]["slot_id"] == "slot-3"
+    assert bundle["failed_specs"][0]["failure_stage"] == "submit"
+
+
 def test_render_assets_concurrently_marks_missing_slot_after_failed_rescue(monkeypatch):
     monkeypatch.setattr(
         "app.services.pipeline.compose_prompt",
@@ -690,6 +719,78 @@ def test_render_assets_concurrently_marks_missing_slot_after_failed_rescue(monke
     assert rendered["expected_slot_ids"] == ["hero", "scene"]
     assert rendered["missing_slots"][0]["slot_id"] == "scene"
     assert rendered["missing_slots"][0]["retry_count"] == 1
+
+
+def test_render_assets_concurrently_marks_missing_slot_when_submit_fails(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_prompt",
+        lambda **kwargs: {
+            "final_prompt": f"prompt-{kwargs['plan_item']['slot_id']}",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+            "copy_blocks": {},
+            "expression_mode": kwargs["plan_item"].get("expression_mode"),
+            "rule_modules_used": ["rule.module"],
+            "resolved_constraints": ["keep clean"],
+        },
+    )
+
+    class DummyClient:
+        def __init__(self):
+            self.settings = SimpleNamespace(whatai_api_key="test-key")
+
+        def submit_image_request(self, **kwargs):
+            if "prompt-scene" in kwargs["prompt"]:
+                raise AppError("upstream_image_error", "submit failed", 502)
+            submission_id = "main:hero:1"
+            return {
+                "submission_id": submission_id,
+                "task_id": None,
+                "upstream_endpoint": "/v1/images/edits",
+                "result": {"fake_bytes": b"fake-image"},
+            }
+
+        def poll_image_tasks(self, submissions, *_args, **_kwargs):
+            return {
+                submission["submission_id"]: dict(submission["result"])
+                for submission in submissions
+            }
+
+        def download_image_bytes(self, submission, *_args, **_kwargs):
+            return submission["result"]["fake_bytes"]
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    rendered = _render_assets_concurrently(
+        confirmed_copy={"product_name": "空气净化器"},
+        strategy_preview={"planner_instruction": "更干净"},
+        plan=[
+            {
+                "role": "hero",
+                "slot_id": "hero",
+                "display_order": 1,
+                "aspect_ratio": "1:1",
+                "platform_rule_pack": "default_main_gallery_v2",
+                "expression_mode": "clean_packshot",
+                "requires_white_bg_validation": False,
+            },
+            {
+                "role": "scene",
+                "slot_id": "scene",
+                "display_order": 2,
+                "aspect_ratio": "1:1",
+                "platform_rule_pack": "default_main_gallery_v2",
+                "expression_mode": "scene_story",
+                "requires_white_bg_validation": False,
+            },
+        ],
+        instruction="构图更稳",
+        loaded_reference_images=[],
+    )
+
+    assert [item["slot_id"] for item in rendered["rendered_assets"]] == ["hero"]
+    assert rendered["missing_slots"][0]["slot_id"] == "scene"
+    assert rendered["missing_slots"][0]["failure_stage"] == "submit"
 
 
 def test_render_assets_concurrently_rescues_failed_slot_once(monkeypatch):
@@ -993,3 +1094,66 @@ def test_render_single_asset_language_validator_errors_no_longer_affect_hot_path
 
     assert generate_calls["count"] == 1
     assert rendered["generation_snapshot"]["language_validation"] is None
+
+
+def test_render_single_asset_does_not_run_fidelity_validation_retry(monkeypatch):
+    generate_calls = {"count": 0}
+    fidelity_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        "app.services.pipeline.compose_prompt",
+        lambda **kwargs: {
+            "final_prompt": f"prompt-{kwargs['instruction'] or 'base'}",
+            "blocks": {"goal": "goal"},
+            "planner_source": "rule_based",
+            "copy_blocks": {"headline": "透明水箱更直观"},
+            "expression_mode": "macro_texture_closeup",
+            "rule_modules_used": ["rule.module"],
+            "resolved_constraints": ["保持结构一致"],
+            "truth_contract": {
+                "immutable_features": ["透明水箱", "控制面板"],
+                "forbidden_drift": ["不要改动面板位置"],
+                "required_entities": ["透明水箱"],
+                "evidence_level": "low",
+                "allow_structure_extrapolation": False,
+                "scene_grounding_rule": "无需场景",
+                "scale_anchor": "按参考图比例",
+            },
+            "risk_flags": ["transparent_or_internal_structure"],
+            "selling_point_binding": {"entities": ["透明水箱"], "focus_texts": ["透明水箱更直观"]},
+        },
+    )
+
+    class DummyClient:
+        def __init__(self):
+            self.settings = SimpleNamespace(whatai_api_key="test-key")
+
+        def generate_image(self, *_args, **_kwargs):
+            generate_calls["count"] += 1
+            return f"image-{generate_calls['count']}".encode("utf-8")
+
+        def inspect_image_fidelity(self, **_kwargs):
+            fidelity_calls["count"] += 1
+            return {"status": "passed", "passed": True}
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    rendered = _render_single_asset(
+        confirmed_copy={"product_name": "除湿机", "category": "除湿机"},
+        strategy_preview={"planner_instruction": None},
+        plan_item={
+            "role": "detail",
+            "slot_id": "detail",
+            "display_order": 1,
+            "aspect_ratio": "1:1",
+            "platform_rule_pack": "default_main_gallery",
+            "requires_white_bg_validation": False,
+            "reference_image_limit": 2,
+        },
+        instruction="保持结构真实",
+        loaded_reference_images=[],
+    )
+
+    assert generate_calls["count"] == 1
+    assert fidelity_calls["count"] == 0
+    assert rendered["generation_snapshot"]["fidelity_validation"] is None
