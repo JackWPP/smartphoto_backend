@@ -52,7 +52,7 @@ def test_compose_prompt_returns_structured_prompt_payload():
     assert prompt["role_label"] == "主图"
     assert prompt["background_mode"] == "clean_studio"
     assert "智能空气净化器" in prompt["blocks"]["subject"]
-    assert "不要生成海报文字" in prompt["blocks"]["constraints"]
+    assert "不要生成任何可读文字" in prompt["blocks"]["constraints"]
     assert "目标：" in prompt["final_prompt"]
     assert "参考画幅比例 1:1" in prompt["final_prompt"]
 
@@ -373,7 +373,7 @@ def test_build_copy_blocks_filters_placeholder_and_low_signal_copy_for_alibaba_s
     )
 
     assert primary_blocks["headline"] == "空气净化器"
-    assert primary_blocks["supporting"] == ""
+    assert primary_blocks["supporting"] == "客厅"
     assert primary_blocks["matrix_lines"] == []
     assert closing_blocks["headline"] == "空气净化器"
     assert closing_blocks["proof_lines"] == []
@@ -894,56 +894,65 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
     monkeypatch.setattr(client.settings, "llm_route_analysis", "whatai_gemini")
     captured: dict[str, object] = {}
 
-    def fake_complete_json(*, task, messages, error_key, temperature=0.2, model=None):
+    def fake_complete_json_with_meta(*, task, messages, error_key, temperature=0.2, model=None, **_kwargs):
         captured["task"] = task
         captured["messages"] = messages
         captured["model"] = model
         return {
-            "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "image_type": "实物图", "confidence": 91},
-            "image_assessment": {"quality_score": 0.9, "summary": "清晰"},
-            "missing_views": ["angle45", "side"],
-            "suggestions": [],
-            "copy_draft": {"headline": "空气净化器"},
-            "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
-            "suggested_styles": ["现代简约"],
-            "reference_summary": {
-                "shape": "圆柱形",
-                "colors": "白色",
-                "materials": "塑料",
-                "structures": "进风格栅",
-                "must_keep": "外形不能变",
-                "proportion_note": "保持塔式比例",
-                "control_panel_note": "面板在机身正面上半区",
-                "transparent_parts_note": "",
-                "structure_anchor_points": "进风格栅、顶盖和面板位置",
-                "do_not_move_features": "面板和进风口不要换位",
-                "scene_fit_notes": "场景摆放需与地面自然接触",
+            "result": {
+                "recognized_product": {"product_name": "空气净化器", "category": "空气净化器", "image_type": "实物图", "confidence": 91},
+                "image_assessment": {"quality_score": 0.9, "summary": "清晰"},
+                "missing_views": ["angle45", "side"],
+                "suggestions": [],
+                "copy_draft": {"headline": "空气净化器"},
+                "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+                "suggested_styles": ["现代简约"],
+                "reference_summary": {
+                    "shape": "圆柱形",
+                    "colors": "白色",
+                    "materials": "塑料",
+                    "structures": "进风格栅",
+                    "must_keep": "外形不能变",
+                    "proportion_note": "保持塔式比例",
+                    "control_panel_note": "面板在机身正面上半区",
+                    "transparent_parts_note": "",
+                    "structure_anchor_points": "进风格栅、顶盖和面板位置",
+                    "do_not_move_features": "面板和进风口不要换位",
+                    "scene_fit_notes": "场景摆放需与地面自然接触",
+                },
+                "category_candidates": [
+                    {"category": "空气净化器", "confidence": 91, "reason": "主体是空气净化器"},
+                    {"category": "加湿器", "confidence": 25, "reason": "外形近似但无明显喷雾证据"},
+                    {"category": "其他", "confidence": 10, "reason": "保底候选"},
+                ],
+                "scene_tags": ["白底产品"],
+                "evidence_scores": {"structure": 82, "proportion": 74, "scene": 60, "text": 78},
+                "risk_flags": ["control_panel_sensitive"],
+                "selling_point_entities": ["控制面板"],
+                "supplement_image_recommendations": [
+                    {
+                        "slot_type": "angle45",
+                        "label": "45 度角图",
+                        "reason": "补充结构信息",
+                        "priority": 1,
+                        "upload_goal": "补齐立体结构和厚薄关系。",
+                        "must_show": "顶部、正面和一侧的真实连接关系。",
+                        "framing_hint": "45 度斜拍，完整带到顶部和侧边。",
+                        "example_caption": "45°结构更清楚",
+                    }
+                ],
+                "detected_view_slots": ["front"],
             },
-            "category_candidates": [
-                {"category": "空气净化器", "confidence": 91, "reason": "主体是空气净化器"},
-                {"category": "加湿器", "confidence": 25, "reason": "外形近似但无明显喷雾证据"},
-                {"category": "其他", "confidence": 10, "reason": "保底候选"},
-            ],
-            "scene_tags": ["白底产品"],
-            "evidence_scores": {"structure": 82, "proportion": 74, "scene": 60, "text": 78},
-            "risk_flags": ["control_panel_sensitive"],
-            "selling_point_entities": ["控制面板"],
-            "supplement_image_recommendations": [
-                {
-                    "slot_type": "angle45",
-                    "label": "45 度角图",
-                    "reason": "补充结构信息",
-                    "priority": 1,
-                    "upload_goal": "补齐立体结构和厚薄关系。",
-                    "must_show": "顶部、正面和一侧的真实连接关系。",
-                    "framing_hint": "45 度斜拍，完整带到顶部和侧边。",
-                    "example_caption": "45°结构更清楚",
-                }
-            ],
-            "detected_view_slots": ["front"],
+            "meta": {
+                "provider": "whatai",
+                "model": "analysis-fast-model",
+                "prompt_version": "v1",
+                "repair_round": 0,
+                "source": "primary",
+            }
         }
 
-    monkeypatch.setattr(client.llm_router, "complete_json", fake_complete_json)
+    monkeypatch.setattr(client.llm_router, "complete_json_with_meta", fake_complete_json_with_meta)
     monkeypatch.setattr(client.llm_router, "is_available", lambda task: True)
     monkeypatch.setattr(
         "app.services.upstream.list_active_category_catalog",
@@ -1137,10 +1146,20 @@ def test_analyze_images_repairs_invalid_priority_before_fallback(monkeypatch):
         ]
     )
 
-    def fake_complete_json(**_kwargs):
-        return next(responses)
+    def fake_complete_json_with_meta(**_kwargs):
+        res = next(responses)
+        return {
+            "result": res,
+            "meta": {
+                "repair_round": 1 if "补全" in res.get("supplement_image_recommendations", [{}])[0].get("example_caption", "") else 0,
+                "source": "repair" if "补全" in res.get("supplement_image_recommendations", [{}])[0].get("example_caption", "") else "primary",
+                "provider": "whatai",
+                "model": "analysis-fast-model",
+                "prompt_version": "v1",
+            }
+        }
 
-    monkeypatch.setattr(client.llm_router, "complete_json", fake_complete_json)
+    monkeypatch.setattr(client.llm_router, "complete_json_with_meta", fake_complete_json_with_meta)
 
     image = LoadedReferenceImage(
         "img-front",

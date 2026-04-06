@@ -213,7 +213,7 @@ def test_run_analysis_job_backfills_existing_empty_copy(monkeypatch, setup_datab
             return {
                 "recognized_product": {"product_name": "圆柱空气净化器", "category": "家电"},
                 "copy_draft": {
-                    "headline": "高效体验，稳定品质",
+                    "headline": "全方位空气净化",
                     "selling_points": "360环形进风｜低噪运行",
                     "usage_scenes": "客厅净化",
                     "specs": "CADR 220m3/h",
