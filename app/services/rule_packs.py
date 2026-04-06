@@ -13,6 +13,29 @@ DEFAULT_MAIN_RULE_PACK_ID = "default_main_gallery_v2"
 ALIBABA_MAIN_RULE_PACK_ID = "alibaba_core_5_slot"
 DETAIL_RULE_PACK_ID = "ecommerce_detail_v2"
 
+_SHARED_HARNESS_BLOCKS: dict[str, Any] = {
+    "fidelity_config": {
+        "default_fidelity_tier": "high",
+        "force_fidelity_validation": True,
+        "force_text_language_validation": True,
+        "component_lock_enabled": True,
+    },
+    "style_templates": {
+        "default_lighting": "主体采用柔和环绕光与一侧主光源的三点布光法，保持阴影面积不超过主体 15%，高光区域需突出材质质感但不过曝。",
+        "default_background": "背景采用柔和渐变单色调，模拟专业棚拍无缝背景纸效果，不出现明显分割线、拼接痕迹或复杂场景。",
+        "default_space": "主体占画面 50-65% 面积，周围预留均匀留白空间。",
+    },
+    "selling_point_policy": {
+        "exclusive_allocation": True,
+        "max_points_per_slot": 2,
+    },
+    "validation_policy": {
+        "fidelity_check": "always",
+        "text_language_check": "always",
+        "max_retry_on_fail": 1,
+    },
+}
+
 BUILTIN_RULE_PACKS: list[dict[str, Any]] = [
     {
         "name": "默认主图库规则",
@@ -27,6 +50,18 @@ BUILTIN_RULE_PACKS: list[dict[str, Any]] = [
                 {"slot_id": "scene", "slot_label": "场景图", "slot_family": "scene", "compat_role": "scene", "role_label": "场景图", "goal": "把商品放进真实使用情境，体现人群、空间或使用方式", "background_mode": "real_scene", "text_policy": "no_text", "composition_hint": "真实生活化场景，中景构图，商品与环境关系清晰", "copy_policy": "headline_optional", "layout_policy": "immersive_scene", "proof_policy": "soft", "requires_white_bg_validation": False, "reference_role_hint": "scene", "candidate_expression_modes": ["immersive_scene", "benefit_scene", "comparison_scene"]},
                 {"slot_id": "detail", "slot_label": "细节图", "slot_family": "detail", "compat_role": "detail", "role_label": "细节图", "goal": "突出材质、结构、做工或局部细节", "background_mode": "soft_focus_bg", "text_policy": "no_text", "composition_hint": "局部特写或微距构图，强调工艺、纹理与质感", "copy_policy": "headline_optional", "layout_policy": "macro_closeup", "proof_policy": "medium", "requires_white_bg_validation": False, "reference_role_hint": "detail", "candidate_expression_modes": ["macro_texture_closeup", "structure_cutaway", "material_process_focus"]},
             ],
+            **copy.deepcopy(_SHARED_HARNESS_BLOCKS),
+            "negative_prompt_library": {
+                "universal": [
+                    "不要重建产品外观",
+                    "不要改变产品颜色",
+                    "不要添加参考图中不存在的部件",
+                ],
+                "per_slot": {
+                    "white_bg": ["不要任何道具/人物/场景"],
+                    "hero": ["不要拼贴海报风格"],
+                },
+            },
         },
     },
     {
@@ -42,6 +77,18 @@ BUILTIN_RULE_PACKS: list[dict[str, Any]] = [
                 {"slot_id": "benefit_scene_or_compare", "slot_label": "利益场景/对比图", "slot_family": "benefit_scene_or_compare", "compat_role": "benefit_scene_or_compare", "role_label": "利益场景/对比图", "goal": "强调消费者利益点，可走真实场景代入或对比优势", "background_mode": "real_scene", "text_policy": "short_copy_required", "composition_hint": "场景或对比服务于利益点，不允许空洞卖点和纯抽象氛围", "copy_policy": "benefit_copy", "layout_policy": "scene_or_compare", "proof_policy": "medium", "requires_white_bg_validation": False, "reference_role_hint": "scene", "candidate_expression_modes": ["real_scene_benefit", "compare_superiority", "coverage_scene"]},
                 {"slot_id": "closing_selling_point", "slot_label": "尾屏卖点图", "slot_family": "closing_selling_point", "compat_role": "closing_selling_point", "role_label": "尾屏卖点图", "goal": "承接剩余高优卖点，做卖点矩阵、参数亮点或尾屏总结", "background_mode": "clean_feature_bg", "text_policy": "short_copy_required", "composition_hint": "可做卖点矩阵、参数亮点收束或尾屏总结，完成转化闭环", "copy_policy": "matrix_copy", "layout_policy": "matrix_or_summary", "proof_policy": "medium", "requires_white_bg_validation": False, "reference_role_hint": "detail", "candidate_expression_modes": ["selling_point_matrix", "parameter_highlight", "tail_summary"]},
             ],
+            **copy.deepcopy(_SHARED_HARNESS_BLOCKS),
+            "negative_prompt_library": {
+                "universal": [
+                    "不要重建产品外观",
+                    "不要改变产品颜色",
+                    "不要添加参考图中不存在的部件",
+                ],
+                "per_slot": {
+                    "white_bg": ["不要任何道具/人物/场景"],
+                    "primary_kv": ["不要拼贴海报风格"],
+                },
+            },
         },
     },
     {
@@ -164,3 +211,83 @@ def load_published_rule_pack_config(
             rule_pack_key=rule_pack_key,
             platform_id=platform_id,
         )
+
+
+_DEFAULT_HARNESS_CONFIG: dict[str, Any] = {
+    "fidelity_config": {
+        "default_fidelity_tier": "high",
+        "force_fidelity_validation": True,
+        "force_text_language_validation": True,
+        "component_lock_enabled": True,
+    },
+    "negative_prompt_library": {
+        "universal": [],
+        "per_slot": {},
+    },
+    "style_templates": {},
+    "expression_library": {},
+    "selling_point_policy": {
+        "exclusive_allocation": True,
+        "max_points_per_slot": 2,
+    },
+    "validation_policy": {
+        "fidelity_check": "always",
+        "text_language_check": "always",
+        "max_retry_on_fail": 1,
+    },
+    "detail_narrative_template": {
+        "structure": [
+            "trust_overview",
+            "mechanism",
+            "feature_a",
+            "feature_b",
+            "usage_scene",
+            "parameter_proof",
+            "closing_cta",
+        ],
+        "min_panels": 5,
+        "max_panels": 8,
+        "trust_module_required": True,
+        "evidence_module_required": True,
+        "panel_descriptions": {
+            "trust_overview": "首屏信任入场：品牌/品类定位 + 核心利益点",
+            "mechanism": "机制/原理解释：为什么有效",
+            "feature_a": "核心卖点 A 深度展开",
+            "feature_b": "核心卖点 B 深度展开",
+            "usage_scene": "使用场景可视化",
+            "parameter_proof": "参数/认证/实验数据佐证",
+            "closing_cta": "尾屏总结收束 + 行动号召",
+        },
+    },
+}
+
+
+def get_harness_config(
+    *,
+    platform_id: str,
+    asset_family: str = "main_gallery",
+    db: Session | None = None,
+) -> dict[str, Any]:
+    """Load admin-configurable harness settings from Rule Pack config_snapshot.
+
+    Falls back to sensible defaults for any missing keys.
+    """
+    from app.services.main_gallery_rules import get_main_rule_pack_id
+
+    rule_pack_key = get_main_rule_pack_id(platform_id)
+    _, _, config = load_published_rule_pack_config(
+        asset_family=asset_family,
+        rule_pack_key=rule_pack_key,
+        platform_id=platform_id,
+        db=db,
+    )
+    config = config or {}
+    result: dict[str, Any] = {}
+    for key, default_value in _DEFAULT_HARNESS_CONFIG.items():
+        stored = config.get(key)
+        if isinstance(stored, dict) and isinstance(default_value, dict):
+            result[key] = {**default_value, **stored}
+        else:
+            result[key] = stored if stored is not None else copy.deepcopy(default_value)
+    return result
+
