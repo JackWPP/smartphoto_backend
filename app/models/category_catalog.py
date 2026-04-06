@@ -18,3 +18,5 @@ class CategoryCatalogModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    confusion_pairs: Mapped[list[str]] = mapped_column(JSON, default=list)
+    expected_components: Mapped[list[str]] = mapped_column(JSON, default=list)

@@ -57,16 +57,18 @@ def simplified_chinese_visible_copy_constraints() -> list[str]:
 
 
 def platform_language_hard_constraint(platform_id: str | None) -> str:
-    """生成不可妥协的平台语言约束指令，注入到 prompt 最前方。"""
+    """生成不可妥协的平台语言约束指令，注入到 prompt 最前方和最末尾。"""
     if requires_simplified_chinese_visible_copy(platform_id):
         return (
             "【语言硬约束】所有新增文案只能是简体中文。"
+            "不要出现如 'Premium Quality'、'High Performance'、'Best Seller'、'New Arrival' 等英文营销词汇。"
             "产品本体原有英文铭牌/按键丝印保留不动，不视为新增文案。"
             "违反此规则的结果将自动拒绝。"
         )
     return (
         "【语言硬约束】All added copy MUST be in English only. "
-        "Do NOT add any Chinese, Japanese, or Korean text. "
+        "Do NOT add any Chinese characters (中文), Japanese, or Korean text. "
+        "Do NOT mix languages — all marketing text must be pure English. "
         "Original product body markings are preserved as-is. "
         "Results violating this rule will be auto-rejected."
     )

@@ -557,6 +557,27 @@ class GenericGenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
 
 
+class AssetHistoryItem(BaseModel):
+    asset_id: str = Field(description="资产 ID。")
+    version_no: int = Field(description="版本号。")
+    round_no: int = Field(description="生成轮次。")
+    image_url: str = Field(description="图片 URL。")
+    thumbnail_url: str | None = Field(default=None, description="缩略图 URL。")
+    width: int = Field(description="图片宽度。")
+    height: int = Field(description="图片高度。")
+    status: str = Field(description="资产状态。")
+    quality_status: str = Field(description="质量状态。")
+    visibility_status: str = Field(description="可见性状态。")
+    edit_instruction: str | None = Field(default=None, description="生成时的修改指令。")
+    created_at: datetime | None = Field(default=None, description="创建时间。")
+
+
+class AssetRestoreResponse(BaseModel):
+    restored_asset_id: str = Field(description="被恢复的资产 ID。")
+    previous_asset_id: str = Field(description="之前的当前资产 ID（已被标记为 superseded）。")
+    slot_id: str = Field(description="槽位 ID。")
+
+
 class GalleryRegenerateRequest(BaseModel):
     reason: str | None = Field(default=None, description="用户不满意原因。")
     instruction: str | None = Field(default=None, description="本轮附加生图指令。")
@@ -568,9 +589,17 @@ class GlobalEditRequest(BaseModel):
     asset_ids: list[str] = Field(default_factory=list, description="当 scope=selected 时提交的资产 ID 列表。")
 
 
+class EditConstraints(BaseModel):
+    """结构化编辑约束，用于定向控制重生成行为。"""
+    keep: list[str] = Field(default_factory=list, description="需要保留的属性，如 product_identity, composition, style。", max_length=10)
+    change: dict[str, str] = Field(default_factory=dict, description="需要变更的属性及目标值，如 {\"background\": \"pure_white\"}。")
+    remove: list[str] = Field(default_factory=list, description="需要移除的元素，如 visible_text, watermark。", max_length=10)
+
+
 class AssetRegenerateRequest(BaseModel):
     instruction: str = Field(description="单图重生成指令。")
     keep_style_consistency: bool = Field(default=True, description="是否保持与当前版本风格一致。")
+    edit_constraints: EditConstraints | None = Field(default=None, description="可选的结构化编辑约束，与 instruction 互补。")
 
 
 class AnalysisTriggerData(BaseModel):

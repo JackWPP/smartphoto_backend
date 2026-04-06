@@ -75,6 +75,13 @@ def prompt_matrix_guardrails() -> list[str]:
     return list(PROMPT_MATRIX_GUARDRAILS)
 
 
+def _truncate_text(text: str, *, max_chars: int) -> str:
+    """Truncate text to max_chars, preserving meaning with ellipsis."""
+    if not text or len(text) <= max_chars:
+        return text
+    return text[:max_chars - 1] + "…"
+
+
 def contains_internal_prompt_term(value: Any) -> bool:
     text = repair_broken_text(value)
     if not text:
@@ -120,10 +127,10 @@ def sanitize_planning_context_text(value: Any, fallback: str) -> str:
 def sanitize_main_copy_blocks(copy_blocks: dict[str, Any], *, product_name: str = "") -> tuple[dict[str, Any], list[str], list[str]]:
     raw = dict(copy_blocks or {})
     sanitized = {
-        "headline": sanitize_surface_text(raw.get("headline")) or sanitize_surface_text(product_name),
-        "supporting": sanitize_surface_text(raw.get("supporting")),
-        "proof_lines": sanitize_surface_list(raw.get("proof_lines")),
-        "matrix_lines": sanitize_surface_list(raw.get("matrix_lines")),
+        "headline": _truncate_text(sanitize_surface_text(raw.get("headline")) or sanitize_surface_text(product_name), max_chars=20),
+        "supporting": _truncate_text(sanitize_surface_text(raw.get("supporting")), max_chars=40),
+        "proof_lines": [_truncate_text(line, max_chars=30) for line in sanitize_surface_list(raw.get("proof_lines"))[:4]],
+        "matrix_lines": [_truncate_text(line, max_chars=25) for line in sanitize_surface_list(raw.get("matrix_lines"))[:3]],
     }
     sanitized_fields = _collect_changed_fields(raw, sanitized, ("headline", "supporting", "proof_lines", "matrix_lines"))
     notes = _copy_safety_notes(sanitized_fields)

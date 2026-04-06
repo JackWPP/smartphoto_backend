@@ -21,6 +21,12 @@ STRUCTURE_SENSITIVE_CATEGORIES = {
     "空气净化器",
     "宠物饮水机",
     "净水器",
+    "智能门锁",
+    "剃须刀",
+    "电动牙刷",
+    "洗地机",
+    "扫地机",
+    "空调",
 }
 
 _ENTITY_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -291,6 +297,30 @@ def should_run_fidelity_validation(
     if isinstance(truth_contract, dict) and str(truth_contract.get("evidence_level") or "").strip() == "low":
         return True
     return False
+
+
+def validate_expected_components(
+    *,
+    expected_components: list[str],
+    fidelity_result: dict[str, Any] | None,
+) -> list[str]:
+    """对比 expected_components 和 fidelity check 返回的已识别部件，返回缺失部件列表。"""
+    if not expected_components or not fidelity_result:
+        return []
+    detected_raw = fidelity_result.get("detected_components") or fidelity_result.get("component_registry") or []
+    detected_names: set[str] = set()
+    for item in detected_raw:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        else:
+            name = str(item).strip()
+        if name:
+            detected_names.add(name)
+    missing = [
+        comp for comp in expected_components
+        if not any(comp in detected or detected in comp for detected in detected_names)
+    ]
+    return missing
 
 
 def _flatten_texts(values: Any) -> list[str]:

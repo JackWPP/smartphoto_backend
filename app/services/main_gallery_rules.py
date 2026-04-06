@@ -12,7 +12,7 @@ from app.services.copy_normalization import (
     repair_broken_text,
 )
 from app.services.platforms import PlatformProfile, get_platform_or_none
-from app.services.rule_packs import load_published_rule_pack_config
+from app.services.rule_packs import DETAIL_RULE_PACK_ID, load_published_rule_pack_config
 from app.services.visible_copy_policy import simplified_chinese_visible_copy_constraints
 
 
@@ -664,6 +664,74 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         ],
     },
 }
+
+
+PLATFORM_DISPLAY_NAMES: dict[str, str] = {
+    "default": "默认配置",
+    "1688": "阿里1688",
+    "taobao": "淘宝天猫",
+    "alibaba_intl": "阿里国际站",
+    "amazon": "亚马逊",
+    "temu": "TEMU",
+    "jd": "京东",
+    "pdd": "拼多多",
+    "xiaohongshu": "小红书",
+    "douyin": "抖音电商",
+    "tiktok": "TikTok Shop",
+    "official_site": "品牌官网",
+    "custom": "自定义平台",
+}
+
+_platform_configs_seeded = False
+
+
+def ensure_system_platform_configs(db: Session) -> bool:
+    """Auto-seed PlatformConfigModel rows from PLATFORM_OVERLAYS on first access.
+
+    Mirrors the ensure_system_rule_packs() pattern in rule_packs.py.
+    Skips DB check after first successful seed within this process.
+    """
+    global _platform_configs_seeded
+    if _platform_configs_seeded:
+        return False
+    from app.models.platform_config import PlatformConfigModel
+
+    existing_platform_ids = {
+        str(row[0]).strip()
+        for row in db.query(PlatformConfigModel.platform_id).all()
+        if str(row[0]).strip()
+    }
+    changed = False
+    for pid, overlay in PLATFORM_OVERLAYS.items():
+        if pid in existing_platform_ids:
+            continue
+        profile = get_platform_or_none(pid)
+        db.add(PlatformConfigModel(
+            platform_id=pid,
+            name=PLATFORM_DISPLAY_NAMES.get(pid, pid),
+            locale=overlay["locale"],
+            copy_language=overlay["copy_language"],
+            allow_dense_copy=overlay["allow_dense_copy"],
+            allow_certificate_elements=overlay["allow_certificate_elements"],
+            allow_compare_overlay=overlay["allow_compare_overlay"],
+            hero_text_overlay=overlay["hero_text_overlay"],
+            white_bg_mandatory=overlay["white_bg_mandatory"],
+            default_image_count=profile.default_image_count if profile else 5,
+            default_aspect_ratio=profile.default_aspect_ratio if profile else "1:1",
+            main_rule_pack_id=profile.main_rule_pack_id if profile else DEFAULT_MAIN_RULE_PACK_ID,
+            detail_rule_pack_id=profile.detail_rule_pack_id if profile else DETAIL_RULE_PACK_ID,
+            prohibited_elements=overlay["prohibited_elements"],
+            negative_prompt_additions=overlay["negative_prompt_additions"],
+            constraints=overlay["constraints"],
+            is_active=True,
+            created_by=None,
+            operator_note="系统自动初始化",
+        ))
+        changed = True
+    if changed:
+        db.flush()
+    _platform_configs_seeded = True
+    return changed
 
 
 def get_platform_overlay(platform_id: str | None, *, db: Session | None = None) -> dict[str, Any]:

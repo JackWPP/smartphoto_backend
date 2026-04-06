@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     image_submit_batch_interval_seconds: int = Field(default=5, ge=0, le=120)
     image_poll_initial_delay_seconds: int = Field(default=45, ge=0, le=300)
     image_task_timeout_seconds: int = Field(default=450, ge=60, le=1800)
+
+    # --- Quality review & async retry ---
+    color_validation_enabled: bool = False
+    color_validation_delta_e_threshold: float = Field(default=25.0, ge=5.0, le=100.0)
+    async_quality_retry_enabled: bool = False
+    async_quality_retry_max_per_session: int = Field(default=3, ge=0, le=10)
+
     image_poll_profile: str = Field(default='[{"interval_seconds":10,"attempts":6},{"interval_seconds":15,"attempts":8},{"interval_seconds":20,"attempts":10}]')
     credit_pricing_rules: str = Field(
         default='{"generate_gallery":{"credits":10,"description":"主图整组生成"},"generate_detail_page":{"credits":16,"description":"详情页整组生成"},"global_edit":{"credits":8,"description":"主图全局修改"},"regenerate_asset":{"credits":3,"description":"单张主图重生成"},"regenerate_detail_panel":{"credits":4,"description":"单张详情页 panel 重生成"},"regenerate_gallery":{"credits":10,"description":"主图整组重生成"}}'

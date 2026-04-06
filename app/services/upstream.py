@@ -141,6 +141,7 @@ class WhataiClient:
                 "sample_keywords": item["sample_keywords"],
                 "is_featured": item["is_featured"],
                 "notes": item["notes"],
+                "confusion_pairs": item.get("confusion_pairs", []),
             }
             for item in category_catalog
         ]
@@ -159,6 +160,12 @@ class WhataiClient:
                         "recognized_product 必须包含 product_name,category,image_type,confidence。"
                         "category_candidates 至少返回 3 个候选项，每项包含 category,confidence,reason，并按置信度排序。"
                         "category_candidates 必须优先从给定的全局品类库中选择，只有完全无法归类时才允许使用“其他”。"
+                        "每个品类条目包含 confusion_pairs 字段，列出外观相似的易混淡品类——识别时必须根据以下要点区分：\n"
+                        "  饮水机 vs 净水器：饮水机有出水龙头+加热功能；净水器有滤芝舟+出水管且无内置加热。\n"
+                        "  空气净化器 vs 加湿器：净化器有HEPA滤网+进出风口；加湿器有出雾口+水筱可见。\n"
+                        "  宠物饮水机 vs 普通饮水机：宠物饮水机有饮水槽/磗+循环泵，体积小，面向动物。\n"
+                        "  破壁机 vs 料理机 vs 养生壶：破壁机高速刀头+圆柱透明杯；养生壶有加热底座+玻璃内胆；料理机有多功能刀片组。\n"
+                        "  扫地机 vs 洗地机：扫地机扁圆形自动导航；洗地机手持推杆+双水筱。\n"
                         "不要把具体家电、个护、宠物、家具产品泛化成“家居用品”。"
                         "supplement_image_recommendations 每项必须包含 slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption。"
                         "slot_type 只能是 front,angle45,side,extra。priority 只能输出 1-10 的整数，不允许输出 high/medium/low。"

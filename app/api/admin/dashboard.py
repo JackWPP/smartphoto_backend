@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
@@ -275,3 +276,42 @@ def dashboard_quality(
             "bad_rate": round(bad_feedback / total_feedback, 4) if total_feedback else 0.0,
         },
     })
+
+
+@router.get("/quality/breakdown", operation_id="adminQualityBreakdown", responses={**OPENAPI_ERROR_RESPONSES})
+def quality_breakdown(
+    days: int = Query(default=7, ge=1, le=30),
+    dimension: Literal["platform", "category", "slot"] = Query(default="platform", description="分组维度: platform, category, slot"),
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_current_admin_user),
+) -> dict:
+    """Quality pass rates broken down by platform, category, or slot."""
+    from app.services.quality_analytics import quality_breakdown_by_dimension
+
+    data = quality_breakdown_by_dimension(db, days=days, dimension=dimension)
+    return success_response({"window_days": days, "dimension": dimension, "items": data})
+
+
+@router.get("/quality/issue-tags", operation_id="adminQualityIssueTags", responses={**OPENAPI_ERROR_RESPONSES})
+def quality_issue_tags(
+    days: int = Query(default=7, ge=1, le=30),
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_current_admin_user),
+) -> dict:
+    """Top issue tags from user feedback."""
+    from app.services.quality_analytics import feedback_issue_tag_ranking
+
+    data = feedback_issue_tag_ranking(db, days=days)
+    return success_response({"window_days": days, "items": data})
+
+
+@router.get("/quality/timing", operation_id="adminQualityTiming", responses={**OPENAPI_ERROR_RESPONSES})
+def quality_timing(
+    days: int = Query(default=7, ge=1, le=30),
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_current_admin_user),
+) -> dict:
+    """Generation and quality review timing statistics (P50/P95)."""
+    from app.services.quality_analytics import generation_timing_stats
+
+    return success_response(generation_timing_stats(db, days=days))

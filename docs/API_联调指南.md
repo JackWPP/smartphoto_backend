@@ -750,6 +750,7 @@
   - 整组修改：`POST /sessions/{session_id}/results/global-edit`
   - 整组重生成：`POST /sessions/{session_id}/results/regenerate`
   - 单图重生成：`POST /assets/{asset_id}/regenerate`
+  - 历史版本回滚（物化新版本）：`POST /assets/{asset_id}/restore`
   - 下载：`GET /sessions/{session_id}/download`
 - 首次生成请求体补充：
   - `instruction: string | null`
@@ -778,9 +779,11 @@
 - 版本规则：
   - `generate_gallery` / `global_edit` / `regenerate_gallery`：`round_no + 1` 且 `version_no + 1`
   - `regenerate_asset`：`version_no + 1`，`round_no` 保持当前轮次，且写 `parent_asset_id`
+  - `restore_asset`：`version_no + 1`，`round_no` 保持当前轮次；以当前最新可见版本为基线，替换目标槽位为历史资产并物化完整新版本
 - 当前实现补充：
   - 任何 `version_no` 都按不可变快照保留，历史版本允许回看与下载
   - `regenerate_asset` 会物化成完整新版本：新图 + `parent_asset.version_no` 对应版本的其余图
+  - `POST /assets/{asset_id}/restore` 不再直接改历史资产可见性，而是创建新版本快照，确保 `GET /sessions/{id}/results?version=*` 始终返回完整版本集合
   - 主图组与详情页当前会先按批次提交上游异步任务，再延迟启动轮询，再并发下载结果
   - 默认平台按 `hero -> white_bg -> selling_point -> scene -> detail` 生成
   - 阿里系平台按 `primary_kv -> reason_why -> proof_authority -> benefit_scene_or_compare -> closing_selling_point` 生成

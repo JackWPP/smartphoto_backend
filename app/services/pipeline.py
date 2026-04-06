@@ -38,7 +38,7 @@ from app.services.detail_pages import (
     build_detail_strategy_preview,
     compose_detail_panel_prompt,
 )
-from app.services.jobs import append_job_event, now_utc, update_job_status
+from app.services.jobs import append_job_event, create_job, now_utc, update_job_status
 from app.services.locking import release_locks
 from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy, merge_parameter_snapshot_into_copy
 from app.services.prompts import compose_prompt
@@ -472,6 +472,71 @@ def run_regenerate_copy_job(db: Session, job_id: str) -> None:
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
 
 
+_EDIT_CONSTRAINT_CHANGE_MAP: dict[str, str] = {
+    "pure_white": "背景必须是纯白无缝背景，不要任何道具或场景",
+    "dark": "背景采用深色或纯黑色调",
+    "real_scene": "背景围绕真实使用场景搭建",
+    "gradient": "背景采用柔和渐变色调",
+    "no_text": "画面上不要出现任何营销文字",
+    "minimal_text": "画面上文案控制在极少量",
+    "dense_text": "画面上增加文案密度",
+    "enlarge": "产品主体占比增大",
+    "shrink": "产品主体适当缩小",
+}
+
+_EDIT_CONSTRAINT_KEEP_MAP: dict[str, str] = {
+    "product_identity": "必须严格保持产品外观、颜色、结构完全一致",
+    "composition": "保持当前构图布局不变",
+    "style": "保持当前整体风格不变",
+    "text": "保持当前文案内容和位置不变",
+    "background": "保持当前背景不变",
+    "color": "保持产品颜色完全一致",
+}
+
+_EDIT_CONSTRAINT_REMOVE_MAP: dict[str, str] = {
+    "visible_text": "移除画面上所有营销文字",
+    "watermark": "移除所有水印",
+    "background_elements": "移除背景中的所有装饰和道具元素",
+    "reflection": "移除底部反射效果",
+    "shadow": "移除所有阴影效果",
+}
+
+
+def _merge_edit_constraints_into_instruction(
+    instruction: str | None,
+    edit_constraints: dict,
+) -> str:
+    """Convert structured edit_constraints into enhanced instruction text."""
+    parts: list[str] = []
+    if instruction and str(instruction).strip():
+        parts.append(str(instruction).strip())
+
+    keep = edit_constraints.get("keep") or []
+    change = edit_constraints.get("change") or {}
+    remove = edit_constraints.get("remove") or []
+
+    for item in keep:
+        mapped = _EDIT_CONSTRAINT_KEEP_MAP.get(str(item).strip())
+        if mapped:
+            parts.append(mapped)
+
+    for key, value in change.items():
+        key_s = str(key).strip()
+        value_s = str(value).strip()
+        mapped = _EDIT_CONSTRAINT_CHANGE_MAP.get(value_s)
+        if mapped:
+            parts.append(mapped)
+        elif value_s:
+            parts.append(f"{key_s}改为{value_s}")
+
+    for item in remove:
+        mapped = _EDIT_CONSTRAINT_REMOVE_MAP.get(str(item).strip())
+        if mapped:
+            parts.append(mapped)
+
+    return "；".join(parts) if parts else (instruction or "")
+
+
 def _prepare_assets_plan(db: Session, job: JobModel, strategy_preview: dict, session: SessionModel) -> list[dict]:
     payload = job.input_payload or {}
 
@@ -650,6 +715,15 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         session.current_step = 6
 
         instruction = payload.get("instruction")
+        edit_constraints = payload.get("edit_constraints")
+        if isinstance(edit_constraints, dict):
+            instruction = _merge_edit_constraints_into_instruction(instruction, edit_constraints)
+        # Load constraint escalation memory for regenerate jobs
+        if job.job_type == "regenerate_asset":
+            escalation_memory = _load_constraint_escalation_memory(db, session, payload.get("parent_asset_id"))
+            if escalation_memory:
+                prefix = "基于历史有效约束：" + "；".join(escalation_memory)
+                instruction = f"{prefix}。{instruction}" if instruction else prefix
         last_version = session.latest_result_version
         round_no = session.generation_round or 1
         images = _session_images(db, session.id)
@@ -998,22 +1072,19 @@ def _dispatch_quality_review(
     reviewable = [a for a in assets if a.quality_status == "pending_async_review"]
     if not reviewable:
         return None
-    review_job = JobModel(
+    review_job = create_job(
+        db,
         session_id=session.id,
-        user_id=parent_job.user_id,
         job_type="quality_review",
-        status="queued",
-        progress=0,
-        retry_count=0,
-        queued_at=now_utc(),
         input_payload={
             "asset_ids": [a.id for a in reviewable],
             "parent_job_id": parent_job.id,
             "platform_id": session.active_platform_id,
         },
+        service_id=parent_job.service_id,
+        user_id=parent_job.user_id,
+        guest_id=parent_job.guest_id,
     )
-    db.add(review_job)
-    db.flush()
     for a in reviewable:
         a.quality_review_job_id = review_job.id
     db.flush()
@@ -1024,7 +1095,7 @@ def _dispatch_quality_review(
     return review_job.id
 
 
-def run_quality_review_job(db: Session, job_id: str) -> None:
+def run_quality_review_job(db: Session, job_id: str) -> dict[str, Any] | None:
     """Async LLM Vision quality review — runs concurrently across assets."""
     job = _require_job(db, job_id)
     payload = job.input_payload or {}
@@ -1036,6 +1107,7 @@ def run_quality_review_job(db: Session, job_id: str) -> None:
 
         client = WhataiClient()
         storage = get_storage_adapter()
+        settings = get_settings()
         assets = (
             db.query(AssetModel)
             .filter(AssetModel.id.in_(asset_ids))
@@ -1044,6 +1116,22 @@ def run_quality_review_job(db: Session, job_id: str) -> None:
         if not assets:
             update_job_status(db, job, status="succeeded", progress=100, stage="done")
             return
+
+        # --- Load session context for meaningful fidelity comparison ---
+        session = db.query(SessionModel).filter(SessionModel.id == job.session_id).first()
+        analysis_snapshot = (session.analysis_snapshot or {}) if session else {}
+        recognized = analysis_snapshot.get("recognized_product") if isinstance(analysis_snapshot.get("recognized_product"), dict) else {}
+        review_product_name = str(recognized.get("product_name") or "").strip()
+        review_category = str(recognized.get("category") or "").strip()
+
+        review_reference_images: list = []
+        if session:
+            try:
+                session_images = _session_images(db, session.id)
+                if session_images:
+                    review_reference_images = load_reference_images(session_images, storage=storage)
+            except Exception as exc:
+                logger.warning("quality_review: failed to load reference images: %s", exc)
 
         def _review_single_asset(asset: AssetModel) -> dict:
             """Review one asset: fidelity + text language (concurrently per-asset)."""
@@ -1060,11 +1148,11 @@ def run_quality_review_job(db: Session, job_id: str) -> None:
             try:
                 fidelity = client.inspect_image_fidelity(
                     image_bytes=image_bytes,
-                    reference_images=[],
+                    reference_images=review_reference_images,
                     truth_contract=gen_snapshot.get("truth_contract") or {},
                     risk_flags=gen_snapshot.get("risk_flags") or [],
-                    product_name="",
-                    category="",
+                    product_name=review_product_name,
+                    category=review_category,
                     slot_id=asset.slot_id or "",
                 )
                 result["fidelity"] = fidelity
@@ -1080,6 +1168,37 @@ def run_quality_review_job(db: Session, job_id: str) -> None:
                 result["text_language"] = text_result
             except Exception as exc:
                 result["text_language"] = {"passed": True, "error": str(exc)}
+
+            # Color fidelity check (PIL-based, <200ms)
+            try:
+                truth_contract = gen_snapshot.get("truth_contract") or {}
+                color_hex = truth_contract.get("color_palette_hex") or []
+                if color_hex and settings.color_validation_enabled:
+                    from app.services.color_validation import validate_color_fidelity
+                    color_result = validate_color_fidelity(
+                        image_bytes,
+                        color_hex,
+                        tolerance=settings.color_validation_delta_e_threshold,
+                    )
+                    result["color_fidelity"] = color_result
+                else:
+                    result["color_fidelity"] = None
+            except Exception as exc:
+                result["color_fidelity"] = {"passed": True, "error": str(exc)}
+
+            # Image similarity metrics (observation only, no pass/fail)
+            try:
+                if review_reference_images:
+                    from app.services.color_validation import compute_image_similarity
+                    ref_bytes = getattr(review_reference_images[0], "content", None)
+                    if ref_bytes:
+                        result["image_similarity"] = compute_image_similarity(image_bytes, ref_bytes)
+                    else:
+                        result["image_similarity"] = None
+                else:
+                    result["image_similarity"] = None
+            except Exception:
+                result["image_similarity"] = None
 
             return result
 
@@ -1101,13 +1220,16 @@ def run_quality_review_job(db: Session, job_id: str) -> None:
             scores["async_check"] = {
                 "fidelity": review.get("fidelity"),
                 "text_language": review.get("text_language"),
+                "color_fidelity": review.get("color_fidelity"),
+                "image_similarity": review.get("image_similarity"),
             }
             asset.quality_scores = scores
 
             fidelity_passed = (review.get("fidelity") or {}).get("passed", True)
             text_passed = (review.get("text_language") or {}).get("passed", True)
+            color_passed = (review.get("color_fidelity") or {}).get("passed", True) if review.get("color_fidelity") is not None else True
 
-            if fidelity_passed and text_passed:
+            if fidelity_passed and text_passed and color_passed:
                 asset.quality_status = "passed"
             else:
                 asset.quality_status = "async_failed"
@@ -1116,6 +1238,8 @@ def run_quality_review_job(db: Session, job_id: str) -> None:
                     reasons.append("产品保真度不足")
                 if not text_passed:
                     reasons.append("文字语言不合规")
+                if not color_passed:
+                    reasons.append("产品颜色偏差过大")
                 asset.failure_reason = "；".join(reasons)
 
             db.flush()
@@ -1130,19 +1254,179 @@ def run_quality_review_job(db: Session, job_id: str) -> None:
                 },
             )
 
+        # --- Async quality retry: dispatch regeneration for failed assets ---
+        # First, record constraint escalation memory for retry assets that passed
+        for asset in assets:
+            if asset.quality_status == "passed":
+                _save_constraint_escalation_if_retry(db, session, asset)
+        pending_retry_job_ids: list[str] = []
+        if settings.async_quality_retry_enabled:
+            failed_assets = [a for a in assets if a.quality_status == "async_failed"]
+            # Check if this review was itself triggered by a retry (prevent loops)
+            is_retry_review = bool(payload.get("retry_source") == "quality_review")
+            if failed_assets and not is_retry_review and session:
+                # Count existing retry jobs to enforce per-session limit
+                existing_retry_jobs = (
+                    db.query(JobModel)
+                    .filter(
+                        JobModel.session_id == session.id,
+                        JobModel.job_type == "regenerate_asset",
+                    )
+                    .all()
+                )
+                existing_retry_count = sum(
+                    1 for j in existing_retry_jobs
+                    if isinstance(j.input_payload, dict) and j.input_payload.get("retry_source") == "quality_review"
+                )
+                remaining_budget = max(0, settings.async_quality_retry_max_per_session - existing_retry_count)
+                for asset in failed_assets[:remaining_budget]:
+                    retry_instruction = _build_quality_retry_instruction(asset)
+                    retry_job = create_job(
+                        db,
+                        session_id=session.id,
+                        job_type="regenerate_asset",
+                        input_payload={
+                            "parent_asset_id": asset.id,
+                            "instruction": retry_instruction,
+                            "retry_source": "quality_review",
+                            "quality_review_job_id": job.id,
+                        },
+                        service_id=job.service_id,
+                        user_id=job.user_id,
+                        guest_id=job.guest_id,
+                    )
+                    pending_retry_job_ids.append(retry_job.id)
+                    append_job_event(
+                        db, job.id, "quality_retry_dispatched",
+                        {"event": "quality_retry_dispatched", "retry_job_id": retry_job.id, "asset_id": asset.id},
+                    )
+
+        failed_count = sum(
+            1 for r in review_results
+            if not (r.get("fidelity") or {}).get("passed", True)
+            or not (r.get("text_language") or {}).get("passed", True)
+            or (r.get("color_fidelity") is not None and not (r.get("color_fidelity") or {}).get("passed", True))
+        )
         update_job_status(
             db, job, status="succeeded", progress=100, stage="done",
             result_payload={
                 "reviewed_count": len(review_results),
-                "passed_count": sum(1 for r in review_results if (r.get("fidelity") or {}).get("passed", True) and (r.get("text_language") or {}).get("passed", True)),
+                "passed_count": len(review_results) - failed_count,
+                "retry_job_ids": pending_retry_job_ids,
             },
         )
+        return {"retry_job_ids": pending_retry_job_ids}
     except Exception as exc:
         update_job_status(
             db, job, status="failed", progress=100, stage="failed",
             error_code="quality_review_error", error_message=str(exc),
         )
         raise
+
+
+def _build_quality_retry_instruction(asset: AssetModel) -> str:
+    """Build a targeted constraint escalation instruction from quality review failures."""
+    parts: list[str] = []
+    scores = asset.quality_scores or {}
+    async_check = scores.get("async_check") or {}
+
+    # Color drift
+    color_result = async_check.get("color_fidelity")
+    if isinstance(color_result, dict) and not color_result.get("passed", True):
+        from app.services.color_validation import build_color_escalation_instruction
+        color_instr = build_color_escalation_instruction(color_result.get("violations", []))
+        if color_instr:
+            parts.append(color_instr)
+
+    # Fidelity issues
+    fidelity_result = async_check.get("fidelity")
+    if isinstance(fidelity_result, dict) and not fidelity_result.get("passed", True):
+        issues = fidelity_result.get("issues", [])
+        if issues:
+            parts.append(f"产品保真度问题：{'、'.join(str(i) for i in issues[:3])}。请严格参照参考图，不要改变产品结构和外观。")
+        else:
+            parts.append("产品保真度不足，请严格参照参考图中的产品外观、结构和细节。")
+
+    # Text language
+    text_result = async_check.get("text_language")
+    if isinstance(text_result, dict) and not text_result.get("passed", True):
+        disallowed = text_result.get("disallowed_latin_tokens", [])
+        if disallowed:
+            parts.append(f"文字语言违规，请移除以下英文词汇：{'、'.join(str(t) for t in disallowed[:5])}。所有新增文案必须符合平台语言要求。")
+        else:
+            parts.append("文字语言不合规，请确保所有新增文案符合平台语言要求。")
+
+    if not parts:
+        return "请参照参考图重新生成，提升整体质量。"
+    return " ".join(parts)
+
+
+def _save_constraint_escalation_if_retry(
+    db: Session, session: SessionModel, asset: AssetModel
+) -> None:
+    """If this asset was produced by a quality-retry and passed, save the
+    effective instruction into session-level constraint escalation memory."""
+    if not asset.parent_asset_id:
+        return
+    parent_job = (
+        db.query(JobModel)
+        .filter(JobModel.id == asset.job_id)
+        .first()
+    )
+    if not parent_job or not isinstance(parent_job.input_payload, dict):
+        return
+    if parent_job.input_payload.get("retry_source") != "quality_review":
+        return
+    effective_instruction = str(parent_job.input_payload.get("instruction") or "").strip()
+    if not effective_instruction:
+        return
+    slot_id = asset.slot_id or asset.asset_role or ""
+    memory = (session.strategy_preview or {}).get("constraint_escalation_memory") or []
+    if not isinstance(memory, list):
+        memory = []
+    # Check for duplicates
+    for entry in memory:
+        if isinstance(entry, dict) and entry.get("instruction") == effective_instruction:
+            return
+    memory.append({
+        "slot_id": slot_id,
+        "instruction": effective_instruction,
+        "asset_id": asset.id,
+    })
+    # Keep memory bounded
+    memory = memory[-10:]
+    preview = dict(session.strategy_preview or {})
+    preview["constraint_escalation_memory"] = memory
+    session.strategy_preview = preview
+    db.flush()
+
+
+def _load_constraint_escalation_memory(
+    db: Session, session: SessionModel, parent_asset_id: str | None
+) -> list[str]:
+    """Load effective constraint escalation instructions from session memory
+    that are relevant to the slot being regenerated."""
+    memory = (session.strategy_preview or {}).get("constraint_escalation_memory")
+    if not isinstance(memory, list) or not memory:
+        return []
+    # If we know the parent asset, find its slot
+    target_slot = ""
+    if parent_asset_id:
+        parent = db.query(AssetModel).filter(AssetModel.id == parent_asset_id).first()
+        if parent:
+            target_slot = parent.slot_id or parent.asset_role or ""
+    instructions: list[str] = []
+    for entry in memory:
+        if not isinstance(entry, dict):
+            continue
+        instr = str(entry.get("instruction") or "").strip()
+        if not instr:
+            continue
+        entry_slot = str(entry.get("slot_id") or "").strip()
+        # Include slot-specific memory or general memory
+        if not target_slot or not entry_slot or entry_slot == target_slot:
+            instructions.append(instr)
+    return instructions[:3]
 
 
 def _ensure_generation_strategy_preview(db: Session, session: SessionModel, session_images: list[SessionImageModel]) -> dict:
@@ -1333,10 +1617,11 @@ def _prepare_main_render_spec(
     aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
     image_size = _resolve_image_size(aspect_ratio)
     reference_role = str(plan_item.get("reference_role_hint") or slot_id or role)
+    ref_limit = _resolve_fidelity_ref_limit(plan_item, strategy_preview)
     reference_images = select_reference_images_for_role(
         loaded_reference_images,
         reference_role,
-        max_images=int(plan_item.get("reference_image_limit") or 2),
+        max_images=ref_limit,
     )
     prompt_payload = compose_prompt(
         confirmed_copy=confirmed_copy,
@@ -1774,10 +2059,11 @@ def _render_single_asset(
     aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
     image_size = _resolve_image_size(aspect_ratio)
     reference_role = str(plan_item.get("reference_role_hint") or slot_id or role)
+    ref_limit = _resolve_fidelity_ref_limit(plan_item, strategy_preview)
     reference_images = select_reference_images_for_role(
         loaded_reference_images,
         reference_role,
-        max_images=int(plan_item.get("reference_image_limit") or 2),
+        max_images=ref_limit,
     )
     prompt_payload = compose_prompt(
         confirmed_copy=confirmed_copy,
@@ -2390,6 +2676,23 @@ def _submit_image_request_with_retry(
     if last_error is not None:  # pragma: no cover
         raise last_error
     raise AppError("upstream_image_error", "unknown asset submission error", 502)
+
+
+def _resolve_fidelity_ref_limit(plan_item: dict, strategy_preview: dict) -> int:
+    """Resolve reference image limit from plan_item or strategy_preview fidelity tier."""
+    explicit_limit = plan_item.get("reference_image_limit")
+    if explicit_limit:
+        return int(explicit_limit)
+    fidelity_tier = str(
+        (strategy_preview.get("prompt_plan", {}) or {}).get("fidelity_tier")
+        or (strategy_preview.get("analysis_snapshot", {}) or {}).get("fidelity_tier")
+        or "standard"
+    ).strip().lower()
+    if fidelity_tier == "critical":
+        return 4
+    elif fidelity_tier == "high":
+        return 3
+    return 2
 
 
 def _resolve_image_size(aspect_ratio: str) -> str:
