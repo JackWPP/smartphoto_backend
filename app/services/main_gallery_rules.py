@@ -437,6 +437,10 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": False,
         "allow_certificate_elements": False,
         "allow_compare_overlay": False,
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": [],
+        "negative_prompt_additions": [],
         "constraints": ["文案应保持短句，避免信息卡海报化", "优先保证商品保真，不要为了文字牺牲产品结构"],
     },
     "1688": {
@@ -446,9 +450,14 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": True,
         "allow_certificate_elements": True,
         "allow_compare_overlay": True,
+        "hero_text_overlay": "dense",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["侵权品牌商标"],
+        "negative_prompt_additions": [],
         "constraints": [
             "中文短句允许更密，但每屏只保留1个核心主标题和少量佐证信息",
             "允许认证、参数、证书、对比优势等导购型元素",
+            "首图需要一眼说明产品是什么、解决什么问题",
             *simplified_chinese_visible_copy_constraints(),
         ],
     },
@@ -459,6 +468,10 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": True,
         "allow_certificate_elements": True,
         "allow_compare_overlay": True,
+        "hero_text_overlay": "dense",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["侵权品牌商标", "绝对化用语"],
+        "negative_prompt_additions": [],
         "constraints": [
             "中文短句允许较密集，强调点击率和利益点承接",
             "允许理由卡、能力卡和适度的销售导向文案",
@@ -472,7 +485,17 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": False,
         "allow_certificate_elements": True,
         "allow_compare_overlay": False,
-        "constraints": ["Visible text must be concise English and should remain sparse.", "Avoid domestic ecommerce badges or over-dense local platform UI styling."],
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["中文文案泄漏", "domestic_ecommerce_badges"],
+        "negative_prompt_additions": [
+            "Do NOT include any Chinese characters in newly added copy or text overlays.",
+        ],
+        "constraints": [
+            "Visible text must be concise English and should remain sparse.",
+            "Avoid domestic ecommerce badges or over-dense local platform UI styling.",
+            "Preserve original Chinese brand marks on the product body, but all added copy must be English only.",
+        ],
     },
     "amazon": {
         "id": "amazon",
@@ -481,7 +504,19 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": False,
         "allow_certificate_elements": False,
         "allow_compare_overlay": False,
-        "constraints": ["Prefer cleaner hero images and sparse text overlays.", "Avoid badge-heavy or collage-heavy compositions."],
+        "hero_text_overlay": "forbidden",
+        "white_bg_mandatory": True,
+        "prohibited_elements": ["price_tags", "promotional_stickers", "watermarks", "qr_codes", "shipping_info"],
+        "negative_prompt_additions": [
+            "Do NOT add any text, logo, or watermark on the main/hero image.",
+            "Do NOT include price tags, shipping info, or promotional badges.",
+        ],
+        "constraints": [
+            "Hero image MUST be pure white background with product only, NO text overlay.",
+            "Product should fill at least 85% of the image frame on white background images.",
+            "All subsequent images may have minimal, clean English text.",
+            "Avoid collage-heavy or badge-heavy compositions.",
+        ],
     },
     "temu": {
         "id": "temu",
@@ -490,12 +525,182 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "allow_dense_copy": False,
         "allow_certificate_elements": False,
         "allow_compare_overlay": False,
-        "constraints": ["Keep the layout simple and high-contrast for quick mobile scanning.", "Avoid certificate walls or dense information blocks."],
+        "hero_text_overlay": "forbidden",
+        "white_bg_mandatory": True,
+        "prohibited_elements": ["price_tags", "promotional_stickers", "watermarks"],
+        "negative_prompt_additions": [
+            "Do NOT add text overlay on the hero image.",
+        ],
+        "constraints": [
+            "Keep the layout simple and high-contrast for quick mobile scanning.",
+            "Hero image prefers pure white background with product only.",
+            "Avoid certificate walls or dense information blocks.",
+        ],
+    },
+    "jd": {
+        "id": "jd",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "allow_dense_copy": True,
+        "allow_certificate_elements": True,
+        "allow_compare_overlay": True,
+        "hero_text_overlay": "allowed",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["绝对化用语", "虚假宣传"],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "京东主图建议白底或浅色背景，产品主体突出。",
+            "文案简洁有力，突出核心卖点和参数。",
+            "允许认证、参数、对比等导购型元素。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
+    },
+    "pdd": {
+        "id": "pdd",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": False,
+        "allow_compare_overlay": False,
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["过度牛皮癣", "大面积水印"],
+        "negative_prompt_additions": [
+            "【绝对禁止】不要生成牛皮癣式密集促销贴纸和角标",
+        ],
+        "constraints": [
+            "拼多多主图简洁清爽，避免过度促销感。",
+            "少量文案辅助即可，不要信息过载。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
+    },
+    "xiaohongshu": {
+        "id": "xiaohongshu",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": False,
+        "allow_compare_overlay": False,
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["硬广感元素", "促销角标", "传统电商排版"],
+        "negative_prompt_additions": [
+            "【绝对禁止】不要生成传统电商硬广风格，不要使用促销角标或信息卡海报排版",
+        ],
+        "constraints": [
+            "小红书风格偏种草、生活化，构图自然真实。",
+            "色调温暖自然，偏生活方式杂志感，避免硬广感。",
+            "文案少而精，融入画面，不要独立文案区块。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
+    },
+    "douyin": {
+        "id": "douyin",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": True,
+        "allow_compare_overlay": True,
+        "hero_text_overlay": "allowed",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["过度PS感"],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "抖音主图风格鲜明有冲击力，适合短视频缩略图场景。",
+            "文案短句有力，一眼抓住注意力。",
+            "允许适度的对比和认证元素强化说服力。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
+    },
+    "tiktok": {
+        "id": "tiktok",
+        "locale": "en-US",
+        "copy_language": "en",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": False,
+        "allow_compare_overlay": False,
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["heavy_retouching", "promotional_stickers"],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "TikTok shop images should feel authentic and vibrant, not over-produced.",
+            "Minimal text, high visual impact, mobile-first layout.",
+            "Avoid heavy retouching or artificial-looking compositions.",
+        ],
+    },
+    "official_site": {
+        "id": "official_site",
+        "locale": "en-US",
+        "copy_language": "en",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": True,
+        "allow_compare_overlay": True,
+        "hero_text_overlay": "allowed",
+        "white_bg_mandatory": False,
+        "prohibited_elements": [],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "Independent site allows more creative freedom in layout and composition.",
+            "Maintain brand consistency and professional quality across all images.",
+            "Text overlays should be clean and well-integrated with the design.",
+        ],
+    },
+    "custom": {
+        "id": "custom",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": False,
+        "allow_compare_overlay": False,
+        "hero_text_overlay": "allowed",
+        "white_bg_mandatory": False,
+        "prohibited_elements": [],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "文案应保持短句，避免信息卡海报化。",
+            "优先保证商品保真，不要为了文字牺牲产品结构。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
     },
 }
 
 
-def get_platform_overlay(platform_id: str | None) -> dict[str, Any]:
+def get_platform_overlay(platform_id: str | None, *, db: Session | None = None) -> dict[str, Any]:
+    """Return the effective platform overlay for prompt assembly.
+
+    Priority: DB PlatformConfigModel (if active) > hardcoded PLATFORM_OVERLAYS > default.
+    """
+    # --- DB-first lookup ---
+    if platform_id and db is not None:
+        try:
+            from app.models.platform_config import PlatformConfigModel
+
+            db_config = (
+                db.query(PlatformConfigModel)
+                .filter(PlatformConfigModel.platform_id == platform_id, PlatformConfigModel.is_active.is_(True))
+                .first()
+            )
+            if db_config:
+                base = {**PLATFORM_OVERLAYS["default"]}
+                base.update({
+                    "id": db_config.platform_id,
+                    "overlay_id": db_config.platform_id,
+                    "copy_language": db_config.copy_language,
+                    "allow_dense_copy": db_config.allow_dense_copy,
+                    "allow_certificate_elements": db_config.allow_certificate_elements,
+                    "allow_compare_overlay": db_config.allow_compare_overlay,
+                    "hero_text_overlay": db_config.hero_text_overlay,
+                    "white_bg_mandatory": db_config.white_bg_mandatory,
+                    "prohibited_elements": db_config.prohibited_elements or [],
+                    "negative_prompt_additions": db_config.negative_prompt_additions or [],
+                    "constraints": db_config.constraints or base.get("constraints", []),
+                })
+                return base
+        except Exception:
+            pass  # Fall through to hardcoded lookup on any DB error
+
+    # --- Hardcoded fallback ---
     overlay = {**PLATFORM_OVERLAYS["default"], **PLATFORM_OVERLAYS.get(platform_id or "", {})}
     overlay["overlay_id"] = overlay.get("id")
     return overlay
@@ -610,7 +815,31 @@ def recommend_expression_mode(
     return (candidates[0] if candidates else "clean_conversion_kv"), "使用默认表达方式推荐。"
 
 
-def expression_metadata(expression_mode: str) -> dict[str, Any]:
+def expression_metadata(expression_mode: str, *, db: Session | None = None, platform_id: str | None = None) -> dict[str, Any]:
+    """Look up expression mode metadata.
+
+    Priority: Rule Pack config_snapshot['expression_library'] > hardcoded EXPRESSION_LIBRARY.
+    """
+    # --- DB-first lookup ---
+    if db is not None and platform_id:
+        try:
+            from app.services.rule_packs import get_harness_config
+
+            harness = get_harness_config(platform_id=platform_id, db=db)
+            db_library = harness.get("expression_library")
+            if isinstance(db_library, dict) and expression_mode in db_library:
+                value = db_library[expression_mode]
+                return {
+                    "expression_mode": expression_mode,
+                    "expression_label": value.get("label", expression_mode),
+                    "rule_modules_used": [str(item) for item in value.get("prompt_modules", []) if str(item).strip()],
+                    "layout_policy": value.get("layout_policy"),
+                    "copy_policy": value.get("copy_policy"),
+                }
+        except Exception:
+            pass
+
+    # --- Hardcoded fallback ---
     value = EXPRESSION_LIBRARY.get(expression_mode, {})
     return {
         "expression_mode": expression_mode,
