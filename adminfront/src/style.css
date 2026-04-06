@@ -1,20 +1,22 @@
 :root {
   color-scheme: dark;
-  --bg: #191513;
-  --bg-soft: #231d1a;
-  --panel: #2b241f;
-  --panel-strong: #332a24;
-  --panel-border: rgba(237, 228, 214, 0.08);
-  --text: #f5efe6;
-  --text-soft: #cabfae;
-  --text-dim: #9f9384;
-  --accent: #d97706;
-  --accent-soft: rgba(217, 119, 6, 0.12);
-  --success: #0f766e;
-  --danger: #b91c1c;
-  --warning: #b45309;
-  --shadow: 0 30px 80px rgba(0, 0, 0, 0.32);
-  font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --bg: #09090b;
+  --bg-soft: #18181b;
+  --panel: rgba(24, 24, 27, 0.5);
+  --panel-strong: rgba(39, 39, 42, 0.7);
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --text: #ffffff;
+  --text-soft: #a1a1aa;
+  --text-dim: #71717a;
+  --accent: #8b5cf6;
+  --accent-soft: rgba(139, 92, 246, 0.15);
+  --accent-hover: #7c3aed;
+  --success: #10b981;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(255, 255, 255, 0.05) inset;
+  font-family: 'Inter', system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 * {
@@ -24,10 +26,11 @@
 body {
   margin: 0;
   min-width: 1280px;
-  background:
-    radial-gradient(circle at top left, rgba(217, 119, 6, 0.18), transparent 32%),
-    radial-gradient(circle at top right, rgba(15, 118, 110, 0.12), transparent 28%),
-    linear-gradient(180deg, #1d1715 0%, #151110 100%);
+  background-color: var(--bg);
+  background-image: 
+    radial-gradient(circle at 15% 50%, rgba(139, 92, 246, 0.12), transparent 25%),
+    radial-gradient(circle at 85% 30%, rgba(16, 185, 129, 0.08), transparent 25%);
+  background-attachment: fixed;
   color: var(--text);
 }
 
@@ -82,7 +85,9 @@ button {
 .console-sidebar {
   padding: 28px 22px;
   border-right: 1px solid var(--panel-border);
-  background: linear-gradient(180deg, rgba(35, 29, 26, 0.96), rgba(24, 20, 17, 0.96));
+  background: rgba(9, 9, 11, 0.4);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   display: grid;
   gap: 24px;
   align-content: start;
@@ -142,8 +147,9 @@ button {
 }
 
 .nav-link.router-link-active {
-  background: linear-gradient(135deg, rgba(217, 119, 6, 0.16), rgba(217, 119, 6, 0.04));
-  border-color: rgba(217, 119, 6, 0.28);
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(139, 92, 246, 0.05));
+  border-color: rgba(139, 92, 246, 0.3);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.1);
 }
 
 .sidebar-footer {
@@ -175,8 +181,9 @@ button {
   align-items: flex-start;
   gap: 24px;
   border-bottom: 1px solid var(--panel-border);
-  background: rgba(29, 24, 21, 0.72);
-  backdrop-filter: blur(18px);
+  background: rgba(9, 9, 11, 0.5);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
   position: sticky;
   top: 0;
   z-index: 5;
@@ -265,10 +272,18 @@ button {
 .surface-pane,
 .metric-card,
 .editor-shell {
-  background: linear-gradient(180deg, rgba(43, 36, 31, 0.92), rgba(31, 25, 22, 0.92));
+  background: var(--panel);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--panel-border);
-  border-radius: 24px;
+  border-top: 1px solid var(--glass-border);
+  border-radius: 20px;
   box-shadow: var(--shadow);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.surface-card:hover, .metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 1px 4px rgba(255, 255, 255, 0.1) inset;
 }
 
 .surface-card,
@@ -407,9 +422,17 @@ button {
 }
 
 .primary-button {
-  background: linear-gradient(135deg, #d97706, #f59e0b);
-  color: #1c140d;
-  font-weight: 700;
+  background: linear-gradient(135deg, #8b5cf6, #a78bfa);
+  color: #ffffff;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.primary-button:hover {
+  opacity: 0.9;
+  transform: scale(1.02);
 }
 
 .ghost-button,

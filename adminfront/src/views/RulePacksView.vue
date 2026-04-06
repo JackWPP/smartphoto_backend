@@ -2,7 +2,7 @@
   <section class="page-stack">
     <div class="page-toolbar">
       <div>
-        <span class="eyebrow">Rule Packs</span>
+        <span class="eyebrow">规则包管理</span>
         <h3>规则包草稿、版本与发布控制台</h3>
       </div>
       <div class="toolbar-actions">
@@ -38,27 +38,27 @@
       <article class="surface-card">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Rule Pack Editor</span>
+            <span class="eyebrow">规则包编辑器</span>
             <h4>{{ editor.name || '新规则包' }}</h4>
           </div>
-          <span>{{ selectedRulePackId || 'draft' }}</span>
+          <span class="status-chip">{{ selectedRulePackId || '草稿中 (draft)' }}</span>
         </div>
         <form class="form-grid">
-          <label class="field"><span>name</span><input v-model="editor.name" /></label>
-          <label class="field"><span>asset_family</span><input v-model="editor.asset_family" /></label>
-          <label class="field"><span>platform_id</span><input v-model="editor.platform_id" /></label>
-          <label class="field"><span>rule_pack_key</span><input v-model="editor.rule_pack_key" :disabled="Boolean(selectedRulePackId)" /></label>
-          <label class="field"><span>operator_note</span><textarea v-model="editor.operator_note" rows="3" placeholder="说明规则包变更原因" /></label>
+          <label class="field"><span>名称 (name)</span><input v-model="editor.name" /></label>
+          <label class="field"><span>覆盖资产族 (asset_family)</span><input v-model="editor.asset_family" /></label>
+          <label class="field"><span>挂载平台 (platform_id)</span><input v-model="editor.platform_id" placeholder="选填，如为空则适用全局" /></label>
+          <label class="field"><span>标识键 (rule_pack_key)</span><input v-model="editor.rule_pack_key" :disabled="Boolean(selectedRulePackId)" /></label>
+          <label class="field"><span>修改备注 (operator_note)</span><textarea v-model="editor.operator_note" rows="3" placeholder="说明规则包变更原因" /></label>
         </form>
-        <JsonEditor v-model="editor.config_snapshot_json" title="config_snapshot" :rows="14" />
-        <div class="toolbar-actions">
+        <JsonEditor v-model="editor.config_snapshot_json" title="完整配置快照 (config_snapshot)" :rows="14" />
+        <div class="toolbar-actions" style="margin-top: 12px;">
           <button class="primary-button" @click="saveRulePack">{{ selectedRulePackId ? '保存草稿' : '创建规则包' }}</button>
-          <button class="ghost-button" :disabled="!selectedRulePackId" @click="publishRulePack">发布</button>
-          <button class="ghost-button" :disabled="!selectedRulePackId" @click="cloneRulePack">克隆</button>
-          <button class="ghost-button" :disabled="!selectedRulePackId" @click="archiveRulePack">归档</button>
+          <button class="ghost-button" :disabled="!selectedRulePackId" @click="publishRulePack">发布当前版本</button>
+          <button class="ghost-button" :disabled="!selectedRulePackId" @click="cloneRulePack">克隆该规则包</button>
+          <button class="ghost-button" :disabled="!selectedRulePackId" @click="archiveRulePack">归档/禁用</button>
         </div>
 
-        <div class="panel-grid">
+        <div class="panel-grid" style="margin-top: 24px;">
           <div class="surface-pane">
             <div class="surface-card__header">
               <h4>版本历史</h4>
@@ -69,24 +69,24 @@
                   <strong>v{{ item.version_no }}</strong>
                   <small>{{ item.created_at }}</small>
                 </div>
-                <span class="status-chip">{{ item.is_published ? 'published' : 'draft' }}</span>
+                <span class="status-chip">{{ item.is_published ? '已发布 (published)' : '草稿 (draft)' }}</span>
               </div>
             </div>
           </div>
           <div class="surface-pane">
             <div class="surface-card__header">
-              <h4>版本对照</h4>
+              <h4>版本对照代码</h4>
             </div>
             <pre>{{ prettyJson(compareVersion?.config_snapshot) }}</pre>
           </div>
         </div>
 
-        <div class="surface-pane">
+        <div class="surface-pane" style="margin-top: 24px;">
           <div class="surface-card__header">
-            <h4>Sample Session Strategy Preview</h4>
+            <h4>策略结构预览测试</h4>
           </div>
-          <div class="toolbar-actions">
-            <input v-model="previewSessionId" class="compact-input" placeholder="sample session_id" />
+          <div class="toolbar-actions" style="margin-bottom: 12px;">
+            <input v-model="previewSessionId" class="compact-input" placeholder="输入测试用的 Session ID" />
             <button class="ghost-button" @click="loadSampleStrategyPreview">重建该 Session 策略预览</button>
           </div>
           <pre>{{ prettyJson(samplePreview) }}</pre>

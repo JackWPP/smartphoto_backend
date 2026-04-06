@@ -48,15 +48,16 @@ const router = useRouter()
 const route = useRoute()
 
 const navItems = [
-  { to: '/overview', label: 'Overview', kicker: '01', description: '运行概览、趋势与待处理事项' },
-  { to: '/sessions', label: 'Sessions', kicker: '02', description: 'Session 干预与结果追踪' },
-  { to: '/jobs', label: 'Jobs', kicker: '03', description: '任务、事件时间线与重试' },
-  { to: '/assets', label: 'Assets', kicker: '04', description: '资产预览、归档与重生成' },
-  { to: '/prompts', label: 'Prompts', kicker: '05', description: 'Prompt Preset 管理' },
-  { to: '/category-catalog', label: 'Category Catalog', kicker: '06', description: '全局品类库配置与启停' },
-  { to: '/rule-packs', label: 'Rule Packs', kicker: '07', description: '规则包草稿、版本与发布' },
-  { to: '/audit', label: 'Audit', kicker: '08', description: '高风险操作审计追踪' },
-  { to: '/system', label: 'System', kicker: '09', description: '运行时与模型/队列观测' },
+  { to: '/overview', label: '系统概览', kicker: '01', description: '运行概览、趋势与待处理事项' },
+  { to: '/sessions', label: '会话跟踪', kicker: '02', description: 'Session 干预与结果追踪' },
+  { to: '/jobs', label: '任务队列', kicker: '03', description: '任务、事件时间线与重试' },
+  { to: '/assets', label: '素材管理', kicker: '04', description: '资产预览、归档与重生成' },
+  { to: '/platform-configs', label: '平台策略体系', kicker: '05', description: '各重点电商平台全局配置和约束' },
+  { to: '/prompts', label: 'Prompt模板', kicker: '06', description: 'Prompt Preset 管理' },
+  { to: '/category-catalog', label: '品类库配置', kicker: '07', description: '全局品类库配置与启停' },
+  { to: '/rule-packs', label: '生成规则包', kicker: '08', description: '规则包草稿、版本与发布' },
+  { to: '/audit', label: '权限与审计', kicker: '09', description: '高风险操作审计追踪' },
+  { to: '/system', label: '系统观测', kicker: '10', description: '运行时与模型/队列观测' },
 ]
 
 async function logout() {
