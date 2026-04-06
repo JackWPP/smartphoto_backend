@@ -38,6 +38,11 @@ class AssetModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     generation_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     status: Mapped[str] = mapped_column(String(32), default="ready", index=True)
+    quality_status: Mapped[str] = mapped_column(String(32), default="unchecked", index=True)
+    quality_scores: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    quality_review_job_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), nullable=True, index=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     visibility_status: Mapped[str] = mapped_column(String(32), default="visible", index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
