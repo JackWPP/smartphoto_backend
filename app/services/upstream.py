@@ -173,6 +173,16 @@ class WhataiClient:
                         "evidence_scores 必须包含 structure,proportion,scene,text，取值 0-100。"
                         "risk_flags 必须是数组，用于描述透明结构、控制面板、尺寸敏感、场景落地等风险。"
                         "selling_point_entities 必须是数组，只保留真实卖点实体，例如宠物、控制面板、透明水箱、滤芯。"
+                        "输出字段额外必须包含：fidelity_tier,product_identity_anchor,component_registry,image_semantic_tags。"
+                        "fidelity_tier 只能是 critical/high/standard/creative，表示当前商品需要多高级别的外观保真。"
+                        "涉及控制面板、精密结构、透明部件、机械组件的产品应为 critical；普通家电/日用品为 high；"
+                        "简单造型产品为 standard；纯设计/艺术类为 creative。"
+                        "product_identity_anchor 必须包含 brand_marks(品牌标识位置列表), "
+                        "control_interfaces(控制界面/面板/按键描述), distinguishing_geometry(辨识性几何特征), "
+                        "color_palette_hex(主体色 HEX 色号数组,至少2色)。"
+                        "component_registry 必须是数组，每项包含 name(部件名), position(位置描述), movable(bool是否可拆卸)。"
+                        "image_semantic_tags 必须是数组，每项包含 image_id 和 tags "
+                        "(如 main_body, accessory, front_panel, side_view, internal_structure, packaging, lifestyle_scene)。"
                         "如果某个候选品类置信度低，请在 reason 中明确指出不确定原因。"
                         "不要输出思考过程、推理过程、内部规划标签或流程说明。"
                         "copy_draft 和 example_caption 必须像可直接交给用户编辑或继续生成的最终候选，不要输出中间想法。"
@@ -1130,7 +1140,7 @@ class WhataiClient:
                 502,
             )
         headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
-        files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:2]]
+        files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:8]]
         data = {
             "model": self.settings.whatai_image_model,
             "prompt": prompt,
