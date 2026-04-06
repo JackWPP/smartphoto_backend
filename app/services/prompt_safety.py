@@ -91,7 +91,7 @@ def sanitize_surface_text(value: Any) -> str:
     text = _LABEL_PREFIX_RE.sub("", text)
     text = _INTERNAL_PROMPT_TERM_RE.sub("", text)
     text = _SEPARATOR_RE.sub(" ", text)
-    text = re.sub(r"\s+", " ", text).strip(" |：:;；-")
+    text = re.sub(r"[^\S\n]+", " ", text).strip(" |：:;；-\n")
     if not text:
         return ""
     if contains_internal_prompt_term(text):

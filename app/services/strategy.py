@@ -104,7 +104,7 @@ def build_strategy_preview(
     profile = platform_profile(active_platform_id)
     platform_name = profile.name if profile else active_platform_id
     aspect_ratio = profile.default_aspect_ratio if profile else "1:1"
-    overlay = get_platform_overlay(active_platform_id)
+    overlay = get_platform_overlay(active_platform_id, db=db)
 
     loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
     loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
@@ -256,7 +256,7 @@ def normalize_strategy_preview(
         parameter_snapshot=parameter_snapshot or {},
         active_platform_id=active_platform_id,
         planner_instruction=strategy_preview.get("planner_instruction"),
-        platform_overlay=normalized.get("platform_overlay") or get_platform_overlay(active_platform_id),
+        platform_overlay=normalized.get("platform_overlay") or get_platform_overlay(active_platform_id, db=db),
     )
     normalized["image_count"] = len(normalized["asset_plan"])
     return normalized
@@ -371,15 +371,72 @@ def _build_prompt_plan(
         for plan_item in asset_plan
     ]
 
-    if not llm_plan:
-        return base_plan
+    if llm_plan:
+        base_by_slot = {item["slot_id"]: item for item in base_plan}
+        merged: list[dict[str, Any]] = []
+        for plan_item in asset_plan:
+            slot_id = str(plan_item["slot_id"])
+            merged.append(_merge_prompt_plan_item(base_by_slot[slot_id], llm_plan.get(slot_id) or llm_plan.get(plan_item["role"])))
+        base_plan = merged
 
-    base_by_slot = {item["slot_id"]: item for item in base_plan}
-    merged: list[dict[str, Any]] = []
-    for plan_item in asset_plan:
-        slot_id = str(plan_item["slot_id"])
-        merged.append(_merge_prompt_plan_item(base_by_slot[slot_id], llm_plan.get(slot_id) or llm_plan.get(plan_item["role"])))
-    return merged
+    return _allocate_exclusive_selling_points(base_plan, confirmed_copy)
+
+
+_SELLING_POINT_ELIGIBLE_SLOTS = frozenset({
+    "selling_point", "closing_selling_point", "reason_why",
+    "proof_authority", "benefit_scene_or_compare",
+})
+
+
+def _allocate_exclusive_selling_points(
+    prompt_plan: list[dict[str, Any]],
+    confirmed_copy: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Distribute selling points exclusively across eligible slots.
+
+    Each eligible slot gets a unique subset of selling points so the
+    generated gallery doesn't repeat the same point on every image.
+    """
+    all_points = _split_points(confirmed_copy.get("selling_points"))
+    if len(all_points) < 2:
+        return prompt_plan
+
+    eligible_indices = [
+        i for i, item in enumerate(prompt_plan)
+        if item.get("slot_id") in _SELLING_POINT_ELIGIBLE_SLOTS
+        or item.get("slot_family") in _SELLING_POINT_ELIGIBLE_SLOTS
+    ]
+    if not eligible_indices:
+        return prompt_plan
+
+    max_per_slot = 2
+    assigned: dict[int, list[str]] = {}
+    point_idx = 0
+    for slot_idx in eligible_indices:
+        batch = []
+        for _ in range(max_per_slot):
+            if point_idx < len(all_points):
+                batch.append(all_points[point_idx])
+                point_idx += 1
+        if batch:
+            assigned[slot_idx] = batch
+        if point_idx >= len(all_points):
+            point_idx = 0
+
+    for slot_idx, points in assigned.items():
+        item = prompt_plan[slot_idx]
+        others = [p for idx_points in assigned.values() for p in idx_points if idx_points is not points]
+        other_text = "、".join(others[:4]) if others else ""
+
+        item["assigned_selling_points"] = points
+        item["selling_point_binding"]["assigned_points"] = points
+
+        exclusivity_constraint = f"本图聚焦卖点：{'、'.join(points)}。"
+        if other_text:
+            exclusivity_constraint += f" 不要重复其他图已分配的卖点（{other_text}）。"
+        item["resolved_constraints"].append(exclusivity_constraint)
+
+    return prompt_plan
 
 
 def _plan_main_gallery(
@@ -975,6 +1032,12 @@ def _truth_contract_constraints(slot_id: str, truth_contract: dict[str, Any]) ->
     if not isinstance(truth_contract, dict):
         return []
     constraints: list[str] = []
+
+    # --- v2: Fidelity tier top-priority constraint ---
+    fidelity_tier = str(truth_contract.get("fidelity_tier") or "").strip().lower()
+    if fidelity_tier in ("critical", "high"):
+        constraints.append("【绝对禁止】不要重建/美化/重新设计产品外观，必须严格保持参考图中产品的真实外观")
+
     immutable = [repair_broken_text(item) for item in truth_contract.get("immutable_features", []) if repair_broken_text(item)]
     forbidden = [repair_broken_text(item) for item in truth_contract.get("forbidden_drift", []) if repair_broken_text(item)]
     entities = [repair_broken_text(item) for item in truth_contract.get("required_entities", []) if repair_broken_text(item)]
@@ -982,6 +1045,24 @@ def _truth_contract_constraints(slot_id: str, truth_contract: dict[str, Any]) ->
         constraints.append("主体不可漂移：" + "；".join(immutable[:3]))
     if forbidden:
         constraints.append("关键结构不可换位：" + "；".join(forbidden[:3]))
+
+    # --- v2: Component-level locks ---
+    component_locks = truth_contract.get("component_locks") if isinstance(truth_contract.get("component_locks"), list) else []
+    for lock in component_locks[:5]:
+        if isinstance(lock, dict) and lock.get("component"):
+            pos = f"（位置：{lock['position']}）" if lock.get("position") else ""
+            constraints.append(f"【绝对禁止】不要改变 {lock['component']} 的形状或位置{pos}")
+
+    # --- v2: Color palette preservation ---
+    color_hex = truth_contract.get("color_palette_hex") if isinstance(truth_contract.get("color_palette_hex"), list) else []
+    if color_hex:
+        constraints.append(f"【绝对禁止】产品颜色必须保持为 {'、'.join(str(c) for c in color_hex[:4])}，不要改变产品的颜色、材质或表面光泽")
+
+    # --- v2: Brand marks preservation ---
+    brand_marks = truth_contract.get("brand_marks_preserve") if isinstance(truth_contract.get("brand_marks_preserve"), list) else []
+    if brand_marks:
+        constraints.append(f"保留产品上的品牌标识：{'、'.join(str(m) for m in brand_marks[:3])}，不要删除或替换")
+
     if truth_contract.get("scale_anchor"):
         constraints.append("比例与厚薄关系按参考图：" + repair_broken_text(truth_contract.get("scale_anchor")))
     if not truth_contract.get("allow_structure_extrapolation", True):

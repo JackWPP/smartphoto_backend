@@ -9,7 +9,7 @@ from app.services.copy_normalization import (
 from app.services.prompt_safety import prompt_matrix_guardrails, sanitize_main_copy_blocks
 from app.services.prompt_specs import get_prompt_role_spec
 from app.services.strategy import find_prompt_plan_item
-from app.services.visible_copy_policy import requires_simplified_chinese_visible_copy, simplified_chinese_visible_copy_constraints
+from app.services.visible_copy_policy import platform_language_hard_constraint, requires_simplified_chinese_visible_copy, simplified_chinese_visible_copy_constraints
 
 PROMPT_BLOCK_ORDER = [
     "goal",
@@ -148,6 +148,8 @@ def format_prompt_blocks(
     platform_overlay: dict[str, Any] | None = None,
 ) -> str:
     parts = [f"请生成一张适用于电商主图组的商品图片，参考画幅比例 {aspect_ratio}。"]
+    overlay_id = (platform_overlay or {}).get("overlay_id")
+    parts.append(platform_language_hard_constraint(overlay_id))
     if final_prompt_base:
         parts.append(f"核心生成目标：{final_prompt_base}")
     if fidelity_rule:
@@ -336,7 +338,11 @@ def _compose_background_block(slot_id: str, asset_role: str, plan: dict[str, Any
         return "背景应服务于理由卡、机制卡或能力摘要，不做空洞纯白，也不要重复生活场景。"
     if slot_id == "proof_authority":
         return "背景只服务于参数标签、证书样式、面板特写或结构放大，不要人物和大场景。"
-    return "背景简洁、干净、层次明确，允许轻微摄影棚氛围，不要复杂拼贴。"
+    return (
+        "背景采用柔和渐变单色调，从画面中心向四周自然过渡至更深色调，"
+        "模拟专业棚拍无缝背景纸效果。不要使用纹理、图案或场景元素。"
+        "如果有反射面，只保留主体底部极轻微镜面反射（反射不超过主体高度的 10%）。"
+    )
 
 
 def _compose_style_block(style: str, plan: dict[str, Any], prompt_plan: dict[str, Any]) -> str:
@@ -344,9 +350,19 @@ def _compose_style_block(style: str, plan: dict[str, Any], prompt_plan: dict[str
     lighting_rule = _clean_text(prompt_plan.get("lighting_rule"))
     platform_context = _clean_text(prompt_plan.get("platform_context"))
     if platform_context:
-        prefix = f"整体采用 {style}，符合 {platform_context}，保持 {role_style} 应有的电商审美与统一质感。"
+        prefix = (
+            f"整体采用 {style}，符合 {platform_context}。"
+            f"光影设计：主体采用柔和环绕光与一侧主光源的三点布光法，"
+            f"保持阴影面积不超过主体 15%，高光区域需突出材质质感但不过曝。"
+            f"空间感：主体占画面 50-65% 面积，周围预留均匀留白空间，不要让主体顶边或贴边。"
+        )
     else:
-        prefix = f"整体采用 {style}，保持 {role_style} 应有的电商审美与统一质感。"
+        prefix = (
+            f"整体采用 {style}。"
+            f"光影设计：主体采用柔和环绕光与一侧主光源的三点布光法，"
+            f"保持阴影面积不超过主体 15%，高光区域需突出材质质感但不过曝。"
+            f"空间感：主体占画面 50-65% 面积，周围预留均匀留白空间，不要让主体顶边或贴边。"
+        )
     if lighting_rule:
         return _join_unique_clauses([prefix, lighting_rule])
     return prefix
@@ -390,7 +406,11 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
     role_constraints.extend(priority_resolved_constraints)
     role_constraints.extend(prompt_matrix_guardrails())
     if text_policy == "no_text":
-        role_constraints.append("不要生成海报文字、标题字、角标、贴纸或说明文案")
+        role_constraints.extend([
+            "不要生成任何可读文字，包括标题、副标题、标签、角标、品牌名、型号、参数数字",
+            "画面中唯一允许出现文字的位置是产品本体上原有的铭牌、按键标识或丝印",
+            "如果不确定是否应该有文字，选择不加文字",
+        ])
     else:
         role_constraints.append("只允许短标题、短副文案和少量证明信息，不要长段落小字")
     if asset_role == "white_bg":
@@ -423,7 +443,20 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
     if asset_role in {"scene", "benefit_scene_or_compare"} and _clean_text(truth_contract.get("scene_grounding_rule")):
         role_constraints.append(_clean_text(truth_contract.get("scene_grounding_rule")))
     role_constraints.extend(trailing_resolved_constraints)
-    return "；".join(_unique_texts(role_constraints)[:14])
+    platform_overlay = prompt_plan.get("platform_overlay") if isinstance(prompt_plan.get("platform_overlay"), dict) else {}
+    prohibited = [str(item) for item in platform_overlay.get("prohibited_elements", []) if str(item).strip()]
+    if prohibited:
+        role_constraints.append(f"【平台禁止元素】不要出现：{'、'.join(prohibited)}")
+    for neg in platform_overlay.get("negative_prompt_additions", []):
+        neg_text = str(neg).strip()
+        if neg_text:
+            role_constraints.append(neg_text)
+    hero_text_policy = str(platform_overlay.get("hero_text_overlay") or "minimal")
+    if slot_id in ("hero", "primary_kv") and hero_text_policy == "forbidden":
+        role_constraints.append("当前平台首图严禁任何文字覆盖，包括标题、副标题、角标和品牌名")
+    if platform_overlay.get("white_bg_mandatory") and asset_role == "white_bg":
+        role_constraints.append("当前平台强制要求白底图，背景必须为纯白 #FFFFFF，无任何渐变或灰度")
+    return "；".join(_unique_texts(role_constraints)[:18])
 
 
 def _compose_instruction_block(instruction: str | None) -> str:
