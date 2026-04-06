@@ -5,6 +5,7 @@ import pytest
 
 from app.core.errors import AppError
 from app.db import session as db_session
+from app.models.asset import AssetModel
 from app.models.job import JobModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
@@ -15,6 +16,7 @@ from app.services.pipeline import (
     _render_single_detail_panel,
     _submit_render_specs,
     run_analysis_job,
+    run_quality_review_job,
 )
 from app.services.reference_images import LoadedReferenceImage
 from app.workers.tasks import execute_job
@@ -1157,3 +1159,137 @@ def test_render_single_asset_does_not_run_fidelity_validation_retry(monkeypatch)
     assert generate_calls["count"] == 1
     assert fidelity_calls["count"] == 0
     assert rendered["generation_snapshot"]["fidelity_validation"] is None
+
+
+def test_execute_job_dispatches_quality_retry_to_generation_main_queue(monkeypatch, setup_database):
+    dispatched: list[tuple[str, str]] = []
+
+    with db_session.SessionLocal() as db:
+        session = SessionModel(service_id="default", status="completed", current_step=6, selected_platform_ids=["temu"])
+        db.add(session)
+        db.flush()
+        job = JobModel(
+            session_id=session.id,
+            service_id="default",
+            job_type="quality_review",
+            status="queued",
+            progress=0,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+            input_payload={"asset_ids": []},
+        )
+        db.add(job)
+        db.commit()
+        job_id = job.id
+
+    monkeypatch.setattr("app.workers.tasks.run_quality_review_job", lambda *_args, **_kwargs: {"retry_job_ids": ["retry-1"]})
+    monkeypatch.setattr(
+        "app.services.dispatcher.dispatch_job",
+        lambda job_id, queue: dispatched.append((job_id, queue)),
+    )
+
+    execute_job.run(job_id)
+
+    assert dispatched == [("retry-1", "q.generation.main")]
+
+
+def test_quality_review_retry_job_inherits_service_id(monkeypatch, setup_database):
+    class DummyStorage:
+        def read_file(self, _path: str) -> bytes:
+            return b"fake-image-bytes"
+
+    class DummyClient:
+        def inspect_image_fidelity(self, **_kwargs):
+            return {"passed": False, "issues": ["control_panel_misplaced"]}
+
+        def inspect_visible_text_language(self, **_kwargs):
+            return {"passed": True}
+
+    monkeypatch.setattr("app.services.pipeline.get_storage_adapter", lambda: DummyStorage())
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+    monkeypatch.setattr(
+        "app.services.pipeline.get_settings",
+        lambda: SimpleNamespace(
+            async_quality_retry_enabled=True,
+            async_quality_retry_max_per_session=3,
+            color_validation_enabled=False,
+            color_validation_delta_e_threshold=25.0,
+        ),
+    )
+
+    with db_session.SessionLocal() as db:
+        session = SessionModel(
+            service_id="partner-b",
+            status="completed",
+            current_step=6,
+            selected_platform_ids=["temu"],
+            active_platform_id="temu",
+            latest_result_version=1,
+        )
+        db.add(session)
+        db.flush()
+
+        parent_job = JobModel(
+            session_id=session.id,
+            service_id="partner-b",
+            job_type="generate_gallery",
+            status="succeeded",
+            progress=100,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+        )
+        db.add(parent_job)
+        db.flush()
+
+        asset = AssetModel(
+            session_id=session.id,
+            job_id=parent_job.id,
+            round_no=1,
+            version_no=1,
+            parent_asset_id=None,
+            platform_id="temu",
+            asset_family="main_gallery",
+            asset_kind="panel",
+            asset_role="hero",
+            slot_id="hero",
+            expression_mode="click_through_headline",
+            rule_pack_id="alibaba_core_5_slot",
+            display_order=1,
+            image_url="/storage/fake.jpg",
+            thumbnail_url=None,
+            width=1200,
+            height=1200,
+            mime_type="image/jpeg",
+            file_size=1024,
+            prompt_snapshot=None,
+            edit_instruction=None,
+            generation_snapshot={},
+            status="ready",
+            quality_status="pending_async_review",
+        )
+        db.add(asset)
+        db.flush()
+
+        review_job = JobModel(
+            session_id=session.id,
+            service_id="partner-b",
+            job_type="quality_review",
+            status="queued",
+            progress=0,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+            input_payload={"asset_ids": [asset.id], "platform_id": "temu"},
+        )
+        db.add(review_job)
+        db.commit()
+        review_job_id = review_job.id
+
+    with db_session.SessionLocal() as db:
+        result = run_quality_review_job(db, review_job_id)
+        assert isinstance(result, dict)
+        retry_ids = result.get("retry_job_ids", [])
+        assert len(retry_ids) == 1
+        retry_job = db.query(JobModel).filter(JobModel.id == retry_ids[0]).one()
+        assert retry_job.service_id == "partner-b"

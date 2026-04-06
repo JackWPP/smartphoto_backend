@@ -340,6 +340,7 @@
   - 每次生成都新写文件，不覆盖旧文件
   - `version_no` 单调递增
   - 单图重生成写 `parent_asset_id`
+  - 历史版本回滚（`POST /assets/{id}/restore`）也必须物化为新的 `version_no`
   - 被替代图标记为 `superseded`
 - 详情页补充：
   - `assets.asset_family` 区分 `main_gallery | detail_page`
@@ -355,16 +356,18 @@
   - Redis 不可用时降级到 DB 检查
   - 详情页 generation 也参与同一套互斥，不允许和主图 generation 并行
 
-## 4. 三类 regenerate 语义对比
+## 4. 四类版本变更语义对比
 | 类型 | 入口 | 作用范围 | round_no | version_no | parent_asset_id |
 |---|---|---|---|---|---|
 | `global_edit` | `POST /sessions/{id}/results/global-edit` | 当前实现按整组重做 | +1 | +1 | 否 |
 | `regenerate_gallery` | `POST /sessions/{id}/results/regenerate` | 整组重做 | +1 | +1 | 否 |
 | `regenerate_asset` | `POST /assets/{id}/regenerate` | 单图重做 | 不变 | +1 | 是 |
+| `restore_asset` | `POST /assets/{id}/restore` | 历史图回滚到当前 | 不变 | +1 | 否 |
 
 补充：
 - 当 `/assets/{id}/regenerate` 命中 `detail_page/panel` 时，内部 job_type 为 `regenerate_detail_panel`，语义同样是“局部重做 + 新版本完整物化”。
 - `regenerate_asset` 与 `regenerate_detail_panel` 的 carry-forward 基线都必须取 `parent_asset.version_no`，不能直接取当前 `latest_result_version`。
+- `restore_asset` 会以“当前最新可见版本”为基线，替换目标槽位（或 stitched 资产）后物化完整新版本，不能直接在旧版本上改 `visibility_status`。
 
 ## 5. 时序图
 
@@ -437,6 +440,7 @@ sequenceDiagram
 ```
 
 - Worker 在物化新版本时，必须从 `parent_asset.version_no` 读取 carry-forward 资产；如果用户是在历史版本上发起单图或单 panel 重生成，未改动槽位必须继续继承该历史版本。
+- `POST /assets/{asset_id}/restore` 的落库语义与上面一致：必须生成完整新版本，保证 `GET /sessions/{id}/results` 与 `GET /sessions/{id}/detail-pages/results` 任意 `version_no` 都可独立回看。
 
 ## 6. 一致性与可追溯约束
 1. Job 是唯一执行真相：任何生图动作都必须先建 job。

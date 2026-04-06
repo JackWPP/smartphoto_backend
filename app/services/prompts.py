@@ -27,6 +27,52 @@ BASE_CONSTRAINTS = [
     "不要出现无关产品、重复主体或杂乱配件",
 ]
 
+# Maps prompt_module names (from EXPRESSION_LIBRARY) to generation directives.
+# These are appended to the constraints block when the active expression_mode
+# specifies the module.  Keep each directive short & non-overlapping.
+PROMPT_MODULE_DIRECTIVES: dict[str, str] = {
+    # --- layout & composition modules ---
+    "core_goal": "",  # handled by the goal block already
+    "clean_background": "背景保持简洁纯净，不要添加复杂场景元素或大面积纹理。",
+    "volume_focus": "主体可略微放大或悬浮呈现，增强产品体积感与存在感。",
+    "soft_scene": "背景融入柔和生活化场景暗示，但不要喧宾夺主，主体仍需绝对清晰。",
+    "premium_style": "整体调性偏高端简约，参考杂志级电商摄影质感。",
+    "scene_focus": "以场景氛围为画面核心，产品自然融入场景中。",
+    "benefit_focus": "画面需明确传达至少一个消费者核心利益点。",
+    "compare_focus": "通过对比关系突出产品优势，对比元素清晰但不杂乱。",
+    "conversion_focus": "构图围绕提升点击转化率设计，核心利益点一眼可见。",
+    "realism_first": "优先真实感，避免过度渲染和夸张特效。",
+    "coverage_focus": "覆盖多个使用场景或适用人群，体现产品适用范围广。",
+    # --- selling point & feature modules ---
+    "single_feature": "聚焦单一卖点，不要同时罗列多个功能。",
+    "feature_matrix": "以矩阵或网格形式呈现多个卖点，每个卖点独立清晰。",
+    "proof_focus": "突出证明性元素（参数、数据、认证），增强说服力。",
+    "soft_proof": "适度融入佐证信息，不要做成硬证据墙。",
+    # --- detail & structure modules ---
+    "detail_focus": "采用近景或微距构图，突出材质纹理和工艺细节。",
+    "texture_focus": "重点表现材质表面质感，光影突出纹理层次。",
+    "structure_focus": "展示产品内部结构或拆解视图，让用户理解产品构造。",
+    "process_focus": "突出工艺流程或制造细节，体现品质感。",
+    # --- white bg modules ---
+    "pure_white": "背景必须纯白无缝，不要任何道具、场景或渐变。",
+    "soft_shadow": "主体底部保留轻微自然投影，增加真实感但不破坏白底纯净度。",
+    "strict_fidelity": "严格保持商品原始外观，不做任何美化、变形或风格化处理。",
+    # --- alibaba / headline modules ---
+    "alibaba_headline": "主标题醒目有力，预留大字标题区，标题承担第一视觉焦点。",
+    "click_focus": "构图强化点击率导向，首屏信息一眼说清产品价值。",
+    "problem_solution": "以问题→解决方案的叙事结构组织画面。",
+    # --- reason / mechanism / proof card modules ---
+    "reason_card": "以理由卡形式呈现，列出 2-3 个选择该产品的理由。",
+    "mechanism_focus": "以机制说明形式展示产品工作原理或有效机制。",
+    "mechanism_card": "以机制卡形式说明产品工作原理或有效机制。",
+    "what_you_get": "以能力摘要形式展现用户购买后获得的核心能力和服务。",
+    "certificate_focus": "突出展示认证证书、检测报告或资质标识。",
+    "lab_focus": "以实验数据、测试场景或检测结果作为佐证核心。",
+    "spec_focus": "突出核心参数指标，用数据说服用户。",
+    # --- closing modules ---
+    "summary_closure": "作为尾屏收束，总结核心购买理由，完成转化闭环。",
+}
+
 
 def compose_prompt(
     confirmed_copy: dict,
@@ -67,6 +113,10 @@ def compose_prompt(
         "constraints": _compose_constraints_block(slot_id, str(plan.get("role") or asset_role), prompt_plan, text_policy),
         "instruction": _compose_instruction_block(instruction),
     }
+    # --- Smart instruction intent parsing: override blocks based on user intent ---
+    instruction_intents = _parse_instruction_intents(instruction)
+    if instruction_intents:
+        blocks = _apply_instruction_overrides(blocks, instruction_intents, instruction)
     prompt_sections_used = [key for key in PROMPT_BLOCK_ORDER if _clean_text(blocks.get(key))]
     if _normalized_text_entries(prompt_plan.get("slot_guardrails")):
         prompt_sections_used.append("slot_guardrails")
@@ -132,6 +182,7 @@ def compose_prompt(
         "truth_contract": prompt_plan.get("truth_contract") or {},
         "resolved_constraints": _normalized_text_entries(prompt_plan.get("resolved_constraints")),
         "copy_safety_notes": copy_safety_notes,
+        "instruction_intents": [k for k, _ in instruction_intents] if instruction_intents else [],
         "sanitized_fields": sanitized_fields,
         "final_prompt": final_prompt,
     }
@@ -191,6 +242,8 @@ def format_prompt_blocks(
         if not value:
             continue
         parts.append(f"{labels[key]}：{value}")
+    # --- Language constraint repeated at end (recency anchor) ---
+    parts.append(platform_language_hard_constraint(overlay_id))
     return " ".join(parts)
 
 
@@ -275,16 +328,28 @@ def _compose_subject_block(
         base += " 产品主体需要承担第一视觉焦点，不能被标题区或背景抢走注意力。"
     if slot_id == "proof_authority":
         base += " 优先围绕面板、参数、结构或证据性细节来组织主体。"
+    # --- Product identity anchors from truth_contract ---
+    truth_contract = prompt_plan.get("truth_contract") if isinstance(prompt_plan.get("truth_contract"), dict) else {}
+    color_hex = [str(c).strip() for c in truth_contract.get("color_palette_hex", []) if str(c).strip()]
+    brand_marks = [str(m).strip() for m in truth_contract.get("brand_marks_preserve", []) if str(m).strip()]
+    identity_parts: list[str] = []
+    if color_hex:
+        identity_parts.append(f"产品主体颜色必须保持为 {', '.join(color_hex[:4])}，不得偏色")
+    if brand_marks:
+        identity_parts.append(f"必须保留以下品牌标识：{'、'.join(brand_marks[:3])}")
+
     if must_keep:
         consistency = _clean_text(prompt_plan.get("global_consistency_note"))
-        scale_anchor = _clean_text((prompt_plan.get("truth_contract") or {}).get("scale_anchor"))
-        if consistency and scale_anchor:
-            return f"{base} 必须保留：{must_keep}。全局一致性锚点：{consistency}。比例锚点：{scale_anchor}"
+        scale_anchor = _clean_text(truth_contract.get("scale_anchor"))
+        suffix_parts = [f"必须保留：{must_keep}"]
         if consistency:
-            return f"{base} 必须保留：{must_keep}。全局一致性锚点：{consistency}"
+            suffix_parts.append(f"全局一致性锚点：{consistency}")
         if scale_anchor:
-            return f"{base} 必须保留：{must_keep}。比例锚点：{scale_anchor}"
-        return f"{base} 必须保留：{must_keep}"
+            suffix_parts.append(f"比例锚点：{scale_anchor}")
+        suffix_parts.extend(identity_parts)
+        return f"{base} {'。'.join(suffix_parts)}"
+    if identity_parts:
+        return f"{base} {'。'.join(identity_parts)}"
     return base
 
 
@@ -404,6 +469,12 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
     ]
     trailing_resolved_constraints = [item for item in resolved_constraints if item not in priority_resolved_constraints]
     role_constraints.extend(priority_resolved_constraints)
+    # --- Expression mode module directives ---
+    rule_modules = [str(m) for m in prompt_plan.get("rule_modules_used", []) if str(m).strip()]
+    for module_name in rule_modules:
+        directive = PROMPT_MODULE_DIRECTIVES.get(module_name)
+        if directive:
+            role_constraints.append(directive)
     role_constraints.extend(prompt_matrix_guardrails())
     if text_policy == "no_text":
         role_constraints.extend([
@@ -436,6 +507,15 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
     role_constraints.extend(_normalized_text_entries(prompt_plan.get("slot_guardrails")))
     role_constraints.extend(_normalized_text_entries(prompt_plan.get("must_avoid")))
     role_constraints.extend(_normalized_text_entries(truth_contract.get("forbidden_drift")))
+    # --- Explicit component-level locks from truth_contract ---
+    for lock in truth_contract.get("component_locks", [])[:6]:
+        if isinstance(lock, dict) and lock.get("component"):
+            comp = str(lock["component"]).strip()
+            pos = str(lock.get("position") or "").strip()
+            if pos:
+                role_constraints.append(f"【绝对禁止】{comp} 必须保持在 {pos}，不得移动、省略或变形")
+            else:
+                role_constraints.append(f"【绝对禁止】{comp} 不得省略或变形，必须与参考图一致")
     if _clean_text(truth_contract.get("scale_anchor")):
         role_constraints.append("比例与厚薄关系按参考图：" + _clean_text(truth_contract.get("scale_anchor")))
     if truth_contract and not truth_contract.get("allow_structure_extrapolation", True):
@@ -456,7 +536,98 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
         role_constraints.append("当前平台首图严禁任何文字覆盖，包括标题、副标题、角标和品牌名")
     if platform_overlay.get("white_bg_mandatory") and asset_role == "white_bg":
         role_constraints.append("当前平台强制要求白底图，背景必须为纯白 #FFFFFF，无任何渐变或灰度")
-    return "；".join(_unique_texts(role_constraints)[:18])
+    return "；".join(_unique_texts(role_constraints)[:24])
+
+
+_INSTRUCTION_INTENT_PATTERNS: list[tuple[str, str, str]] = [
+    # (regex_pattern, intent_key, structured_directive)
+    # --- background ---
+    (r"(?:换|改|用|变|替换).{0,4}白[色底]", "background:pure_white",
+     "背景必须是纯白无缝背景，光线均匀干净，不要任何道具、家具、人物或环境元素。"),
+    (r"(?:换|改|用|变).{0,4}(?:黑[色底]|暗[色底])", "background:dark",
+     "背景采用深色或纯黑色调，产品以浅色高光突出，营造高端质感。"),
+    (r"(?:去掉|移除|不要).{0,4}背景", "background:pure_white",
+     "背景必须是纯白无缝背景，不保留任何场景或道具元素。"),
+    (r"(?:换|改|加|添加).{0,6}场景", "background:real_scene",
+     "背景围绕真实使用场景搭建，环境简洁、自然，不喧宾夺主。"),
+    # --- text / copy ---
+    (r"(?:去掉|移除|删除|不要).{0,4}(?:文[字案]|标题|文案)", "text_policy:no_text",
+     "画面上不要出现任何营销文字、标题或文案覆盖。"),
+    (r"(?:减少|少[一些点]).{0,4}(?:文[字案]|标题|文案)", "text_policy:minimal",
+     "画面上文案控制在极少量，只保留最核心的一句卖点或标题。"),
+    (r"(?:增加|多[一些点加]).{0,4}(?:文[字案]|标题|文案)", "text_policy:dense",
+     "画面上增加文案密度，充分展示卖点和营销信息。"),
+    # --- color ---
+    (r"颜色.{0,4}(?:更深|深一[些点]|加深)", "color:darker",
+     "产品颜色整体加深，保持色相不变，提升视觉厚重感。"),
+    (r"颜色.{0,4}(?:更浅|浅一[些点]|减淡)", "color:lighter",
+     "产品颜色整体减淡，保持色相不变，提升清新通透感。"),
+    (r"颜色.{0,4}(?:更鲜艳|饱和|鲜艳)", "color:saturate",
+     "产品颜色饱和度适度提升，保持自然真实，避免过度渲染。"),
+    # --- angle / composition ---
+    (r"(?:换|改).{0,4}(?:角度|视角|俯视|仰视|侧[面视]|正[面视])", "composition:angle_change",
+     ""),
+    (r"(?:产品|主体).{0,4}(?:放大|更大|占比.*大)", "composition:enlarge",
+     "产品主体在画面中占比增大至 60-75%，保持周边适度留白。"),
+    (r"(?:产品|主体).{0,4}(?:缩小|更小|占比.*小)", "composition:shrink",
+     "产品主体在画面中适当缩小，预留更多空间给场景或文案区域。"),
+    # --- style ---
+    (r"(?:更|偏).{0,4}(?:简约|简洁|极简)", "style:minimal",
+     "整体风格偏极简高端，减少装饰元素，突出产品本身。"),
+    (r"(?:更|偏).{0,4}(?:高级|高端|品质感|质感)", "style:premium",
+     "整体调性偏高端简约，参考杂志级电商摄影质感。"),
+]
+
+
+def _parse_instruction_intents(instruction: str | None) -> list[tuple[str, str]]:
+    """Parse user instruction into (intent_key, directive) pairs."""
+    cleaned = _clean_text(instruction)
+    if not cleaned:
+        return []
+    results: list[tuple[str, str]] = []
+    seen_keys: set[str] = set()
+    for pattern, intent_key, directive in _INSTRUCTION_INTENT_PATTERNS:
+        if intent_key in seen_keys:
+            continue
+        if re.search(pattern, cleaned):
+            results.append((intent_key, directive))
+            seen_keys.add(intent_key)
+    return results
+
+
+def _apply_instruction_overrides(
+    blocks: dict[str, str],
+    intents: list[tuple[str, str]],
+    instruction: str | None,
+) -> dict[str, str]:
+    """Apply parsed intents to override prompt blocks. Returns modified blocks."""
+    blocks = dict(blocks)
+    extra_constraints: list[str] = []
+    for intent_key, directive in intents:
+        category, _ = intent_key.split(":", 1)
+        if category == "background" and directive:
+            blocks["background"] = directive
+        elif category == "text_policy":
+            # Text policy changes are conveyed as constraints
+            extra_constraints.append(directive)
+        elif category == "color" and directive:
+            extra_constraints.append(directive)
+        elif category == "composition" and directive:
+            extra_constraints.append(directive)
+        elif category == "style" and directive:
+            extra_constraints.append(directive)
+    # Append extra constraints to the existing constraints block
+    if extra_constraints:
+        existing = _clean_text(blocks.get("constraints"))
+        addition = "；".join(extra_constraints)
+        if existing:
+            blocks["constraints"] = f"{existing}；{addition}"
+        else:
+            blocks["constraints"] = addition
+    # The instruction block still carries the original text for transparency
+    cleaned = _clean_text(instruction)
+    blocks["instruction"] = cleaned or "无额外修改要求。"
+    return blocks
 
 
 def _compose_instruction_block(instruction: str | None) -> str:
@@ -617,7 +788,9 @@ def _copy_policy_for_slot(slot_id: str, text_policy: str, copy_blocks: dict[str,
 def _copy_policy_summary(policy: dict[str, Any]) -> str:
     if not policy.get("allow_visible_copy"):
         return "不生成图上文案"
-    return str(policy.get("summary") or "短标题 + 少量辅助文案")
+    summary = str(policy.get("summary") or "短标题 + 少量辅助文案")
+    max_chars = int(policy.get("headline_max_chars") or 18)
+    return f"{summary}（标题不超过{max_chars}个字，所有文案必须短小精悍，避免长句和大段落）"
 
 
 def _unique_texts(values: Any) -> list[str]:

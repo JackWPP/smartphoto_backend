@@ -398,3 +398,10 @@
   - 主图与详情页生成链路移除下载后的逐张 `fidelity_validation` 与单槽位补救重生，job 在图片下载完成后直接进入收尾落库
   - `truth_contract/risk_flags/selling_point_binding` 继续保留为 planner 与 render prompt 的前置约束，不再作为热路径复检触发器
   - `assets.generation_snapshot.fidelity_validation` 与结果接口 `fidelity_validation_status` 保留兼容字段，当前默认返回 `null`
+- 2026-04-07 Reliability Fixes:
+  - 新增 Alembic 迁移 `20260407_0017`，为 `category_catalogs` 补齐 `confusion_pairs/expected_components`，修复模型字段与生产 schema 漂移
+  - 平台配置初始化改为幂等补齐缺失项并在读取入口持久化，避免 `GET /api/admin/v1/platform-configs` 仅单请求可见
+  - 质量复审重试任务统一派发到 `q.generation.main`，并在重试 job 显式继承 `service_id`（同时透传 `user_id/guest_id`）
+  - `POST /api/v2/assets/{asset_id}/restore` 改为“以当前版本为基线物化完整新版本”，修复历史回滚导致结果版本不完整的问题
+  - 新增回归测试覆盖：平台配置持久化、质量重试队列与租户继承、主图/详情页 restore 新版本语义
+  - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`

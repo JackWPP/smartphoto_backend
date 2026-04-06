@@ -6,8 +6,9 @@ from app.core.deps import get_service_principal
 from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
+from app.models.asset import AssetModel
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
-from app.schemas.session import AssetRegenerateRequest, GenericGenerationJobData
+from app.schemas.session import AssetRegenerateRequest, GenericGenerationJobData, AssetHistoryItem, AssetRestoreResponse
 from app.services.dispatcher import dispatch_job
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
@@ -26,6 +27,66 @@ from app.services.repo import (
 from app.services.strategy_overrides import serialize_session_override
 
 router = APIRouter(prefix="/assets", tags=["assets"])
+
+
+def _asset_restore_key(asset: AssetModel) -> tuple[str, str]:
+    if str(asset.asset_family or "").strip() == "detail_page" and str(asset.asset_kind or "").strip() == "stitched":
+        return ("stitched", "stitched")
+    return ("slot", str(asset.slot_id or asset.asset_role or "").strip())
+
+
+def _clone_asset_for_restore(
+    *,
+    source_asset: AssetModel,
+    version_no: int,
+    round_no: int,
+    parent_asset_id: str | None,
+    restore_base_version_no: int,
+) -> AssetModel:
+    snapshot = dict(source_asset.generation_snapshot or {})
+    snapshot.update(
+        {
+            "carry_forward": True,
+            "source_asset_id": source_asset.id,
+            "source_version_no": source_asset.version_no,
+            "source_round_no": source_asset.round_no,
+            "restore_source": "history_restore",
+            "restore_base_version_no": restore_base_version_no,
+        }
+    )
+    return AssetModel(
+        session_id=source_asset.session_id,
+        job_id=source_asset.job_id,
+        round_no=round_no,
+        version_no=version_no,
+        parent_asset_id=parent_asset_id,
+        platform_id=source_asset.platform_id,
+        asset_family=source_asset.asset_family,
+        asset_kind=source_asset.asset_kind,
+        asset_role=source_asset.asset_role,
+        slot_id=source_asset.slot_id,
+        expression_mode=source_asset.expression_mode,
+        rule_pack_id=source_asset.rule_pack_id,
+        display_order=source_asset.display_order,
+        image_url=source_asset.image_url,
+        thumbnail_url=source_asset.thumbnail_url,
+        width=source_asset.width,
+        height=source_asset.height,
+        mime_type=source_asset.mime_type,
+        file_size=source_asset.file_size,
+        prompt_snapshot=source_asset.prompt_snapshot,
+        edit_instruction=source_asset.edit_instruction,
+        generation_snapshot=snapshot,
+        status="ready",
+        quality_status=source_asset.quality_status,
+        quality_scores=source_asset.quality_scores,
+        quality_review_job_id=source_asset.quality_review_job_id,
+        failure_reason=source_asset.failure_reason,
+        visibility_status="visible",
+        archived_at=None,
+        archived_by=None,
+        archive_reason=None,
+    )
 
 
 @router.post(
@@ -92,6 +153,7 @@ def regenerate_asset(
         input_payload = {
             "instruction": req.instruction,
             "keep_style_consistency": req.keep_style_consistency,
+            "edit_constraints": req.edit_constraints.model_dump() if req.edit_constraints else None,
             "parent_asset_id": asset.id,
             "asset_plan_item": strategy_plan_item
             or {
@@ -137,6 +199,7 @@ def regenerate_asset(
         input_payload = {
             "instruction": req.instruction,
             "keep_style_consistency": req.keep_style_consistency,
+            "edit_constraints": req.edit_constraints.model_dump() if req.edit_constraints else None,
             "parent_asset_id": asset.id,
             "panel_plan_item": detail_plan_item
             or {
@@ -186,3 +249,138 @@ def regenerate_asset(
     db.commit()
     dispatch_job(job.id, queue=queue_name)
     return success_response(response_data)
+
+
+@router.get(
+    "/{asset_id}/history",
+    response_model=APIResponse[list[AssetHistoryItem]],
+    summary="获取资产版本历史",
+    description="返回指定 asset 所在 slot 的所有版本记录，按版本号降序排列。",
+    operation_id="getAssetHistory",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def get_asset_history(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    asset = get_asset_or_404(db, asset_id)
+    _ = get_session_or_404(db, asset.session_id, service_id=principal.app_id)
+
+    slot_id = asset.slot_id or asset.asset_role
+    history = (
+        db.query(AssetModel)
+        .filter(
+            AssetModel.session_id == asset.session_id,
+            AssetModel.asset_family == (getattr(asset, "asset_family", "main_gallery")),
+            AssetModel.slot_id == slot_id,
+        )
+        .order_by(AssetModel.version_no.desc())
+        .all()
+    )
+    items = [
+        {
+            "asset_id": h.id,
+            "version_no": h.version_no,
+            "round_no": h.round_no,
+            "image_url": h.image_url,
+            "thumbnail_url": h.thumbnail_url,
+            "width": h.width,
+            "height": h.height,
+            "status": h.status,
+            "quality_status": h.quality_status,
+            "visibility_status": h.visibility_status,
+            "edit_instruction": h.edit_instruction,
+            "created_at": h.created_at,
+        }
+        for h in history
+    ]
+    return success_response(items)
+
+
+@router.post(
+    "/{asset_id}/restore",
+    response_model=APIResponse[AssetRestoreResponse],
+    summary="回滚到历史版本",
+    description="将指定历史版本的 asset 物化为新的完整结果版本，不直接覆盖历史版本。",
+    operation_id="restoreAsset",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def restore_asset(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    target = get_asset_or_404(db, asset_id)
+    session = get_session_or_404(db, target.session_id, service_id=principal.app_id)
+    slot_id = str(target.slot_id or target.asset_role or "").strip()
+    asset_family = getattr(target, "asset_family", "main_gallery")
+    if asset_family not in {"main_gallery", "detail_page"}:
+        raise AppError("invalid_request", "unsupported asset family", 400)
+
+    if asset_family == "main_gallery":
+        current_version = int(session.latest_result_version or 0)
+        round_no = int(session.generation_round or 1)
+    else:
+        current_version = int(session.detail_latest_result_version or 0)
+        round_no = int(session.detail_generation_round or 1)
+    if current_version <= 0:
+        raise AppError("invalid_session_status", "results not ready", 400)
+
+    current_assets = (
+        db.query(AssetModel)
+        .filter(
+            AssetModel.session_id == session.id,
+            AssetModel.asset_family == asset_family,
+            AssetModel.version_no == current_version,
+            AssetModel.status == "ready",
+            AssetModel.visibility_status == "visible",
+        )
+        .order_by(AssetModel.display_order.asc())
+        .all()
+    )
+    if not current_assets:
+        raise AppError("invalid_session_status", "current results not ready", 400)
+
+    if (
+        target.version_no == current_version
+        and target.status == "ready"
+        and target.visibility_status == "visible"
+    ):
+        raise AppError("invalid_request", "该版本已是当前版本", 400)
+
+    target_key = _asset_restore_key(target)
+    previous_asset = next((item for item in current_assets if _asset_restore_key(item) == target_key), None)
+    next_version = current_version + 1
+
+    created_assets_by_key: dict[tuple[str, str], AssetModel] = {}
+    for current_asset in current_assets:
+        current_key = _asset_restore_key(current_asset)
+        use_target_source = current_key == target_key
+        source_asset = target if use_target_source else current_asset
+        cloned = _clone_asset_for_restore(
+            source_asset=source_asset,
+            version_no=next_version,
+            round_no=round_no,
+            parent_asset_id=source_asset.id if use_target_source else None,
+            restore_base_version_no=current_version,
+        )
+        db.add(cloned)
+        created_assets_by_key[current_key] = cloned
+    db.flush()
+
+    restored_asset = created_assets_by_key.get(target_key)
+    if restored_asset is None:
+        raise AppError("invalid_request", "restore target not found in current version", 400)
+
+    if asset_family == "main_gallery":
+        session.latest_result_version = next_version
+    else:
+        session.detail_latest_result_version = next_version
+
+    db.commit()
+    return success_response({
+        "restored_asset_id": restored_asset.id,
+        "previous_asset_id": previous_asset.id if previous_asset else "",
+        "slot_id": slot_id,
+    })

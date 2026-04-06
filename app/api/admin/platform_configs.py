@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.admin_db.session import get_admin_db
@@ -12,6 +13,7 @@ from app.db.session import get_db
 from app.models.platform_config import PlatformConfigModel
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.services.admin_audit import append_admin_audit_log, request_id_from_request
+from app.services.main_gallery_rules import ensure_system_platform_configs
 
 router = APIRouter(prefix="/platform-configs", tags=["admin-platform-configs"])
 
@@ -90,6 +92,12 @@ def list_platform_configs(
     db: Session = Depends(get_db),
     _admin_user=Depends(get_current_admin_user),
 ) -> dict:
+    try:
+        if ensure_system_platform_configs(db):
+            db.commit()
+    except IntegrityError:
+        # Concurrent seed attempts may race on unique(platform_id).
+        db.rollback()
     query = db.query(PlatformConfigModel)
     if not include_inactive:
         query = query.filter(PlatformConfigModel.is_active.is_(True))

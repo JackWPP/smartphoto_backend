@@ -5,6 +5,8 @@ from PIL import Image
 from app.admin_db import session as admin_db_session
 from app.admin_models.admin_user import AdminUserModel
 from app.core.admin_auth import hash_password
+from app.db import session as db_session
+from app.models.platform_config import PlatformConfigModel
 
 
 def make_image_bytes(size=(1200, 1200), color=(240, 240, 240)) -> bytes:
@@ -186,6 +188,18 @@ def test_admin_category_catalog_crud_and_audit(client):
     assert "补充关键词" in notes
     assert "暂时下线测试品类" in notes
     assert "恢复测试品类" in notes
+
+
+def test_admin_platform_configs_seed_persists_across_sessions(client):
+    admin_headers = admin_headers_for(client)
+
+    listing = client.get("/api/admin/v1/platform-configs", headers=admin_headers)
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["data"]["total"] >= 1
+
+    with db_session.SessionLocal() as db:
+        count = db.query(PlatformConfigModel).count()
+        assert count >= 1
 
 
 def test_admin_asset_quality_feedback_roundtrip(client):

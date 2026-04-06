@@ -1252,6 +1252,42 @@ def test_regenerate_asset_from_historical_version_uses_parent_asset_version(clie
         assert (carry_forward_hero.generation_snapshot or {}).get("source_version_no") == 1
 
 
+def test_restore_asset_materializes_full_main_gallery_version(client):
+    sid = create_ready_session(client)
+
+    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": None})
+    v1_results = client.get(f"/api/v2/sessions/{sid}/results?version=1").json()["data"]
+    v1_by_slot = {item["slot_id"]: item for item in v1_results["assets"]}
+
+    client.post(
+        f"/api/v2/assets/{v1_by_slot['hero']['asset_id']}/regenerate",
+        json={"instruction": "首图改成更有冲击力", "keep_style_consistency": True},
+    )
+    v2_results = client.get(f"/api/v2/sessions/{sid}/results?version=2").json()["data"]
+    v2_by_slot = {item["slot_id"]: item for item in v2_results["assets"]}
+
+    restore_resp = client.post(f"/api/v2/assets/{v1_by_slot['hero']['asset_id']}/restore")
+    assert restore_resp.status_code == 200, restore_resp.text
+    restore_data = restore_resp.json()["data"]
+    assert restore_data["previous_asset_id"] == v2_by_slot["hero"]["asset_id"]
+
+    latest = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
+    assert latest["latest_result_version"] == 3
+    assert latest["requested_version"] == 3
+    assert latest["available_versions"] == [3, 2, 1]
+
+    v3_by_slot = {item["slot_id"]: item for item in latest["assets"]}
+    assert len(v3_by_slot) == len(v2_by_slot)
+    assert v3_by_slot["hero"]["image_url"] == v1_by_slot["hero"]["image_url"]
+    assert v3_by_slot["white_bg"]["image_url"] == v2_by_slot["white_bg"]["image_url"]
+    assert v3_by_slot["selling_point"]["image_url"] == v2_by_slot["selling_point"]["image_url"]
+    assert v3_by_slot["scene"]["image_url"] == v2_by_slot["scene"]["image_url"]
+    assert v3_by_slot["detail"]["image_url"] == v2_by_slot["detail"]["image_url"]
+
+    v2_again = client.get(f"/api/v2/sessions/{sid}/results?version=2").json()["data"]
+    assert len(v2_again["assets"]) == len(v2_by_slot)
+
+
 def test_regenerate_detail_panel_from_historical_version_uses_parent_asset_version(client):
     sid = create_ready_session(client)
 
@@ -1302,6 +1338,45 @@ def test_regenerate_detail_panel_from_historical_version_uses_parent_asset_versi
             .one()
         )
         assert (carry_forward_panel.generation_snapshot or {}).get("source_version_no") == 1
+
+
+def test_restore_detail_panel_materializes_full_detail_version(client):
+    sid = create_ready_session(client)
+
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "详情页先出一版"})
+
+    v1_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=1").json()["data"]
+    v1_by_slot = {item["slot_id"]: item for item in v1_results["panels"]}
+    first_slot = sorted(v1_by_slot.keys())[0]
+
+    client.post(
+        f"/api/v2/assets/{v1_by_slot[first_slot]['asset_id']}/regenerate",
+        json={"instruction": "改成更强调机制说明", "keep_style_consistency": True},
+    )
+    v2_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=2").json()["data"]
+    v2_by_slot = {item["slot_id"]: item for item in v2_results["panels"]}
+
+    restore_resp = client.post(f"/api/v2/assets/{v1_by_slot[first_slot]['asset_id']}/restore")
+    assert restore_resp.status_code == 200, restore_resp.text
+    restore_data = restore_resp.json()["data"]
+    assert restore_data["previous_asset_id"] == v2_by_slot[first_slot]["asset_id"]
+
+    latest = client.get(f"/api/v2/sessions/{sid}/detail-pages/results").json()["data"]
+    assert latest["detail_latest_result_version"] == 3
+    assert latest["requested_version"] == 3
+    assert latest["available_versions"] == [3, 2, 1]
+
+    v3_by_slot = {item["slot_id"]: item for item in latest["panels"]}
+    assert len(v3_by_slot) == len(v2_by_slot)
+    assert v3_by_slot[first_slot]["image_url"] == v1_by_slot[first_slot]["image_url"]
+    for slot_id, panel in v2_by_slot.items():
+        if slot_id == first_slot:
+            continue
+        assert v3_by_slot[slot_id]["image_url"] == panel["image_url"]
+
+    v2_again = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=2").json()["data"]
+    assert len(v2_again["panels"]) == len(v2_by_slot)
 
 
 def test_strategy_overrides_and_prompt_preset_flow(client):
