@@ -464,7 +464,7 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
     assert prompt_preview["prompts"][0]["copy_policy_applied"]["headline_max_chars"] == 16
     assert prompt_preview["prompts"][0]["slot_guardrails"]
     assert "slot_guardrails" in prompt_preview["prompts"][0]["prompt_sections_used"]
-    assert "图上可见文字必须保持简体中文短句、高对比且与版式融合。" in prompt_preview["prompts"][0]["blocks"]["constraints"]
+    assert "\u540e\u52a0\u7684\u56fe\u4e0a\u6587\u6848\u5fc5\u987b\u4e3a\u7b80\u4f53\u4e2d\u6587\u77ed\u53e5" in prompt_preview["prompts"][0]["blocks"]["constraints"]
     assert "如果没有足够好的中文短句，宁可少字" in prompt_preview["prompts"][0]["blocks"]["constraints"]
     assert "Visible copy must stay short" not in prompt_preview["prompts"][0]["blocks"]["constraints"]
     assert "不要堆砌虚假证书" in prompt_preview["prompts"][2]["blocks"]["constraints"]
@@ -505,7 +505,7 @@ def test_alibaba_prompt_preview_filters_low_signal_copy_and_placeholder_paramete
         {
             "product_name": "空气净化器",
             "category": "家电",
-            "hero_scene": "客厅",
+            "hero_scene": "视觉清爽",
             "core_selling_points": ["核心功能突出", "视觉清爽"],
             "product_advantages": ["核心功能突出"],
             "key_parameters": [{"key": "param_a", "label": "参数A", "value": "100", "unit": "unit"}],
