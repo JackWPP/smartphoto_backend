@@ -35,7 +35,16 @@ _ENTITY_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def category_is_structure_sensitive(category: Any) -> bool:
+def category_is_structure_sensitive(category: Any, analysis_snapshot: dict[str, Any] | None = None) -> bool:
+    """Check if the product requires structure-sensitive handling.
+    Prioritizes fidelity_tier from analysis snapshot, falls back to hardcoded set.
+    """
+    if analysis_snapshot:
+        tier = str((analysis_snapshot or {}).get("fidelity_tier", "")).strip().lower()
+        if tier in ("critical", "high"):
+            return True
+        if tier in ("standard", "creative"):
+            return False
     return repair_broken_text(category) in STRUCTURE_SENSITIVE_CATEGORIES
 
 
@@ -167,6 +176,9 @@ def build_truth_contract(
     evidence_scores = snapshot.get("evidence_scores") if isinstance(snapshot.get("evidence_scores"), dict) else {}
     risk_flags = [str(item).strip() for item in snapshot.get("risk_flags", []) if str(item).strip()]
     selling_point_entities = [str(item).strip() for item in snapshot.get("selling_point_entities", []) if str(item).strip()]
+    identity_anchor = snapshot.get("product_identity_anchor") if isinstance(snapshot.get("product_identity_anchor"), dict) else {}
+    component_registry = snapshot.get("component_registry") if isinstance(snapshot.get("component_registry"), list) else []
+    fidelity_tier = str(snapshot.get("fidelity_tier") or "standard").strip().lower()
 
     immutable_features = _dedupe(
         [
@@ -195,6 +207,25 @@ def build_truth_contract(
             *extract_selling_point_entities(copy_focus, focus_selling_point),
         ]
     )
+
+    # --- Truth Contract v2: Component-level locks ---
+    component_locks = []
+    for comp in component_registry[:8]:
+        if isinstance(comp, dict) and comp.get("name"):
+            component_locks.append({
+                "component": str(comp["name"]),
+                "position": str(comp.get("position", "")),
+                "constraint": "preserve_exact",
+            })
+
+    color_palette_hex: list[str] = []
+    if isinstance(identity_anchor.get("color_palette_hex"), list):
+        color_palette_hex = [str(c).strip() for c in identity_anchor["color_palette_hex"] if str(c).strip()][:6]
+
+    brand_marks_preserve: list[str] = []
+    if isinstance(identity_anchor.get("brand_marks"), list):
+        brand_marks_preserve = [str(m).strip() for m in identity_anchor["brand_marks"] if str(m).strip()][:4]
+
     structure_score = int(evidence_scores.get("structure") or 0)
     proportion_score = int(evidence_scores.get("proportion") or 0)
     scene_score = int(evidence_scores.get("scene") or 0)
@@ -223,6 +254,11 @@ def build_truth_contract(
         "allow_structure_extrapolation": allow_structure_extrapolation,
         "scene_grounding_rule": scene_grounding_rule,
         "scale_anchor": scale_anchor,
+        # Truth Contract v2 additions
+        "fidelity_tier": fidelity_tier,
+        "component_locks": component_locks[:8],
+        "color_palette_hex": color_palette_hex,
+        "brand_marks_preserve": brand_marks_preserve,
     }
 
 
