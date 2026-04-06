@@ -2,7 +2,7 @@
   <section class="page-stack">
     <div class="page-toolbar">
       <div>
-        <span class="eyebrow">Sessions</span>
+        <span class="eyebrow">会话追踪干预</span>
         <h3>Session 干预与结果追踪</h3>
       </div>
       <div class="toolbar-actions">
@@ -43,7 +43,7 @@
       <article class="surface-card" v-if="detail.session">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Session Detail</span>
+            <span class="eyebrow">会话执行详情</span>
             <h4>{{ detail.session.session_id }}</h4>
           </div>
           <span>{{ detail.session.status }} / step {{ detail.session.current_step }}</span>
