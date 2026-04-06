@@ -9,6 +9,7 @@ from app.services.pipeline import (
     run_extract_parameters_job,
     run_generate_detail_page_job,
     run_generate_family_job,
+    run_quality_review_job,
     run_regenerate_copy_job,
 )
 from app.services.user_accounts import create_job_completion_notification, refund_generation_charge
@@ -83,6 +84,7 @@ def _mark_job_failed(db, job, error_code: str, error_message: str) -> None:
 def execute_job(self, job_id: str) -> None:
     db = db_session.SessionLocal()
     job = None
+    _post_commit_result = None
     try:
         from app.models.job import JobModel
 
@@ -103,12 +105,19 @@ def execute_job(self, job_id: str) -> None:
             if job.job_type == "regenerate_detail_panel":
                 run_generate_detail_page_job(db, job_id)
             else:
-                run_generate_family_job(db, job_id)
+                _post_commit_result = run_generate_family_job(db, job_id)
         elif job.job_type == "generate_detail_page":
             run_generate_detail_page_job(db, job_id)
+        elif job.job_type == "quality_review":
+            run_quality_review_job(db, job_id)
         else:
             raise ValueError(f"unsupported job type: {job.job_type}")
         db.commit()
+        # Post-commit dispatch: quality review must be dispatched AFTER the
+        # transaction commits so the Celery worker can see the new job row.
+        if isinstance(_post_commit_result, dict) and _post_commit_result.get("quality_review_job_id"):
+            from app.services.dispatcher import dispatch_job
+            dispatch_job(_post_commit_result["quality_review_job_id"], queue="quality")
     except AppError as exc:
         db.rollback()
         current_retries = _current_retry_count(self)

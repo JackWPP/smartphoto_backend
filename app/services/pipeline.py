@@ -52,6 +52,7 @@ from app.services.upstream import WhataiClient
 from app.services.user_accounts import create_job_completion_notification, refresh_session_search_cache, update_session_last_generated_at
 from app.services.white_bg import strengthen_white_bg_instruction, validate_white_background
 from app.services.prompt_safety import sanitize_generated_copy_fields
+from app.services.quality_gate import sync_quality_check
 
 COPY_TARGETS = {
     "headline",
@@ -782,6 +783,9 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                 edit_instruction=instruction,
                 generation_snapshot=rendered["generation_snapshot"],
                 status="ready",
+                quality_status="pending_async_review" if rendered.get("sync_quality_passed") else "sync_failed",
+                quality_scores={"sync_check": (rendered.get("generation_snapshot") or {}).get("sync_quality_check")},
+                failure_reason=rendered.get("sync_failure_reason"),
             )
             db.add(asset)
             db.flush()
@@ -876,6 +880,28 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         update_job_status(db, job, status=terminal_status, progress=100, stage="done", result_payload=result_payload)
         if missing_slot_ids:
             for missing in missing_slots:
+                placeholder = AssetModel(
+                    session_id=session.id,
+                    job_id=job.id,
+                    round_no=round_no,
+                    version_no=version_no,
+                    platform_id=session.active_platform_id,
+                    asset_family="main_gallery",
+                    asset_kind="panel",
+                    asset_role=missing.get("role", ""),
+                    slot_id=missing.get("slot_id"),
+                    display_order=missing.get("display_order", 0),
+                    image_url="",
+                    width=0,
+                    height=0,
+                    mime_type="",
+                    file_size=0,
+                    status="failed",
+                    quality_status="generation_failed",
+                    failure_reason=_user_readable_failure_reason(missing.get("error_message")),
+                )
+                db.add(placeholder)
+                db.flush()
                 append_job_event(
                     db,
                     job.id,
@@ -886,17 +912,7 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                         "display_order": missing.get("display_order"),
                         "error": missing.get("error_message"),
                         "retry_count": missing.get("retry_count"),
-                    },
-                )
-                append_job_event(
-                    db,
-                    job.id,
-                    "asset_download_failed",
-                    {
-                        "event": "asset_download_failed",
-                        "slot_id": missing.get("slot_id"),
-                        "display_order": missing.get("display_order"),
-                        "error": missing.get("error_message"),
+                        "placeholder_asset_id": placeholder.id,
                     },
                 )
             append_job_event(
@@ -919,6 +935,9 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
                 job_type=job.job_type,
                 succeeded=True,
             )
+        # --- Async quality review (zero user-perceived latency) ---
+        _pending_review_job_id = _dispatch_quality_review(db, session, job, created_assets)
+        return {"quality_review_job_id": _pending_review_job_id}
     except AppError as exc:
         update_job_status(
             db,
@@ -947,6 +966,183 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         raise
     finally:
         release_locks(lock_keys)
+
+
+def _user_readable_failure_reason(error: str | None) -> str:
+    """Convert internal error message to user-facing Chinese failure reason."""
+    if not error:
+        return "该图生成失败，请点击重试"
+    error_lower = (error or "").lower()
+    if "timeout" in error_lower:
+        return "生成超时，请稍后重试"
+    if "rate_limit" in error_lower or "429" in error_lower:
+        return "服务繁忙，请稍后重试"
+    if "content_policy" in error_lower or "safety" in error_lower:
+        return "图片内容未通过安全审核，请调整描述后重试"
+    return "该图生成失败，请点击重试"
+
+
+def _dispatch_quality_review(
+    db: Session,
+    session: SessionModel,
+    parent_job: JobModel,
+    assets: list[AssetModel],
+) -> str | None:
+    """Create quality review job record for assets needing review.
+
+    Returns the review job ID for post-commit dispatch, or None if no assets
+    need review. The caller is responsible for dispatching the job AFTER
+    the DB transaction commits, to avoid a race condition where the Celery
+    worker tries to load the job before it's visible.
+    """
+    reviewable = [a for a in assets if a.quality_status == "pending_async_review"]
+    if not reviewable:
+        return None
+    review_job = JobModel(
+        session_id=session.id,
+        user_id=parent_job.user_id,
+        job_type="quality_review",
+        status="queued",
+        progress=0,
+        retry_count=0,
+        queued_at=now_utc(),
+        input_payload={
+            "asset_ids": [a.id for a in reviewable],
+            "parent_job_id": parent_job.id,
+            "platform_id": session.active_platform_id,
+        },
+    )
+    db.add(review_job)
+    db.flush()
+    for a in reviewable:
+        a.quality_review_job_id = review_job.id
+    db.flush()
+    append_job_event(
+        db, parent_job.id, "quality_review_dispatched",
+        {"event": "quality_review_dispatched", "review_job_id": review_job.id, "asset_count": len(reviewable)},
+    )
+    return review_job.id
+
+
+def run_quality_review_job(db: Session, job_id: str) -> None:
+    """Async LLM Vision quality review — runs concurrently across assets."""
+    job = _require_job(db, job_id)
+    payload = job.input_payload or {}
+    asset_ids = payload.get("asset_ids", [])
+    platform_id = payload.get("platform_id", "")
+
+    try:
+        update_job_status(db, job, status="running", progress=5, stage="reviewing")
+
+        client = WhataiClient()
+        storage = get_storage_adapter()
+        assets = (
+            db.query(AssetModel)
+            .filter(AssetModel.id.in_(asset_ids))
+            .all()
+        )
+        if not assets:
+            update_job_status(db, job, status="succeeded", progress=100, stage="done")
+            return
+
+        def _review_single_asset(asset: AssetModel) -> dict:
+            """Review one asset: fidelity + text language (concurrently per-asset)."""
+            result = {"asset_id": asset.id, "fidelity": None, "text_language": None, "error": None}
+            try:
+                image_bytes = storage.read_file(asset.image_url)
+            except Exception as exc:
+                result["error"] = f"read_failed: {exc}"
+                return result
+
+            gen_snapshot = asset.generation_snapshot or {}
+
+            # Fidelity check (graceful — fail-open if unavailable)
+            try:
+                fidelity = client.inspect_image_fidelity(
+                    image_bytes=image_bytes,
+                    reference_images=[],
+                    truth_contract=gen_snapshot.get("truth_contract") or {},
+                    risk_flags=gen_snapshot.get("risk_flags") or [],
+                    product_name="",
+                    category="",
+                    slot_id=asset.slot_id or "",
+                )
+                result["fidelity"] = fidelity
+            except Exception as exc:
+                result["fidelity"] = {"passed": True, "error": str(exc)}
+
+            # Text language check
+            try:
+                text_result = client.inspect_visible_text_language(
+                    image_bytes=image_bytes,
+                    platform_id=platform_id,
+                )
+                result["text_language"] = text_result
+            except Exception as exc:
+                result["text_language"] = {"passed": True, "error": str(exc)}
+
+            return result
+
+        # --- Concurrent review across all assets ---
+        review_results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=min(len(assets), 5)) as executor:
+            futures = {executor.submit(_review_single_asset, asset): asset for asset in assets}
+            for future in as_completed(futures):
+                review_results.append(future.result())
+
+        # Apply results to DB
+        results_by_id = {r["asset_id"]: r for r in review_results}
+        for asset in assets:
+            review = results_by_id.get(asset.id)
+            if not review:
+                continue
+
+            scores = dict(asset.quality_scores or {})
+            scores["async_check"] = {
+                "fidelity": review.get("fidelity"),
+                "text_language": review.get("text_language"),
+            }
+            asset.quality_scores = scores
+
+            fidelity_passed = (review.get("fidelity") or {}).get("passed", True)
+            text_passed = (review.get("text_language") or {}).get("passed", True)
+
+            if fidelity_passed and text_passed:
+                asset.quality_status = "passed"
+            else:
+                asset.quality_status = "async_failed"
+                reasons = []
+                if not fidelity_passed:
+                    reasons.append("产品保真度不足")
+                if not text_passed:
+                    reasons.append("文字语言不合规")
+                asset.failure_reason = "；".join(reasons)
+
+            db.flush()
+            append_job_event(
+                db, job.id, "quality_review_asset",
+                {
+                    "event": "quality_review_asset",
+                    "asset_id": asset.id,
+                    "quality_status": asset.quality_status,
+                    "fidelity_passed": fidelity_passed,
+                    "text_passed": text_passed,
+                },
+            )
+
+        update_job_status(
+            db, job, status="succeeded", progress=100, stage="done",
+            result_payload={
+                "reviewed_count": len(review_results),
+                "passed_count": sum(1 for r in review_results if (r.get("fidelity") or {}).get("passed", True) and (r.get("text_language") or {}).get("passed", True)),
+            },
+        )
+    except Exception as exc:
+        update_job_status(
+            db, job, status="failed", progress=100, stage="failed",
+            error_code="quality_review_error", error_message=str(exc),
+        )
+        raise
 
 
 def _ensure_generation_strategy_preview(db: Session, session: SessionModel, session_images: list[SessionImageModel]) -> dict:
@@ -1539,6 +1735,16 @@ def _finalize_main_rendered_asset(
         "download_rescued": bool(render_spec.get("download_rescued") or False),
         "download_rescue_reason": render_spec.get("download_rescue_reason"),
     }
+    # --- Sync quality gate (PIL, < 200ms) ---
+    try:
+        sync_result = sync_quality_check(
+            image_bytes,
+            requires_white_bg=bool(plan_item.get("requires_white_bg_validation")),
+        )
+    except Exception as exc:
+        logger.warning("sync_quality_check failed, defaulting to pass: %s", exc)
+        sync_result = {"passed": True, "checks": {}, "failure_reason": None, "error": str(exc)}
+    generation_snapshot["sync_quality_check"] = sync_result
     return {
         "role": render_spec["role"],
         "slot_id": render_spec["slot_id"],
@@ -1548,6 +1754,8 @@ def _finalize_main_rendered_asset(
         "image_bytes": image_bytes,
         "prompt_payload": prompt_payload,
         "generation_snapshot": generation_snapshot,
+        "sync_quality_passed": sync_result["passed"],
+        "sync_failure_reason": sync_result.get("failure_reason"),
     }
 
 
