@@ -5,4 +5,4 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 ./.venv/bin/alembic upgrade head
-exec ./.venv/bin/celery -A app.workers.celery_app.celery_app worker -Q q.analysis,q.copy,q.generation.main,q.generation.detail --loglevel=info
+exec ./.venv/bin/celery -A app.workers.celery_app.celery_app worker -Q q.analysis,q.copy,q.generation.main,q.generation.detail,q.quality --loglevel=info
