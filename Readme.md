@@ -239,6 +239,48 @@ export COMPOSE_PROJECT_NAME=smartphoto_backend
 - 只有在代码包不包含新 Alembic revision，且生产库已处于当前代码要求的 schema 时，才可使用 `--skip-migrate`
 - 详细生产上线顺序、备份命令、冒烟检查与常见坑位，以 `docs/生产上线SOP.md` 为准
 
+## 生产部署（推荐：半原生）
+
+如果生产机已经有稳定的 Docker Postgres/Redis，但 Docker build 与全容器化发布拖慢 CI/CD，推荐改为半原生部署：
+
+- `postgres` / `redis` 继续由 Docker Compose 托管，复用原 named volume，不迁移数据
+- `api` / `worker` / `alembic` 改由宿主机 `.venv + systemd` 运行
+- 代码更新改为在服务器 `/opt/smartphoto_backend/repo` 中执行 git 同步，不再每次构建应用镜像
+- 原生进程通过 `127.0.0.1:5432` 与 `127.0.0.1:6379` 访问基础设施容器
+
+首次切换入口：
+
+```bash
+cd /opt/smartphoto_backend/repo
+export COMPOSE_PROJECT_NAME=smartphoto_backend
+
+# 只启动基础设施容器；若宿主机端口冲突，可设置 POSTGRES_HOST_PORT=15432 REDIS_HOST_PORT=16379
+docker compose --env-file .env.prod -f docker-compose.infra.yml up -d postgres redis
+
+# 基于服务器现有 .env.prod 生成原生 env 后，按实际密钥和端口修正
+mkdir -p /opt/smartphoto_backend/shared/storage /opt/smartphoto_backend/logs
+cp .env.prod.native.example /opt/smartphoto_backend/shared/.env.prod.native
+
+# 安装 Python 依赖、构建后台前端、安装 systemd unit、执行迁移并启动服务
+python3.12 -m venv .venv
+./.venv/bin/pip install --upgrade pip setuptools wheel
+./.venv/bin/pip install .
+(cd adminfront && npm install && npm run build)
+sudo ./scripts/native-install-systemd.sh
+sudo systemctl start smartphoto-migrate
+sudo systemctl enable --now smartphoto-api smartphoto-worker
+./scripts/native-preflight.sh
+```
+
+后续 git 发布：
+
+```bash
+cd /opt/smartphoto_backend/repo
+SYSTEMCTL="sudo systemctl" ./scripts/native-deploy.sh --branch <deploy-branch>
+```
+
+只有在确认代码不包含新的 Alembic revision，且生产库 schema 已满足当前代码要求时，才可使用 `--skip-migrate`。完整迁移、备份、storage 拷贝、回滚与冒烟命令以 `docs/生产上线SOP.md` 的“半原生部署”章节为准。
+
 ## API 联调与排障手册索引
 
 遇到对接和运行问题，可以在这几份设计文档中找到完整答案，本系统严格贯彻**以代码为第一解释权，文档和逻辑强对齐**的原则。
@@ -250,7 +292,8 @@ export COMPOSE_PROJECT_NAME=smartphoto_backend
 - ⚙️ [主线生图与调度系统技术深度解构报告](./docs/生图架构核心技术报告.md)
 - ⚡ [生图提速优化报告（客户版）](./docs/生图提速优化报告_客户版.md)
 - 🚢 [项目运行、本地报错诊断与生产部署排障手册](./docs/运行与排障手册.md)
-- 📋 [单机 Docker Compose 生产上线 SOP](./docs/生产上线SOP.md)
+- 🧩 [原生部署指南：Docker 只保留 Postgres/Redis](./docs/原生部署指南.md)
+- 📋 [生产上线 SOP：半原生 + Docker 基础设施](./docs/生产上线SOP.md)
 - 🤝 [甲方框架手册项目对齐说明（对外版）](./docs/甲方框架手册_项目对齐说明_对外版.md)
 - 🧾 [甲方框架手册项目对齐说明（内部评估版）](./docs/甲方框架手册_项目对齐说明_内部评估版.md)
 - 📦 [开发规范约束与贡献者约定](./AGENTS.md)

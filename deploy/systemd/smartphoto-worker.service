@@ -1,0 +1,19 @@
+[Unit]
+Description=SmartPhoto Backend Celery Worker
+After=network-online.target docker.service smartphoto-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smartphoto
+Group=smartphoto
+WorkingDirectory=/opt/smartphoto_backend/repo
+EnvironmentFile=/opt/smartphoto_backend/shared/.env.prod.native
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/smartphoto_backend/repo/.venv/bin/celery -A app.workers.celery_app.celery_app worker -Q q.analysis,q.copy,q.generation.main,q.generation.detail --loglevel=info
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

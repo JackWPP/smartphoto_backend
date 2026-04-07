@@ -1,0 +1,20 @@
+[Unit]
+Description=SmartPhoto Backend API
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smartphoto
+Group=smartphoto
+WorkingDirectory=/opt/smartphoto_backend/repo
+EnvironmentFile=/opt/smartphoto_backend/shared/.env.prod.native
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/smartphoto_backend/repo/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

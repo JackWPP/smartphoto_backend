@@ -69,10 +69,41 @@ _PAREN_TERM_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _SEPARATOR_RE = re.compile(r"[|｜]+")
+# Matches bracket-wrapped content that is itself a layout/structural label (not real copy).
+# Uses full-string match (^...$) to avoid false positives on real product copy.
+_LAYOUT_LABEL_RE = re.compile(
+    r"^(?:主标题|副标题|侧边?标题|小标题|标题|正文|说明文字|角标|底部?文字|顶部?文字|"
+    r"卖点文案|卖点说明|图上文案|可见文案|产品品类[：:][^\s]*|结构工艺|工艺结构|"
+    r"细节参数|参数细节|copy[\s_]?lines?|copy[\s_]?focus|panel[\s_]?goal|"
+    r"heading|subheading|body[\s_]?copy|tagline|caption|label)$",
+    flags=re.IGNORECASE | re.UNICODE,
+)
 
 
 def prompt_matrix_guardrails() -> list[str]:
     return list(PROMPT_MATRIX_GUARDRAILS)
+
+
+def has_planning_annotation(text: str) -> bool:
+    """Detect whether text contains a 【】 planning annotation bracket.
+
+    Used by validators to flag contaminated visible-copy fields before they
+    reach the sanitize layer.  A single 【 is enough to signal a problem.
+    """
+    return bool(re.search(r"[【\[]", str(text)))
+
+
+def _replace_wrapped(m: re.Match) -> str:
+    """Callback for _WRAPPED_TEXT_RE.sub().
+
+    If the bracketed content is itself a layout/structural label (e.g. 【主标题】,
+    【copy_lines】) the entire token is dropped.  Otherwise the brackets are
+    stripped and the inner content is preserved.
+    """
+    inner = m.group(1).strip()
+    if _INTERNAL_PROMPT_TERM_RE.search(inner) or _LAYOUT_LABEL_RE.match(inner):
+        return ""
+    return inner
 
 
 def _truncate_text(text: str, *, max_chars: int) -> str:
@@ -93,7 +124,7 @@ def sanitize_surface_text(value: Any) -> str:
     text = repair_broken_text(value)
     if not text:
         return ""
-    text = _WRAPPED_TEXT_RE.sub(r"\1", text)
+    text = _WRAPPED_TEXT_RE.sub(_replace_wrapped, text)
     text = _PAREN_TERM_RE.sub("", text)
     text = _LABEL_PREFIX_RE.sub("", text)
     text = _INTERNAL_PROMPT_TERM_RE.sub("", text)

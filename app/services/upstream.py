@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import random
+import re
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -22,7 +23,7 @@ from app.services.copy_normalization import (
     repair_broken_text,
 )
 from app.services.llm_router import LLMRouter
-from app.services.prompt_safety import prompt_matrix_guardrails, sanitize_generated_copy_fields, sanitize_parameter_snapshot
+from app.services.prompt_safety import has_planning_annotation, prompt_matrix_guardrails, sanitize_generated_copy_fields, sanitize_parameter_snapshot, sanitize_surface_text
 from app.services.quality_signals import (
     FIDELITY_ISSUE_TAXONOMY,
     extract_selling_point_entities,
@@ -72,6 +73,10 @@ def _sanitize_planner_freeform_text(value: Any) -> str:
     cleaned = repair_broken_text(value)
     if not cleaned:
         return ""
+    # Strip 【】 / [] planning annotation brackets, preserving inner content.
+    # This ensures that even if the LLM wraps directives like 【核心目标】 they
+    # do not reach the final prompt with their brackets intact.
+    cleaned = re.sub(r"[【\[]([^】\]]*)[】\]]", r"\1", cleaned)
     return " ".join(cleaned.split()).strip(" ，,；;。")
 
 
@@ -266,6 +271,10 @@ class WhataiClient:
                         "所有角色都必须以商品保真为最高优先级。"
                         "不要输出思考过程、推理标签、内部规划字段或流程说明。"
                         "copy_focus、focus_selling_point、must_keep、must_avoid 都只写最终策略结论。"
+                        "must_keep 只写需要在画面中保留的视觉元素（如'保留产品顶部橙色按钮'），"
+                        "不要写具体的英文单词、品牌名或丝印内容（如不要写'保留 Dehumidifier 字样'，改为'产品本体原有丝印保持不变'）。"
+                        "fidelity_rule 只写抽象保真约束（如'颜色不偏色，比例与参考图一致'），不要写具体文字保留指令。"
+                        "final_prompt_base 是给生图模型的核心目标描述，不要在其中写具体英文单词或品牌名。"
                         f"{_prompt_matrix_guardrail_text()}"
                         f"平台：{active_platform_id}。"
                         f"商品 copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
@@ -366,9 +375,11 @@ class WhataiClient:
                     "每项必须包含：panel_id,panel_label,narrative_section,panel_goal,copy_focus,panel_type,layout_template,"
                     "planner_prompt_base,copy_lines,layout_notes,product_reference_ids,style_reference_ids,visual_truth_mode,origin_note。"
                     "copy_lines 必须是适合直接上图或给用户编辑的最终短文案候选，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                    "copy_lines 正确示例：[\"高效净化率 99.9%\", \"双层过滤系统\", \"适用面积 30m²\"]。"
+                    "copy_lines 错误示例：[\"【产品品类：结构工艺】\", \"【侧边标题】净化系统\"]——绝对不能出现【】标注。"
                     "visual_truth_mode 只能是 faithful_closeup,mechanism_illustration,scene_reconstruction,parameter_board。"
                     "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释真实性边界。"
-                    "不要把 Proof、panel_goal、copy_focus、narrative_section、设计证明、布局模板、规则模块、【...】等内部标签写进可见文案。"
+                    "不要把 Proof、panel_goal、copy_focus、narrative_section、设计证明、布局模板、规则模块、【...】等内部标签写进任何可见文案字段。"
                     "不要让 8 个 panel 都像横向主图，必须形成清晰的详情页叙事链。"
                     f"{platform_copy_instruction}"
                     f"{_prompt_matrix_guardrail_text()}"
@@ -652,6 +663,12 @@ class WhataiClient:
                     "global_consistency_note 需要指出本商品哪些结构细节绝对不能画错，尤其适用于局部图。"
                     "不要改写商品事实，不要替代视觉识别。"
                     "headline、supporting、proof_lines、matrix_lines 必须像最终上图文案，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                    "proof_lines 必须是消费者能直接阅读的商品卖点短标签，如产品特性数值、性能参数、功能名称。"
+                    "proof_lines 正确示例：[\"吸湿量 800ml/天\", \"静音 ≤35dB\", \"便携提手\", \"1.2L 水箱\"]。"
+                    "proof_lines 错误示例（构图指令不是文案）：[\"保留原有丝印\", \"材质特写\", \"可视化大水箱\", \"ABS 材质外壳\"]。"
+                    "proof_lines 错误示例（内部组件命名）：[\"核心物理吸湿环\", \"高颗粒吸附材质\"]——请改用消费者易懂的表达。"
+                    "正确示例：headline=\"高效净化 99.9%\"，proof_lines=[\"双层过滤\",\"低噪运行\"]。"
+                    "错误示例：headline=\"【主标题】高效净化\"，proof_lines=[\"【卖点】双层过滤\"]——绝对不能在可见文案中出现【】标注。"
                     f"{_prompt_matrix_guardrail_text()}"
                     f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
                     f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
@@ -683,10 +700,10 @@ class WhataiClient:
             if not slot_id:
                 continue
             by_slot[slot_id] = {
-                "headline": repair_broken_text(item.get("headline")),
-                "supporting": repair_broken_text(item.get("supporting")),
-                "proof_lines": self._normalize_string_list(item.get("proof_lines"), []),
-                "matrix_lines": self._normalize_string_list(item.get("matrix_lines"), []),
+                "headline": sanitize_surface_text(item.get("headline")),
+                "supporting": sanitize_surface_text(item.get("supporting")),
+                "proof_lines": [s for s in [sanitize_surface_text(l) for l in self._normalize_string_list(item.get("proof_lines"), [])] if s],
+                "matrix_lines": [s for s in [sanitize_surface_text(l) for l in self._normalize_string_list(item.get("matrix_lines"), [])] if s],
                 "text_density": repair_broken_text(item.get("text_density")),
                 "visual_emphasis": repair_broken_text(item.get("visual_emphasis")),
                 "global_consistency_note": repair_broken_text(item.get("global_consistency_note")),
@@ -1569,17 +1586,38 @@ class WhataiClient:
                 "content": json.dumps(parsed or {}, ensure_ascii=False),
             }
         )
-        repair_messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "上一个 JSON 输出未通过结构校验。"
-                    "请只根据下列错误清单修正 JSON，并保持原任务语义不变。"
-                    "不要补充解释，不要输出 markdown，只返回修正后的 JSON 对象。"
-                    f"错误清单：{json.dumps(errors, ensure_ascii=False)}"
-                ),
-            }
-        )
+        # Use a targeted repair prompt when the only errors are planning-annotation
+        # contamination — a specific message is more effective than a generic one.
+        annotation_errors = [e for e in errors if e.get("rule") in ("planning_annotation", "instruction_leakage")]
+        if annotation_errors:
+            repair_content = (
+                "你的输出中有字段包含了不应出现的内���，这必须修正。\n"
+            )
+            has_annotation = any(e.get("rule") == "planning_annotation" for e in annotation_errors)
+            has_leakage = any(e.get("rule") == "instruction_leakage" for e in annotation_errors)
+            if has_annotation:
+                repair_content += (
+                    "问题1：可见文案字段混入了【】规划标注格式。规划标注只用于内部推理，"
+                    "绝对不能出现在 copy_lines / headline / proof_lines / matrix_lines 等可见文案字段里。\n"
+                )
+            if has_leakage:
+                repair_content += (
+                    "问题2：must_keep 或 fidelity_rule 中包含了具体英文单词或品牌名。"
+                    "图片模型会把这些英文渲染到图上。请改为抽象的中文视觉描述"
+                    "（如'产品本体原有丝印保持不变'），不要写出具体英文单词。\n"
+                )
+            repair_content += (
+                "请只修正以下字段，保持其他内容不变，直接返回修正后的完整 JSON：\n"
+                + "\n".join(f"- {e['field']}：{e['message']}" for e in annotation_errors)
+            )
+        else:
+            repair_content = (
+                "上一个 JSON 输出未通过结构校验。"
+                "请只根据下列错误清单修正 JSON，并保持原任务语义��变。"
+                "不要补充解释，不要输出 markdown，只返回修正后的 JSON 对象。"
+                f"错误清单：{json.dumps(errors, ensure_ascii=False)}"
+            )
+        repair_messages.append({"role": "user", "content": repair_content})
         try:
             repaired_completion = self.llm_router.complete_json_with_meta(
                 task=task,
@@ -1770,6 +1808,25 @@ class WhataiClient:
                 invalid_ids = [value for value in reference_ids if str(value) not in valid_image_ids]
                 if invalid_ids:
                     errors.append(self._validation_error(f"prompt_plan[{index}].reference_image_ids", "subset", "reference_image_ids 只能引用可用商品图", invalid_ids))
+            # --- Detect instruction leakage: must_keep should not contain specific English words ---
+            must_keep_entries = item.get("must_keep") or []
+            if isinstance(must_keep_entries, list):
+                for entry in must_keep_entries:
+                    if isinstance(entry, str) and re.search(r"[a-zA-Z]{3,}", entry):
+                        errors.append(self._validation_error(
+                            f"prompt_plan[{index}].must_keep", "instruction_leakage",
+                            f"must_keep 中包含了具体英文单词 '{entry}'，图片模型可能将其渲染到图上。"
+                            "请改为抽象的中文视觉描述（如'产品本体原有丝印保持不变'），不要写出具体英文。",
+                            entry,
+                        ))
+            fidelity_val = item.get("fidelity_rule")
+            if isinstance(fidelity_val, str) and re.search(r"[a-zA-Z]{3,}", fidelity_val):
+                errors.append(self._validation_error(
+                    f"prompt_plan[{index}].fidelity_rule", "instruction_leakage",
+                    f"fidelity_rule 中包含了具体英文单词，图片模型可能将其渲染到图上。"
+                    "请改为抽象保真约束（如'产品本体原有丝印和标识保持不变'），不要写出具体英文。",
+                    fidelity_val,
+                ))
         if seen_roles != expected_roles:
             errors.append(self._validation_error("prompt_plan", "coverage", "prompt_plan 必须完整覆盖当前主图槽位", {"expected": sorted(expected_roles), "actual": sorted(seen_roles)}))
         if len(set(focus_values)) <= 2 and len(focus_values) >= 4:
@@ -1834,6 +1891,26 @@ class WhataiClient:
                 invalid_ids = [value for value in style_ids if str(value) not in valid_style_ids]
                 if invalid_ids:
                     errors.append(self._validation_error(f"panel_plan[{index}].style_reference_ids", "subset", "style_reference_ids 只能引用风格图", invalid_ids))
+            # Detect planning-annotation contamination in visible-copy fields.
+            copy_lines = item.get("copy_lines", [])
+            if isinstance(copy_lines, list):
+                contaminated = [line for line in copy_lines if isinstance(line, str) and has_planning_annotation(line)]
+                if contaminated:
+                    errors.append(self._validation_error(
+                        f"panel_plan[{index}].copy_lines",
+                        "planning_annotation",
+                        f"copy_lines 是最终可见文案，不能包含【】规划标注。请将以下项改写为干净的上图短句：{contaminated}",
+                        contaminated,
+                    ))
+            for vis_field in ("panel_goal", "copy_focus"):
+                vis_val = str(item.get(vis_field) or "")
+                if vis_val and has_planning_annotation(vis_val):
+                    errors.append(self._validation_error(
+                        f"panel_plan[{index}].{vis_field}",
+                        "planning_annotation",
+                        f"{vis_field} 不能包含【】规划标注，请写清晰的中文策略短语",
+                        vis_val,
+                    ))
         if len(set(narrative_sections)) <= 3:
             errors.append(self._validation_error("panel_plan.narrative_section", "sequence_diversity", "详情页不能退化成重复主图，8 个 panel 需要形成叙事链", narrative_sections))
         return errors
@@ -1919,6 +1996,26 @@ class WhataiClient:
                 value = item.get(key)
                 if value is not None and not isinstance(value, list):
                     errors.append(self._validation_error(f"copy_design_plan[{index}].{key}", "list", f"{key} 必须是数组", value))
+            # Detect planning-annotation contamination in visible-copy fields.
+            for txt_key in ("headline", "supporting"):
+                txt_val = str(item.get(txt_key) or "")
+                if txt_val and has_planning_annotation(txt_val):
+                    errors.append(self._validation_error(
+                        f"copy_design_plan[{index}].{txt_key}",
+                        "planning_annotation",
+                        f"{txt_key} 不能包含【】规划标注，直接写最终上图短句",
+                        txt_val,
+                    ))
+            for list_key in ("proof_lines", "matrix_lines"):
+                lines = item.get(list_key) or []
+                bad = [ln for ln in lines if isinstance(ln, str) and has_planning_annotation(ln)]
+                if bad:
+                    errors.append(self._validation_error(
+                        f"copy_design_plan[{index}].{list_key}",
+                        "planning_annotation",
+                        f"{list_key} 中有项包含【】规划标注，请将以下项改写为干净的短标签：{bad}",
+                        bad,
+                    ))
         return errors
 
     def _validate_visible_text_language_result(self, parsed: Any) -> list[dict[str, Any]]:

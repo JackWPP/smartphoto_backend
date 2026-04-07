@@ -201,31 +201,17 @@ def format_prompt_blocks(
     parts = [f"请生成一张适用于电商主图组的商品图片，参考画幅比例 {aspect_ratio}。"]
     overlay_id = (platform_overlay or {}).get("overlay_id")
     parts.append(platform_language_hard_constraint(overlay_id))
+    # --- Meta instruction: separate composition directives from visible copy ---
+    parts.append(
+        "【重要规则】下方的目标、主体、构图、背景、风格、卖点表达、约束、保真要求等段落"
+        "全部是给你的画面构图指令，是描述画面应该怎么构成的，不是需要写到图上的文字。"
+        "除非后续可见文案区明确列出了短标签，否则不要在图上添加任何中文标注、英文标注或指引线文字。"
+        "特别注意：不要把必须保留、保真要求、构图、背景等指令内容当作图上标注写出来。"
+    )
     if final_prompt_base:
         parts.append(f"核心生成目标：{final_prompt_base}")
     if fidelity_rule:
         parts.append(f"保真要求：{fidelity_rule}")
-    visible_copy = _copy_blocks_to_text(copy_blocks)
-    domestic_chinese_copy = requires_simplified_chinese_visible_copy((platform_overlay or {}).get("overlay_id"))
-    if text_policy != "no_text" and visible_copy:
-        if domestic_chinese_copy:
-            parts.append("国内中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
-            parts.append(
-                "新增图上文案只能使用简体中文短句；不要英文标题、不要英文副文案、不要英文营销词，也不要思考过程或内部规划标签。"
-            )
-            parts.append("保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印，不要擅自汉化或改字。")
-            parts.append(f"可见文案候选仅作为中文终稿语义参考，可改写但必须短而有信息密度，并保持简体中文：{visible_copy}")
-        else:
-            parts.append(f"允许图上短文案，文案草案：{visible_copy}")
-    elif text_policy != "no_text":
-        if domestic_chinese_copy:
-            parts.append("国内中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
-            parts.append("保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印，不要擅自汉化。")
-            parts.append("如果没有足够稳定的中文终稿，宁可少字或无字，也不要新增英文文案、英文营销词或内部术语。")
-        else:
-            parts.append("允许极少量图上短文案；若没有足够高质量的短句，宁可不显示文字。")
-    else:
-        parts.append("默认不要生成图上文案。")
 
     labels = {
         "goal": "目标",
@@ -242,6 +228,35 @@ def format_prompt_blocks(
         if not value:
             continue
         parts.append(f"{labels[key]}：{value}")
+
+    # --- Visible copy section: clearly separated from directives above ---
+    visible_copy = _copy_blocks_to_text(copy_blocks)
+    domestic_chinese_copy = requires_simplified_chinese_visible_copy((platform_overlay or {}).get("overlay_id"))
+    if text_policy != "no_text" and visible_copy:
+        if domestic_chinese_copy:
+            parts.append("国���中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
+            parts.append(
+                "新增图上文案只能使用简体中文短句；不要英文标题、不要英文副文案、不要英文营销词，也不要思考过程或内部规划标签。"
+            )
+            parts.append("保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印，不要擅自汉化或改字。")
+            parts.append(
+                f"【可见文案区】以下是允许渲染到图上的文案候选（可改写但必须短而有信息密度，并保持简体中文）：{visible_copy}。"
+                "除此以外，不要把上方的构图指令、保真要求、背景描述等内容渲染成图上文字。"
+            )
+        else:
+            parts.append(
+                f"【可见文案区】允许图上短文案，文案草案：{visible_copy}。"
+                "不要把上方构图指令渲染成图上文字。"
+            )
+    elif text_policy != "no_text":
+        if domestic_chinese_copy:
+            parts.append("国内中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
+            parts.append("保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印，不要擅自汉化。")
+            parts.append("如果没有足够稳定的中文终稿，宁可少字或无字，也不要新增英文文案、英文营销词或内部术语。")
+        else:
+            parts.append("允许极少量图上短文案；若没有足够高质量的短句，宁可不显示文字。")
+    else:
+        parts.append("默认不要生成图上文案。")
     # --- Language constraint repeated at end (recency anchor) ---
     parts.append(platform_language_hard_constraint(overlay_id))
     return " ".join(parts)
@@ -341,7 +356,7 @@ def _compose_subject_block(
     if must_keep:
         consistency = _clean_text(prompt_plan.get("global_consistency_note"))
         scale_anchor = _clean_text(truth_contract.get("scale_anchor"))
-        suffix_parts = [f"必须保留：{must_keep}"]
+        suffix_parts = [f"画面中必须可见的结构元素（不是图上文字）：{must_keep}"]
         if consistency:
             suffix_parts.append(f"全局一致性锚点：{consistency}")
         if scale_anchor:
@@ -439,14 +454,19 @@ def _compose_selling_points_block(slot_id: str, prompt_plan: dict[str, Any], cop
     selling_point_binding = prompt_plan.get("selling_point_binding") if isinstance(prompt_plan.get("selling_point_binding"), dict) else {}
     required_entities = [str(item).strip() for item in selling_point_binding.get("entities", []) if str(item).strip()]
     copy_policy = _copy_policy_summary(_copy_policy_for_slot(slot_id, text_policy))
+    # must_keep is a composition directive — explicitly mark it as NOT visible text
+    must_keep_clause = (
+        f"画面需要表达的卖点方向（构图指引，不要写到图上）：{'；'.join(must_keep[:3])}。"
+        if must_keep else ""
+    )
     if text_policy != "no_text" and copy_text:
         if required_entities:
-            return f"画面重点表达：{copy_text}。必须出现这些真实视觉证据：{'、'.join(required_entities[:3])}。图上文案策略：{copy_policy}。"
-        return f"画面重点表达：{copy_text}。图上文案策略：{copy_policy}。"
+            return f"{must_keep_clause}必须出现这些真实视觉证据：{'、'.join(required_entities[:3])}。图上文案策略：{copy_policy}。"
+        return f"{must_keep_clause}图上文案策略：{copy_policy}。"
     if must_keep:
         if required_entities:
-            return "画面重点表达：" + "；".join(must_keep[:3]) + f"。同时必须出现这些真实视觉证据：{'、'.join(required_entities[:3])}。"
-        return "画面重点表达：" + "；".join(must_keep[:3]) + "。"
+            return must_keep_clause + f"同时必须出现这些真实视觉证据：{'、'.join(required_entities[:3])}。"
+        return must_keep_clause
     return "通过画面突出商品核心优势。"
 
 
