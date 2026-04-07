@@ -95,7 +95,13 @@ def compose_prompt(
         or confirmed_copy.get("style_choice"),
         "简洁高级的电商摄影风格",
     )
-    raw_copy_blocks = dict(prompt_plan.get("copy_blocks") or plan.get("copy_blocks") or {})
+    # When plan_item is explicitly passed (e.g. regenerate_asset), its copy_blocks
+    # carry the latest override-applied values and must take precedence over
+    # prompt_plan.copy_blocks which may be stale from a cached strategy_preview.
+    if plan_item is not None and plan_item.get("copy_blocks"):
+        raw_copy_blocks = {**dict(prompt_plan.get("copy_blocks") or {}), **dict(plan_item["copy_blocks"])}
+    else:
+        raw_copy_blocks = dict(prompt_plan.get("copy_blocks") or plan.get("copy_blocks") or {})
     copy_blocks, sanitized_fields, copy_safety_notes = sanitize_main_copy_blocks(
         raw_copy_blocks,
         product_name=confirmed_copy.get("product_name", ""),

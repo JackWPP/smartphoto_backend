@@ -1650,17 +1650,16 @@ def put_strategy_overrides(
 
     db.flush()
     if session.confirmed_copy and session.active_platform_id:
-        preview = build_strategy_preview(
+        # Only merge copy_blocks overrides into the existing strategy_preview
+        # without replacing planner-generated fields (background_rule,
+        # composition_rule, final_prompt_base, etc.) that control the scene.
+        preview = normalize_strategy_preview(
+            session.strategy_preview,
             _resolved_copy_for_session(session, db),
             session.active_platform_id,
             db=db,
-            session_images=list_active_session_images(db, session.id),
-            analysis_snapshot=session.analysis_snapshot or {},
-            parameter_snapshot=session.parameter_snapshot or {},
-            planner_instruction=(session.strategy_preview or {}).get("planner_instruction"),
-            slot_preferences=(session.strategy_preview or {}).get("slot_preferences") or [],
             prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
-            strategy_reference_images=list_active_strategy_reference_images(db, session.id),
+            parameter_snapshot=session.parameter_snapshot or {},
         )
         session.strategy_preview = preview
 
