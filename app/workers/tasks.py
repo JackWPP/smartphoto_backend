@@ -118,7 +118,7 @@ def execute_job(self, job_id: str) -> None:
         if isinstance(_post_commit_result, dict):
             from app.services.dispatcher import dispatch_job
             if _post_commit_result.get("quality_review_job_id"):
-                dispatch_job(_post_commit_result["quality_review_job_id"], queue="quality")
+                dispatch_job(_post_commit_result["quality_review_job_id"], queue="q.quality")
             for retry_id in _post_commit_result.get("retry_job_ids", []):
                 dispatch_job(retry_id, queue="q.generation.main")
     except AppError as exc:
