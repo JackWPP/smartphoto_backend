@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-ENV_FILE="${ENV_FILE:-/opt/smartphoto_backend/shared/.env.prod.native}"
+APP_ROOT="${APP_ROOT:-$ROOT_DIR}"
+SHARED_ROOT="${SHARED_ROOT:-${APP_ROOT}/shared}"
+ENV_FILE="${ENV_FILE:-${SHARED_ROOT}/.env.prod.native}"
 INFRA_ENV_FILE="${INFRA_ENV_FILE:-.env.prod}"
 INFRA_COMPOSE_FILE="${INFRA_COMPOSE_FILE:-docker-compose.infra.yml}"
 
