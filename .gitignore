@@ -18,6 +18,7 @@ ENV/
 .env.*
 !.env.example
 !.env.prod.example
+!.env.prod.native.example
 .envrc
 
 # Tool caches

@@ -1,10 +1,8 @@
 # 生产上线 SOP
 
-本手册固化 SmartPhoto Backend 单机 Docker Compose 生产环境的标准上线流程。目标是让后续任意 session 都能按同一套步骤完成：
+本手册固化 SmartPhoto Backend 单机生产环境的标准上线流程。当前推荐形态是“Docker 只托管 Postgres/Redis，API/Worker/Alembic 原生运行”；历史全 Docker Compose 发布流程仍保留为回滚和过渡方案。目标是让后续任意 session 都能按同一套步骤完成：
 
-- 本地打包
-- 上传服务器
-- 新 release 目录解压
+- git 同步或本地打包
 - 备份
 - 预检
 - 带或不带迁移发布
@@ -14,9 +12,204 @@
 适用前提：
 
 - 生产目录固定为 `/opt/smartphoto_backend`
-- 使用 `docker-compose.prod.yml`
+- 推荐使用 `docker-compose.infra.yml` 管理 `postgres/redis`
+- `api/worker/alembic` 推荐由 systemd + `/opt/smartphoto_backend/repo/.venv` 原生运行
 - 生产机保留自己的 `.env.prod`
 - 生产 Docker Compose project 固定为 `smartphoto_backend`
+
+## 0. 推荐：半原生部署
+
+适用场景：
+
+- 服务器已有稳定的 Docker Postgres/Redis 容器和 named volumes
+- 希望应用代码通过 git 同步发布，避免每次 `docker build`
+- 希望 Alembic、API、Worker 都在宿主机 `.venv` 中运行并由 systemd 托管
+
+固定目录：
+
+```bash
+/opt/smartphoto_backend/repo
+/opt/smartphoto_backend/shared/.env.prod.native
+/opt/smartphoto_backend/shared/storage
+/opt/smartphoto_backend/logs
+```
+
+### 0.1 一次性切换前备份
+
+```bash
+set -euo pipefail
+
+export COMPOSE_PROJECT_NAME=smartphoto_backend
+export OLD_ROOT=/opt/smartphoto_backend
+export REPO_ROOT=/opt/smartphoto_backend/repo
+export BACKUP_DIR=/opt/smartphoto_backend/backups/native_$(date +%Y%m%d_%H%M%S)
+
+mkdir -p "$BACKUP_DIR"
+cd "$OLD_ROOT"
+
+set -a
+source .env.prod
+set +a
+
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d postgres redis
+
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" smartphoto_backend-postgres-1 \
+  pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc \
+  > "$BACKUP_DIR/${POSTGRES_DB}_$(date +%Y%m%d_%H%M%S).dump"
+
+docker cp smartphoto_backend-api-1:/app/storage "$BACKUP_DIR/storage_from_api_container" || true
+cp .env.prod "$BACKUP_DIR/.env.prod.backup"
+```
+
+### 0.2 停掉旧应用容器，保留基础设施
+
+```bash
+set -euo pipefail
+
+export COMPOSE_PROJECT_NAME=smartphoto_backend
+export OLD_ROOT=/opt/smartphoto_backend
+export REPO_ROOT=/opt/smartphoto_backend/repo
+
+cd "$OLD_ROOT"
+docker compose --env-file .env.prod -f docker-compose.prod.yml stop api worker || true
+
+cp "$OLD_ROOT/.env.prod" "$REPO_ROOT/.env.prod"
+cd "$REPO_ROOT"
+docker compose --env-file .env.prod -f docker-compose.infra.yml up -d postgres redis
+docker compose --env-file .env.prod -f docker-compose.infra.yml ps
+```
+
+`docker-compose.infra.yml` 会把端口只绑定到本机：
+
+- `127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432`
+- `127.0.0.1:${REDIS_HOST_PORT:-6379}:6379`
+
+若宿主机已有服务占用端口，在 `.env.prod` 里增加：
+
+```env
+POSTGRES_HOST_PORT=15432
+REDIS_HOST_PORT=16379
+```
+
+同时把原生 env 中的连接地址改为对应端口。
+
+### 0.3 准备原生 env 与 storage
+
+```bash
+set -euo pipefail
+
+export REPO_ROOT=/opt/smartphoto_backend/repo
+export SHARED_ROOT=/opt/smartphoto_backend/shared
+
+mkdir -p "$SHARED_ROOT/storage" /opt/smartphoto_backend/logs
+cd "$REPO_ROOT"
+
+cp .env.prod.native.example "$SHARED_ROOT/.env.prod.native"
+```
+
+编辑 `/opt/smartphoto_backend/shared/.env.prod.native`，至少确认：
+
+```env
+DATABASE_URL=postgresql+psycopg://smartphoto:<password>@127.0.0.1:5432/smartphoto
+REDIS_URL=redis://127.0.0.1:6379/0
+STORAGE_ROOT=/opt/smartphoto_backend/shared/storage
+ADMIN_DATABASE_URL=sqlite:////opt/smartphoto_backend/shared/storage/admin.sqlite3
+```
+
+保持现有 `WHATAI_*`、`LLM_*`、`OPENROUTER_*`、`S3_*`、`IMAGE_SAAS_APP_KEYS` 与生产配置一致。
+
+如果旧部署使用 local storage 或 admin SQLite 在容器卷内，执行一次拷贝：
+
+```bash
+docker cp smartphoto_backend-api-1:/app/storage/. /opt/smartphoto_backend/shared/storage/ || true
+chown -R smartphoto:smartphoto /opt/smartphoto_backend/shared /opt/smartphoto_backend/logs
+```
+
+### 0.4 安装原生依赖与 systemd unit
+
+```bash
+set -euo pipefail
+
+cd /opt/smartphoto_backend/repo
+
+python3.12 -m venv .venv
+./.venv/bin/pip install --upgrade pip setuptools wheel
+./.venv/bin/pip install .
+
+cd adminfront
+npm install
+npm run build
+cd ..
+
+sudo ./scripts/native-install-systemd.sh
+```
+
+systemd 模板位于 `deploy/systemd/`：
+
+- `smartphoto-api.service`
+- `smartphoto-worker.service`
+- `smartphoto-migrate.service`
+
+默认服务用户为 `smartphoto:smartphoto`；如果服务器使用其他用户，先改 unit 里的 `User/Group` 再安装。
+
+### 0.5 迁移并启动
+
+```bash
+set -euo pipefail
+
+cd /opt/smartphoto_backend/repo
+
+sudo systemctl start smartphoto-migrate
+sudo systemctl status smartphoto-migrate --no-pager
+
+sudo systemctl enable --now smartphoto-api smartphoto-worker
+sudo systemctl status smartphoto-api smartphoto-worker --no-pager
+
+./scripts/native-preflight.sh
+```
+
+### 0.6 后续 git 发布
+
+默认发布：
+
+```bash
+set -euo pipefail
+
+cd /opt/smartphoto_backend/repo
+SYSTEMCTL="sudo systemctl" ./scripts/native-deploy.sh --branch <deploy-branch>
+```
+
+无 migration 的纯应用发布：
+
+```bash
+cd /opt/smartphoto_backend/repo
+SYSTEMCTL="sudo systemctl" ./scripts/native-deploy.sh --branch <deploy-branch> --skip-migrate
+```
+
+强约束：
+
+- 只要代码包含新的 Alembic revision，禁止使用 `--skip-migrate`
+- 只要线上出现 `UndefinedTable/UndefinedColumn/relation does not exist`，立即补跑 `smartphoto-migrate`
+- 不要用 root 执行 git 同步；建议以 `smartphoto` 部署用户执行脚本，并通过 `SYSTEMCTL="sudo systemctl"` 调 systemd
+
+### 0.7 半原生冒烟
+
+```bash
+curl -i http://127.0.0.1:8000/healthz
+curl -i http://127.0.0.1:8000/api/admin/v1/auth/health
+
+curl -i -X OPTIONS http://127.0.0.1:8000/api/v2/sessions \
+  -H 'Origin: https://smartphoto.vip' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: content-type,x-app-key'
+
+journalctl -u smartphoto-api -n 150 --no-pager
+journalctl -u smartphoto-worker -n 200 --no-pager
+```
+
+### 0.8 历史全 Docker Compose 流程
+
+下面章节保留原全 Docker Compose SOP。若还在使用 `api/worker` 容器，继续按该流程；若已切到半原生，应用发布以本章 `native-*` 脚本为准，只继续使用 compose 管理 `postgres/redis`。
 
 ## 1. 不变量
 
@@ -655,6 +848,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps a
 ## 16. 文档关系
 
 - 总入口：`Readme.md`
+- 人话版原生部署：`docs/原生部署指南.md`
 - 运维排障：`docs/运行与排障手册.md`
 - 本文档：`docs/生产上线SOP.md`
 - 开发与协作约束：`AGENTS.md`

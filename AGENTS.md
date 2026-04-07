@@ -405,3 +405,11 @@
   - `POST /api/v2/assets/{asset_id}/restore` 改为“以当前版本为基线物化完整新版本”，修复历史回滚导致结果版本不完整的问题
   - 新增回归测试覆盖：平台配置持久化、质量重试队列与租户继承、主图/详情页 restore 新版本语义
   - 同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`
+- 2026-04-07 Native Deploy:
+  - 新增半原生生产部署能力：`docker-compose.infra.yml` 只托管 `postgres/redis` 并通过 `127.0.0.1` 暴露给宿主机进程
+  - 新增 `.env.prod.native.example`、`deploy/systemd/smartphoto-{api,worker,migrate}.service` 与 `scripts/native-*`，支持 git 同步代码、宿主机 `.venv` 运行 API/Worker/Alembic
+  - `scripts/package-prod.sh` 白名单补入半原生部署工件，避免发布包漏带 infra compose 与 systemd unit
+  - 同步更新 `Readme.md`、`docs/生产上线SOP.md`、`docs/运行与排障手册.md`
+- 2026-04-07 Native Deploy Docs:
+  - 新增 `docs/原生部署指南.md`，用人话版流程说明半原生部署的目录结构、备份、infra compose、原生 env、storage 拷贝、systemd、迁移、发版、回滚和常见问题
+  - `Readme.md` 与 `docs/生产上线SOP.md` 补充该指南入口

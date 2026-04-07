@@ -15,7 +15,9 @@ INCLUDE_PATHS=(
   "Dockerfile"
   ".dockerignore"
   "docker-compose.prod.yml"
+  "docker-compose.infra.yml"
   ".env.prod.example"
+  ".env.prod.native.example"
   "AGENTS.md"
   "pyproject.toml"
   "Readme.md"
@@ -23,9 +25,11 @@ INCLUDE_PATHS=(
   "app"
   "alembic"
   "adminfront"
+  "deploy/systemd"
   "scripts"
   "docs/运行与排障手册.md"
   "docs/生产上线SOP.md"
+  "docs/原生部署指南.md"
 )
 
 # Only package git-tracked files from the approved whitelist so untracked workspace
