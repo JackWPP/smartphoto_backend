@@ -27,6 +27,8 @@
 
 固定目录：
 
+> 说明：本文里写的 `/opt/smartphoto_backend` 是示例路径。新的 `native-*` 脚本会按仓库根目录自动取值，所以如果你的代码实际在 `/www/wwwroot/smartphoto_backend`，照样能直接用。
+
 ```bash
 /opt/smartphoto_backend/repo
 /opt/smartphoto_backend/shared/.env.prod.native

@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=smartphoto
-Group=smartphoto
-WorkingDirectory=/opt/smartphoto_backend/repo
-EnvironmentFile=/opt/smartphoto_backend/shared/.env.prod.native
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__APP_ROOT__
+EnvironmentFile=__SHARED_ROOT__/.env.prod.native
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/smartphoto_backend/repo/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+ExecStart=__APP_ROOT__/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-ENV_FILE="${ENV_FILE:-/opt/smartphoto_backend/shared/.env.prod.native}"
+APP_ROOT="${APP_ROOT:-$ROOT_DIR}"
+SHARED_ROOT="${SHARED_ROOT:-${APP_ROOT}/shared}"
+ENV_FILE="${ENV_FILE:-${SHARED_ROOT}/.env.prod.native}"
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 BRANCH=""
@@ -13,14 +15,15 @@ SKIP_ADMINFRONT_BUILD=false
 NO_GIT_SYNC=false
 
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage: ./scripts/native-deploy.sh [--branch <branch>] [--skip-migrate] [--skip-adminfront-build] [--no-git-sync]
 
 Update a native SmartPhoto production checkout, install Python/adminfront
 dependencies, run Alembic migrations unless skipped, and restart systemd API/worker.
 
 Environment:
-  ENV_FILE=/opt/smartphoto_backend/shared/.env.prod.native
+  APP_ROOT=${APP_ROOT}
+  ENV_FILE=${ENV_FILE}
   PYTHON_BIN=python3.12
   SYSTEMCTL="sudo systemctl" when running as the smartphoto deploy user
 EOF
