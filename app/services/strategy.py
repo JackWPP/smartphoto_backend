@@ -865,6 +865,8 @@ def _normalize_asset_plan(existing_plan: Any, default_plan: list[dict[str, Any]]
                 "slot_id": slot_id,
                 "role": str(item.get("role") or base["role"]),
                 "display_order": int(item.get("display_order") or base.get("display_order") or index),
+                "copy_blocks": base.get("copy_blocks") or item.get("copy_blocks", {}),
+                "raw_prompt_override": base.get("raw_prompt_override") or item.get("raw_prompt_override"),
             }
         )
         seen_slots.add(slot_id)
@@ -943,6 +945,8 @@ def _normalize_prompt_plan(
                 "slot_id": slot_id,
                 "role": str(item.get("role") or base["role"]),
                 "display_order": int(item.get("display_order") or base["display_order"]),
+                "copy_blocks": base.get("copy_blocks") or item.get("copy_blocks", {}),
+                "raw_prompt_override": base.get("raw_prompt_override") or item.get("raw_prompt_override"),
                 "reference_image_ids": [str(v) for v in item.get("reference_image_ids", base["reference_image_ids"])],
                 "reference_slots": _normalize_phrase_list(item.get("reference_slots", base["reference_slots"])),
                 "reference_image_limit": int(item.get("reference_image_limit") or base.get("reference_image_limit") or 2),
