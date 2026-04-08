@@ -1658,3 +1658,141 @@ def test_sse_events_and_failure_recovery(client, monkeypatch):
     failed = client.post(f"/api/v2/sessions/{sid2}/generations", json={"instruction": None}).json()["data"]
     status = client.get(f"/api/v2/jobs/{failed['job_id']}").json()["data"]
     assert status["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# product_name 修改后 headline 联动 + analysis_snapshot 同步回归测试
+# ---------------------------------------------------------------------------
+
+
+def test_headline_follows_product_name_when_auto_derived(client):
+    """headline 是 product_name 的自动 fallback 时，修改 product_name 应联动更新 headline."""
+    sid = create_ready_session(client)
+
+    # 先保存一个初始 copy —— headline 留空，让 normalize_copy_payload fallback 到 product_name
+    client.put(
+        f"/api/v2/sessions/{sid}/copy",
+        json={
+            "product_name": "便携除湿机",
+            "category": "家电",
+            "hero_scene": "卧室除湿",
+            "core_selling_points": ["静音"],
+            "key_parameters": [],
+            "product_advantages": [],
+        },
+    )
+    copy1 = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    # headline 应该已被 normalize_copy_payload 设为 product_name
+    assert copy1["product_name"] == "便携除湿机"
+
+    # 用户修改 product_name，但 headline 仍然是旧值（模拟前端回传旧 headline）
+    client.put(
+        f"/api/v2/sessions/{sid}/copy",
+        json={
+            "product_name": "空气净化器",
+            "category": "家电",
+            "headline": "便携除湿机",  # 前端回传了旧的 headline
+            "hero_scene": "卧室净化",
+            "core_selling_points": ["高效净化"],
+            "key_parameters": [],
+            "product_advantages": [],
+        },
+    )
+    copy2 = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    assert copy2["product_name"] == "空气净化器"
+    # headline 应联动更新为 product_name（空气净化器），不应该还是"便携除湿机"
+    # （GET /copy 返回的 payload 中 headline 不直接暴露，但通过 session snapshot 验证）
+    session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    confirmed_copy = session["confirmed_copy"]
+    assert confirmed_copy["product_name"] == "空气净化器"
+    assert confirmed_copy["headline"] == "空气净化器"
+
+
+def test_headline_preserved_when_explicitly_edited(client):
+    """用户显式编辑了 headline（与 product_name 不同）时，修改 product_name 不应覆盖 headline."""
+    sid = create_ready_session(client)
+
+    client.put(
+        f"/api/v2/sessions/{sid}/copy",
+        json={
+            "product_name": "便携除湿机",
+            "category": "家电",
+            "headline": "静享干爽 大容量除湿",  # 用户显式编辑了不同的 headline
+            "hero_scene": "卧室",
+            "core_selling_points": [],
+            "key_parameters": [],
+            "product_advantages": [],
+        },
+    )
+
+    # 修改 product_name，但 headline 是用户自定义的
+    client.put(
+        f"/api/v2/sessions/{sid}/copy",
+        json={
+            "product_name": "空气净化器",
+            "category": "家电",
+            "headline": "静享干爽 大容量除湿",  # 回传了用户自定义的 headline
+            "hero_scene": "卧室净化",
+            "core_selling_points": [],
+            "key_parameters": [],
+            "product_advantages": [],
+        },
+    )
+    session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    confirmed_copy = session["confirmed_copy"]
+    assert confirmed_copy["product_name"] == "空气净化器"
+    # headline 不应被覆盖
+    assert confirmed_copy["headline"] == "静享干爽 大容量除湿"
+
+
+def test_analysis_snapshot_syncs_on_product_name_change(client):
+    """用户修改 product_name 后，analysis_snapshot.recognized_product 应同步更新."""
+    sid = create_ready_session(client)
+
+    # 验证 analysis_snapshot 有 recognized_product
+    session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    analysis = session.get("analysis_snapshot") or {}
+    recognized = analysis.get("recognized_product") or {}
+    original_pn = recognized.get("product_name", "")
+    assert original_pn  # analysis 应该识别出了产品名
+
+    # 修改 product_name 为不同的值
+    client.put(
+        f"/api/v2/sessions/{sid}/copy",
+        json={
+            "product_name": "工业级空气净化器",
+            "category": "工业设备",
+            "hero_scene": "工厂车间",
+            "core_selling_points": ["大风量"],
+            "key_parameters": [],
+            "product_advantages": [],
+        },
+    )
+
+    # 验证 analysis_snapshot 已同步
+    session2 = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    analysis2 = session2.get("analysis_snapshot") or {}
+    recognized2 = analysis2.get("recognized_product") or {}
+    assert recognized2.get("product_name") == "工业级空气净化器"
+    assert recognized2.get("category") == "工业设备"
+    # 其他 analysis 字段不受影响
+    assert analysis2.get("reference_summary") == analysis.get("reference_summary")
+
+
+def test_analysis_snapshot_unchanged_when_product_name_matches(client):
+    """product_name 不变时 analysis_snapshot 不应被修改."""
+    sid = create_ready_session(client)
+
+    session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    analysis_before = session.get("analysis_snapshot") or {}
+
+    # 用相同的 product_name 重新保存 copy
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
+
+    session2 = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    analysis_after = session2.get("analysis_snapshot") or {}
+    rp_before = analysis_before.get("recognized_product") or {}
+    rp_after = analysis_after.get("recognized_product") or {}
+    assert rp_before.get("product_name") == rp_after.get("product_name")
+    assert rp_before.get("category") == rp_after.get("category")
