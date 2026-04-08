@@ -91,6 +91,32 @@ def _prompt_matrix_guardrail_text() -> str:
     return " ".join(prompt_matrix_guardrails())
 
 
+def _product_name_correction_notice(
+    confirmed_copy: dict[str, Any],
+    analysis_snapshot: dict[str, Any] | None,
+) -> str:
+    """Return a planner prompt fragment when the user has overridden the product name.
+
+    If confirmed_copy.product_name differs from analysis_snapshot.recognized_product.product_name,
+    emit an explicit instruction so the LLM prioritises the user's correction over the
+    auto-detected name from the analysis stage.
+    """
+    user_name = str(confirmed_copy.get("product_name") or "").strip()
+    if not user_name or not isinstance(analysis_snapshot, dict):
+        return ""
+    recognized = analysis_snapshot.get("recognized_product")
+    if not isinstance(recognized, dict):
+        return ""
+    analysis_name = str(recognized.get("product_name") or "").strip()
+    if not analysis_name or analysis_name == user_name:
+        return ""
+    return (
+        f"重要：用户已将产品名称从「{analysis_name}」修正为「{user_name}」。"
+        f"所有 copy_focus、focus_selling_point、final_prompt_base 和图上可见文字必须以用户确认的「{user_name}」为准，"
+        f"不要使用分析阶段识别的旧产品名称「{analysis_name}」。"
+    )
+
+
 class WhataiClient:
     REQUEST_RETRYABLE_ERRORS = (httpx.TransportError,)
     IMAGE_EDIT_REQUEST_ATTEMPTS = 4
@@ -276,6 +302,7 @@ class WhataiClient:
                         "fidelity_rule 只写抽象保真约束（如'颜色不偏色，比例与参考图一致'），不要写具体文字保留指令。"
                         "final_prompt_base 是给生图模型的核心目标描述，不要在其中写具体英文单词或品牌名。"
                         f"{_prompt_matrix_guardrail_text()}"
+                        f"{_product_name_correction_notice(confirmed_copy, analysis_snapshot)}"
                         f"平台：{active_platform_id}。"
                         f"商品 copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
                         f"角色定义：{json.dumps(defaults, ensure_ascii=False)}。"
@@ -383,6 +410,7 @@ class WhataiClient:
                     "不要让 8 个 panel 都像横向主图，必须形成清晰的详情页叙事链。"
                     f"{platform_copy_instruction}"
                     f"{_prompt_matrix_guardrail_text()}"
+                    f"{_product_name_correction_notice(confirmed_copy, analysis_snapshot)}"
                     f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
                     f"当前 parameter_snapshot：{json.dumps(parameter_snapshot or {}, ensure_ascii=False)}。"
                     f"商品参考图 manifest：{json.dumps(product_manifest, ensure_ascii=False)}。"

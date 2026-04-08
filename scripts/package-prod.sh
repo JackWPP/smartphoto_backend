@@ -30,6 +30,7 @@ INCLUDE_PATHS=(
   "docs/运行与排障手册.md"
   "docs/生产上线SOP.md"
   "docs/原生部署指南.md"
+  "docs/原生运维指南.md"
 )
 
 # Only package git-tracked files from the approved whitelist so untracked workspace

@@ -851,6 +851,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps a
 
 - 总入口：`Readme.md`
 - 人话版原生部署：`docs/原生部署指南.md`
+- 日常原生运维：`docs/原生运维指南.md`
 - 运维排障：`docs/运行与排障手册.md`
 - 本文档：`docs/生产上线SOP.md`
 - 开发与协作约束：`AGENTS.md`

@@ -413,3 +413,6 @@
 - 2026-04-07 Native Deploy Docs:
   - 新增 `docs/原生部署指南.md`，用人话版流程说明半原生部署的目录结构、备份、infra compose、原生 env、storage 拷贝、systemd、迁移、发版、回滚和常见问题
   - `Readme.md` 与 `docs/生产上线SOP.md` 补充该指南入口
+- 2026-04-07 Native Ops Docs:
+  - 新增 `docs/原生运维指南.md`，面向日常巡检、发版、迁移、Redis/DB/storage 运维、API/Worker 救火与发版前后检查
+  - `Readme.md`、`docs/生产上线SOP.md` 与 `scripts/package-prod.sh` 补充该运维指南入口

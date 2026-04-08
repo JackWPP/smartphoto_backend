@@ -1832,3 +1832,37 @@ class TestPlannerValidatorInstructionLeakage:
         leakage = [e for e in errors if e.get("rule") == "instruction_leakage"]
         assert len(leakage) == 0
 
+
+# ---------------------------------------------------------------------------
+# _product_name_correction_notice 单元测试
+# ---------------------------------------------------------------------------
+
+
+def test_product_name_correction_notice_emitted_on_mismatch():
+    from app.services.upstream import _product_name_correction_notice
+
+    notice = _product_name_correction_notice(
+        {"product_name": "空气净化器"},
+        {"recognized_product": {"product_name": "除湿机", "category": "家电"}},
+    )
+    assert "空气净化器" in notice
+    assert "除湿机" in notice
+
+
+def test_product_name_correction_notice_empty_when_matching():
+    from app.services.upstream import _product_name_correction_notice
+
+    notice = _product_name_correction_notice(
+        {"product_name": "除湿机"},
+        {"recognized_product": {"product_name": "除湿机", "category": "家电"}},
+    )
+    assert notice == ""
+
+
+def test_product_name_correction_notice_empty_when_no_analysis():
+    from app.services.upstream import _product_name_correction_notice
+
+    assert _product_name_correction_notice({"product_name": "空气净化器"}, None) == ""
+    assert _product_name_correction_notice({"product_name": "空气净化器"}, {}) == ""
+    assert _product_name_correction_notice({"product_name": ""}, {"recognized_product": {"product_name": "除湿机"}}) == ""
+

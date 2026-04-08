@@ -447,6 +447,35 @@ def _invalidate_analysis_outputs(session: SessionModel) -> None:
     _clear_analysis_downstream_outputs(session)
 
 
+def _sync_analysis_snapshot_product(session: SessionModel) -> None:
+    """Sync confirmed_copy product_name/category into analysis_snapshot.recognized_product.
+
+    When a user overrides the product name or category in Step 4, the analysis snapshot
+    should reflect the user's decision so that downstream planners receive consistent
+    signals instead of contradictory ones (analysis says "除湿机" while copy says "空气净化器").
+    """
+    final_copy = session.confirmed_copy or {}
+    final_product_name = str(final_copy.get("product_name") or "").strip()
+    final_category = str(final_copy.get("category") or "").strip()
+    if not isinstance(session.analysis_snapshot, dict) or not final_product_name:
+        return
+    recognized = session.analysis_snapshot.get("recognized_product")
+    if not isinstance(recognized, dict):
+        return
+    snapshot_pn = str(recognized.get("product_name") or "").strip()
+    snapshot_cat = str(recognized.get("category") or "").strip()
+    if snapshot_pn == final_product_name and snapshot_cat == final_category:
+        return
+    session.analysis_snapshot = {
+        **session.analysis_snapshot,
+        "recognized_product": {
+            **recognized,
+            "product_name": final_product_name,
+            **({"category": final_category} if final_category else {}),
+        },
+    }
+
+
 def _invalidate_strategy_inputs(session: SessionModel) -> None:
     _invalidate_analysis_outputs(session)
 
@@ -1304,7 +1333,26 @@ def put_copy_form(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    payload = sanitize_copy_form_payload(req.model_dump())
+
+    # --- Fix: headline 联动 product_name ---
+    # 当旧 headline 是 product_name 的自动 fallback（两者相同），且 product_name 发生变化时，
+    # 清空 headline 让 normalize_copy_payload 从新 product_name 重新派生。
+    old_copy = sanitize_copy_form_payload(session.confirmed_copy)
+    old_product_name = old_copy.get("product_name", "")
+    old_headline = old_copy.get("headline", "")
+    incoming = req.model_dump()
+    new_product_name = (incoming.get("product_name") or "").strip()
+    incoming_headline = (incoming.get("headline") or "").strip()
+    if (
+        old_headline
+        and old_headline == old_product_name
+        and new_product_name
+        and new_product_name != old_product_name
+        and (not incoming_headline or incoming_headline == old_product_name)
+    ):
+        incoming["headline"] = ""
+
+    payload = sanitize_copy_form_payload(incoming)
     preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"), principal.app_id)
     if payload.get("style_preset_id") and preset is None:
         raise AppError("invalid_request", "style preset not found", 404)
@@ -1312,6 +1360,12 @@ def put_copy_form(
     if preset is not None and not payload.get("style_choice"):
         payload["style_choice"] = preset.name
     session.confirmed_copy = sanitize_copy_form_payload(payload)
+
+    # --- Fix: 同步 analysis_snapshot.recognized_product ---
+    # 当用户修正了 product_name/category 时，同步更新 analysis_snapshot 中的对应字段，
+    # 避免下游 planner 收到矛盾的产品名称信号。
+    _sync_analysis_snapshot_product(session)
+
     refresh_session_search_cache(session)
     session.strategy_preview = None
     session.detail_strategy_preview = None

@@ -293,6 +293,7 @@ SYSTEMCTL="sudo systemctl" ./scripts/native-deploy.sh --branch <deploy-branch>
 - ⚡ [生图提速优化报告（客户版）](./docs/生图提速优化报告_客户版.md)
 - 🚢 [项目运行、本地报错诊断与生产部署排障手册](./docs/运行与排障手册.md)
 - 🧩 [原生部署指南：Docker 只保留 Postgres/Redis](./docs/原生部署指南.md)
+- 🛠️ [原生运维指南：巡检、发版与救火](./docs/原生运维指南.md)
 - 📋 [生产上线 SOP：半原生 + Docker 基础设施](./docs/生产上线SOP.md)
 - 🤝 [甲方框架手册项目对齐说明（对外版）](./docs/甲方框架手册_项目对齐说明_对外版.md)
 - 🧾 [甲方框架手册项目对齐说明（内部评估版）](./docs/甲方框架手册_项目对齐说明_内部评估版.md)
