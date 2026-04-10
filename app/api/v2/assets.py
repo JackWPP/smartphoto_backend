@@ -24,6 +24,7 @@ from app.services.repo import (
     list_active_session_images,
     list_session_prompt_overrides,
 )
+from app.services.storage import public_url_for
 from app.services.strategy_overrides import serialize_session_override
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -283,8 +284,8 @@ def get_asset_history(
             "asset_id": h.id,
             "version_no": h.version_no,
             "round_no": h.round_no,
-            "image_url": h.image_url,
-            "thumbnail_url": h.thumbnail_url,
+            "image_url": public_url_for(h.image_url),
+            "thumbnail_url": public_url_for(h.thumbnail_url),
             "width": h.width,
             "height": h.height,
             "status": h.status,
@@ -351,6 +352,11 @@ def restore_asset(
 
     target_key = _asset_restore_key(target)
     previous_asset = next((item for item in current_assets if _asset_restore_key(item) == target_key), None)
+    if (
+        previous_asset is not None
+        and previous_asset.image_url == target.image_url
+    ):
+        raise AppError("invalid_request", "该槽位图片已是目标版本，无需回溯", 400)
     next_version = current_version + 1
 
     created_assets_by_key: dict[tuple[str, str], AssetModel] = {}
