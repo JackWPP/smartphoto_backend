@@ -207,3 +207,136 @@ def list_active_category_catalog(
         return _serialize(list_category_catalog(db, include_inactive=False))
     with db_session.SessionLocal() as owned_db:
         return _serialize(list_category_catalog(owned_db, include_inactive=False))
+
+
+CATEGORY_VIEW_SUGGESTIONS: dict[str, list[dict[str, str]]] = {
+    # 家电类
+    "air_purifier": [
+        {"view": "filter_closeup", "label": "建议补拍滤芯/滤网特写", "priority": "high"},
+        {"view": "control_panel", "label": "建议补拍控制面板/显示屏", "priority": "high"},
+        {"view": "air_outlet", "label": "建议补拍出风口细节", "priority": "medium"},
+    ],
+    "humidifier": [
+        {"view": "water_tank", "label": "建议补拍透明水箱特写", "priority": "high"},
+        {"view": "mist_outlet", "label": "建议补拍喷雾口细节", "priority": "medium"},
+    ],
+    "water_purifier": [
+        {"view": "filter_element", "label": "建议补拍滤芯/滤网特写", "priority": "high"},
+        {"view": "control_panel", "label": "建议补拍控制面板", "priority": "medium"},
+        {"view": "installation", "label": "建议补拍安装方式", "priority": "medium"},
+    ],
+    "robot_vacuum": [
+        {"view": "bottom_view", "label": "建议补拍底部刷头/轮组", "priority": "high"},
+        {"view": "dust_bin", "label": "建议补拍集尘盒", "priority": "medium"},
+        {"view": "charging_dock", "label": "建议补拍充电底座", "priority": "medium"},
+    ],
+    "coffee_machine": [
+        {"view": "brewing_group", "label": "建议补拍冲泡组件", "priority": "high"},
+        {"view": "water_tank", "label": "建议补拍水箱", "priority": "medium"},
+        {"view": "control_panel", "label": "建议补拍操控面板", "priority": "medium"},
+    ],
+    # 个护美妆类
+    "electric_toothbrush": [
+        {"view": "brush_head", "label": "建议补拍刷头细节", "priority": "high"},
+        {"view": "charging_base", "label": "建议补拍充电底座", "priority": "medium"},
+    ],
+    "hair_dryer": [
+        {"view": "nozzle", "label": "建议补拍风嘴/配件", "priority": "high"},
+        {"view": "control_buttons", "label": "建议补拍控制按钮", "priority": "medium"},
+    ],
+    "perfume": [
+        {"view": "bottle_detail", "label": "建议补拍瓶身细节/logo", "priority": "high"},
+        {"view": "cap_detail", "label": "建议补拍瓶盖工艺", "priority": "medium"},
+        {"view": "packaging", "label": "建议补拍外包装", "priority": "medium"},
+    ],
+    "skincare": [
+        {"view": "texture", "label": "建议补拍产品质地/膏体", "priority": "high"},
+        {"view": "ingredients_label", "label": "建议补拍成分表", "priority": "medium"},
+        {"view": "packaging_detail", "label": "建议补拍包装细节", "priority": "medium"},
+    ],
+    # 家居类
+    "mattress": [
+        {"view": "cross_section", "label": "��议补拍截面/内部结构", "priority": "high"},
+        {"view": "fabric_detail", "label": "建议补拍面料细节", "priority": "medium"},
+        {"view": "size_reference", "label": "建议补拍尺寸参照", "priority": "medium"},
+    ],
+    "chair": [
+        {"view": "mechanism", "label": "建议补拍升降/调节机构", "priority": "high"},
+        {"view": "material_detail", "label": "建议补拍材质细节", "priority": "medium"},
+        {"view": "multi_angle", "label": "建议补拍多角度", "priority": "medium"},
+    ],
+    # 宠物类
+    "pet_water_fountain": [
+        {"view": "filter", "label": "建议补拍滤芯特写", "priority": "high"},
+        {"view": "water_flow", "label": "建议补拍��水方式", "priority": "medium"},
+        {"view": "pet_using", "label": "建议补拍宠物使用场景", "priority": "medium"},
+    ],
+    # 数码配件
+    "charger": [
+        {"view": "ports", "label": "建议补拍接口细节", "priority": "high"},
+        {"view": "size_comparison", "label": "建议补拍尺寸对比", "priority": "medium"},
+    ],
+    "keyboard": [
+        {"view": "keycap_detail", "label": "建议补拍键帽细节", "priority": "high"},
+        {"view": "rgb_lighting", "label": "建议补拍灯效展示", "priority": "medium"},
+        {"view": "side_profile", "label": "建议补拍侧面高度", "priority": "medium"},
+    ],
+}
+
+# Fallback by category family
+_FAMILY_VIEW_SUGGESTIONS: dict[str, list[dict[str, str]]] = {
+    "appliance": [
+        {"view": "control_panel", "label": "建议补拍控制面板/按钮区域", "priority": "medium"},
+        {"view": "detail_closeup", "label": "建议补拍关键部件特写", "priority": "medium"},
+    ],
+    "beauty": [
+        {"view": "texture_or_ingredient", "label": "建议补拍产品质地或成分信息", "priority": "medium"},
+        {"view": "packaging", "label": "建议补拍包装细节", "priority": "medium"},
+    ],
+    "furniture": [
+        {"view": "material_detail", "label": "建议补拍材质/面料细节", "priority": "medium"},
+        {"view": "size_reference", "label": "建议补拍尺寸参照", "priority": "medium"},
+    ],
+    "pet": [
+        {"view": "pet_using", "label": "建议补拍宠物使用场景", "priority": "medium"},
+    ],
+    "digital": [
+        {"view": "port_detail", "label": "建议补拍接口/连接细节", "priority": "medium"},
+    ],
+}
+
+_SLUG_TO_FAMILY: dict[str, str] = {
+    "air_purifier": "appliance", "humidifier": "appliance", "water_purifier": "appliance",
+    "robot_vacuum": "appliance", "coffee_machine": "appliance", "air_conditioner": "appliance",
+    "water_heater": "appliance", "washing_machine": "appliance", "dishwasher": "appliance",
+    "microwave": "appliance", "oven": "appliance", "rice_cooker": "appliance",
+    "electric_toothbrush": "beauty", "hair_dryer": "beauty", "perfume": "beauty",
+    "skincare": "beauty", "shaver": "beauty", "straightener": "beauty",
+    "mattress": "furniture", "sofa": "furniture", "desk": "furniture", "chair": "furniture",
+    "lamp": "furniture", "storage": "furniture",
+    "pet_water_fountain": "pet", "pet_food": "pet", "cat_litter": "pet",
+    "charger": "digital", "power_bank": "digital", "keyboard": "digital",
+    "mouse": "digital", "smartwatch": "digital",
+}
+
+
+def suggest_supplementary_views(
+    category_slug: str | None,
+    detected_view_slots: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Return category-aware supplementary image suggestions.
+
+    Returns a list of dicts with keys: view, label, priority.
+    Filters out views that are already covered by detected_view_slots.
+    """
+    if not category_slug:
+        return []
+    slug = category_slug.lower().replace(" ", "_").replace("-", "_")
+    suggestions = CATEGORY_VIEW_SUGGESTIONS.get(slug)
+    if suggestions is None:
+        family = _SLUG_TO_FAMILY.get(slug)
+        suggestions = _FAMILY_VIEW_SUGGESTIONS.get(family, []) if family else []
+    if not suggestions:
+        return []
+    detected = set(detected_view_slots or [])
+    return [s for s in suggestions if s["view"] not in detected]

@@ -12,6 +12,7 @@ from app.services.copy_normalization import normalize_phrase_list, repair_broken
 from app.services.main_gallery_rules import (
     build_copy_blocks,
     expression_metadata,
+    get_grammar_family,
     get_main_gallery_slot_blueprints,
     get_platform_overlay,
     platform_profile,
@@ -156,6 +157,17 @@ def build_strategy_preview(
         asset_plan, prompt_plan = _apply_main_copy_design(asset_plan, prompt_plan, copy_design_plan)
     asset_plan = _sync_asset_plan_quality_metadata(asset_plan, prompt_plan)
 
+    # Category-aware supplementary view suggestions
+    from app.services.category_catalog import suggest_supplementary_views
+    category_slug = ""
+    if analysis_snapshot:
+        recognized = analysis_snapshot.get("recognized_product") or {}
+        category_slug = str(recognized.get("category", "")).strip()
+    detected_slots = []
+    if analysis_snapshot:
+        detected_slots = [str(s).strip() for s in (analysis_snapshot.get("detected_view_slots") or []) if str(s).strip()]
+    supplementary_suggestions = suggest_supplementary_views(category_slug, detected_slots)
+
     return {
         "product_name": normalized_copy.get("product_name", ""),
         "hero_scene": normalized_copy.get("hero_scene", ""),
@@ -194,6 +206,7 @@ def build_strategy_preview(
         "strategy_reference_manifest": strategy_reference_manifest,
         "asset_plan": asset_plan,
         "prompt_plan": prompt_plan,
+        "supplementary_view_suggestions": supplementary_suggestions,
         "input_hash": strategy_preview_input_hash(
             confirmed_copy,
             active_platform_id,
@@ -309,6 +322,10 @@ def _build_asset_plan(
             or recommended_mode
         )
         meta = expression_metadata(expression_mode)
+        slot_layout = slot.get("layout_recipe", {})
+        expr_layout_override = meta.get("layout_recipe_override") if meta else None
+        grammar_family = get_grammar_family(active_platform_id)
+        resolved_layout = _resolve_layout_recipe(slot_layout, expr_layout_override, grammar_family)
         copy_blocks = build_copy_blocks(
             platform_id=active_platform_id,
             slot_blueprint=slot,
@@ -339,6 +356,7 @@ def _build_asset_plan(
                 "locked": bool(chosen.get("locked")),
                 "reference_image_limit": _reference_image_limit_for_plan(slot, analysis_snapshot, []),
                 "risk_flags": [str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()],
+                "resolved_layout_recipe": resolved_layout,
             }
         )
     return sorted(plan, key=lambda item: int(item.get("display_order") or 0))
@@ -563,6 +581,129 @@ def _merge_asset_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | None
     return merged
 
 
+# --- Layout Recipe helpers ---
+
+_AVOID_PATTERN_LABELS = {
+    "pure_photo_no_structure": "禁止纯摄影无结构无导购骨架的画面",
+    "magazine_spread": "禁止杂志排版或双页对开式构图",
+    "collage_grid": "禁止拼贴网格或多图并列式排版",
+    "dense_text_overlay": "禁止密集文字覆盖或信息卡海报化",
+    "empty_center_composition": "禁止空洞的居中单体构图，需要有明确的导购承托层",
+    "lifestyle_magazine": "禁止生活方式杂志风，需要明确的销售导购结构",
+    "single_angle_repeat": "禁止重复角度的小图凑数",
+    "empty_white_bg": "禁止空洞纯白无信息背景",
+    "lifestyle_only": "禁止纯生活场景，需要有佐证/参数信息",
+    "empty_proof_area": "禁止空洞的证据区，必须有实质性参数或认证",
+    "empty_flat_display": "禁止平淡的白底陈列图",
+    "simple_reshoot": "禁止简单换背景重拍",
+    "hard_sell_layout": "禁止传统硬广电商排版",
+    "any_text_overlay": "禁止任何文字覆盖",
+    "scene_elements": "禁止场景元素出现",
+    "subtle_layout": "禁止过于含蓄没有冲击力的版式",
+    "information_overload": "禁止信息过载密集排列",
+    "dense_certificate_wall": "禁止密集证书墙堆砌",
+    "certificate_wall": "禁止证书墙堆砌",
+}
+
+_ANCHOR_LABELS = {
+    "center": "居中",
+    "left": "偏左",
+    "right": "偏右",
+    "center_bottom": "中下",
+}
+
+_TITLE_ZONE_LABELS = {
+    "top_left": "左上方",
+    "top_center": "顶部居中",
+    "top_right": "右上方",
+}
+
+_CONTAINER_LABELS = {
+    "none": "",
+    "pill": "pill式短标签",
+    "card": "卡片式容器",
+    "banner": "横幅式标题栏",
+    "floating": "浮层式标签",
+}
+
+_FRAME_STRENGTH_LABELS = {
+    "none": "无框架",
+    "light": "轻框架",
+    "medium": "中等框架感",
+    "strong": "强导购框架",
+}
+
+
+def _compile_layout_directive(layout_recipe: dict[str, Any]) -> str:
+    """Compile a layout_recipe dict into a Chinese layout directive string."""
+    if not layout_recipe:
+        return ""
+    parts: list[str] = []
+    anchor = layout_recipe.get("product_anchor", "center")
+    occupancy = layout_recipe.get("product_occupancy", [0.45, 0.60])
+    title_zone = layout_recipe.get("title_zone")
+    benefit_chips = layout_recipe.get("benefit_chip_count", 0)
+    proof_blocks = layout_recipe.get("proof_block_count", 0)
+    container = layout_recipe.get("text_container_style", "none")
+    frame = layout_recipe.get("frame_strength", "light")
+
+    anchor_label = _ANCHOR_LABELS.get(anchor, "居中")
+    frame_label = _FRAME_STRENGTH_LABELS.get(frame, "轻框架")
+    occ_lo = int(occupancy[0] * 100) if isinstance(occupancy, (list, tuple)) and len(occupancy) >= 2 else 45
+    occ_hi = int(occupancy[1] * 100) if isinstance(occupancy, (list, tuple)) and len(occupancy) >= 2 else 60
+
+    parts.append(f"版式骨架：产品主体{anchor_label}(占画面{occ_lo}-{occ_hi}%)")
+
+    if title_zone:
+        tz_label = _TITLE_ZONE_LABELS.get(title_zone, title_zone)
+        parts.append(f"{tz_label}留标题区")
+    if benefit_chips > 0:
+        container_label = _CONTAINER_LABELS.get(container, "")
+        chip_desc = f"{benefit_chips}个{container_label}利益标签" if container_label else f"{benefit_chips}个利益标签"
+        parts.append(chip_desc)
+    if proof_blocks > 0:
+        parts.append(f"{proof_blocks}个证据/参数信息块")
+    parts.append(f"框架感{frame_label}")
+
+    directive = "，".join(parts) + "。"
+
+    avoid = layout_recipe.get("avoid_patterns", [])
+    avoid_labels = [_AVOID_PATTERN_LABELS.get(p) for p in avoid if p in _AVOID_PATTERN_LABELS]
+    if avoid_labels:
+        directive += " " + "；".join(avoid_labels) + "。"
+
+    return directive
+
+
+def _resolve_layout_recipe(
+    slot_layout: dict[str, Any],
+    expression_override: dict[str, Any] | None,
+    grammar_family: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge slot layout_recipe with expression override and grammar family defaults."""
+    resolved = dict(slot_layout)
+    if expression_override:
+        resolved.update(expression_override)
+    if grammar_family:
+        # Apply grammar family defaults where the slot doesn't have an explicit value
+        if not resolved.get("frame_strength") or resolved.get("frame_strength") == "inherit":
+            resolved["frame_strength"] = grammar_family.get("default_frame_strength", "light")
+        # Merge avoid patterns (union)
+        family_avoids = grammar_family.get("family_avoid_patterns", [])
+        slot_avoids = resolved.get("avoid_patterns", [])
+        resolved["avoid_patterns"] = list(dict.fromkeys(slot_avoids + family_avoids))
+        # Apply copy weight caps/floors
+        if "default_copy_weight_cap" in grammar_family:
+            cap = grammar_family["default_copy_weight_cap"]
+            if resolved.get("copy_weight", 0) > cap:
+                resolved["copy_weight"] = cap
+        if "default_copy_weight_floor" in grammar_family:
+            floor = grammar_family["default_copy_weight_floor"]
+            if resolved.get("copy_weight", 0) < floor:
+                resolved["copy_weight"] = floor
+    return resolved
+
+
 def _build_default_prompt_plan_item(
     *,
     confirmed_copy: dict[str, Any],
@@ -588,6 +729,8 @@ def _build_default_prompt_plan_item(
     feature_highlights = [str(item).strip() for item in (parameter_snapshot or {}).get("feature_highlights", []) if str(item).strip()]
 
     slot_id = str(plan_item["slot_id"])
+    layout_recipe = plan_item.get("resolved_layout_recipe") or plan_item.get("layout_recipe", {})
+    layout_structure_directive = _compile_layout_directive(layout_recipe)
     product_name = confirmed_copy.get("product_name") or "商品"
     copy_blocks = dict(plan_item.get("copy_blocks") or {})
     selling_points = _split_points(confirmed_copy.get("selling_points"))
@@ -741,6 +884,11 @@ def _build_default_prompt_plan_item(
     if slot_id in {"detail", "proof_authority"}:
         resolved_constraints.append("局部图只能放大解释上传参考图里可验证的结构，不可杜撰不属于真实商品的内部细节。")
     resolved_constraints.extend(_truth_contract_constraints(slot_id, truth_contract))
+    # Add avoid pattern constraints from layout recipe
+    for pattern in layout_recipe.get("avoid_patterns", [])[:4]:
+        label = _AVOID_PATTERN_LABELS.get(pattern)
+        if label and label not in resolved_constraints:
+            resolved_constraints.append(label)
 
     return {
         "slot_id": slot_id,
@@ -785,6 +933,8 @@ def _build_default_prompt_plan_item(
         "truth_contract": truth_contract,
         "resolved_constraints": resolved_constraints,
         "text_policy": plan_item.get("text_policy"),
+        "layout_structure_directive": layout_structure_directive,
+        "resolved_layout_recipe": layout_recipe,
     }
 
 
@@ -1075,6 +1225,17 @@ def _truth_contract_constraints(slot_id: str, truth_contract: dict[str, Any]) ->
         constraints.append(repair_broken_text(truth_contract.get("scene_grounding_rule")))
     if entities:
         constraints.append("若表达卖点，必须出现这些真实视觉证据：" + "、".join(entities[:3]))
+
+    # Hardened fidelity locks (v3)
+    if truth_contract.get("logo_lock_mode") == "strict":
+        constraints.append("【绝对禁止】不得移动、旋转、缩放或去除任何品牌 logo 和商标，logo 位置和大小必须与参考图完全一致")
+    if truth_contract.get("text_on_product_lock"):
+        constraints.append("产品本体上的型号、按键标签、屏幕文字、铭牌丝印必须与原图完全一致，不得修改、替换或省略")
+    if truth_contract.get("color_drift_tolerance") == "zero":
+        constraints.append("色相、饱和度、明度必须与参考图一致，即使轻微色偏也不允许；环境光不得改变产品本体颜色")
+    elif truth_contract.get("color_drift_tolerance") == "low":
+        constraints.append("产品主色调和材质色必须与参考图一致，允许环境光带来的轻微色温变化但不允许明显色偏")
+
     return [item for item in constraints if item]
 
 

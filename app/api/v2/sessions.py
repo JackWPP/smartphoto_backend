@@ -185,6 +185,14 @@ def _clear_analysis_downstream_outputs(session: SessionModel) -> None:
     session.parameter_snapshot = None
     session.strategy_preview = None
     session.detail_strategy_preview = None
+    # Clear cached style preset resolution to prevent cross-product style pollution.
+    # The style_preset_id itself is preserved (user's deliberate choice), but the
+    # resolved/expanded preset data must be re-fetched from DB on next generation.
+    if isinstance(session.confirmed_copy, dict) and "resolved_style_preset" in session.confirmed_copy:
+        session.confirmed_copy = {
+            k: v for k, v in session.confirmed_copy.items()
+            if k != "resolved_style_preset"
+        }
 
 
 def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:

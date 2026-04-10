@@ -43,7 +43,7 @@ from app.services.locking import release_locks
 from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy, merge_parameter_snapshot_into_copy
 from app.services.prompts import compose_prompt
 from app.services.repo import list_visible_prompt_presets_by_ids
-from app.services.reference_images import build_reference_manifest, load_reference_images, select_reference_images_for_role
+from app.services.reference_images import LoadedReferenceImage, build_reference_manifest, load_reference_images, select_reference_images_for_role
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter
 from app.services.strategy import build_strategy_preview, strategy_preview_input_hash
@@ -3094,3 +3094,303 @@ def _stitch_detail_panels(panel_images: list[bytes]) -> bytes:
     buffer = io.BytesIO()
     canvas.save(buffer, format="JPEG", quality=92)
     return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Text-edit mode: replace visible copy on an already-generated image
+# ---------------------------------------------------------------------------
+
+
+def _load_asset_as_reference_image(
+    asset: AssetModel, *, storage: "StorageAdapter"
+) -> LoadedReferenceImage:
+    """Load a previously generated asset image as a LoadedReferenceImage for text-edit mode."""
+    object_key = storage.normalize_object_key(asset.image_url)
+    content = storage.read_bytes(object_key)
+    return LoadedReferenceImage(
+        image_id=f"generated:{asset.id}",
+        slot_type="generated_source",
+        display_order=0,
+        source_url=asset.image_url,
+        width=asset.width or 0,
+        height=asset.height or 0,
+        mime_type=asset.mime_type or "image/png",
+        file_size=len(content),
+        file_name=f"generated_{asset.id}.png",
+        path=None,
+        content=content,
+    )
+
+
+def run_edit_asset_text_job(db: Session, job_id: str) -> dict[str, Any] | None:
+    """Replace visible copy on an already-generated main_gallery image.
+
+    The source image is used as the primary reference so the upstream model
+    preserves composition, color, and product placement while only changing
+    the rendered text.
+    """
+    from app.services.prompts import compose_text_edit_prompt
+
+    storage = get_storage_adapter()
+    job = _require_job(db, job_id)
+    session = _require_session(db, job.session_id)
+    payload = job.input_payload or {}
+    lock_keys = payload.get("lock_keys") or []
+
+    try:
+        update_job_status(db, job, status="running", progress=3, stage="preparing")
+        append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
+
+        ensure_session_transition(session.status, "generating")
+        session.status = "generating"
+        session.current_step = 6
+
+        # --- Load source asset ---
+        source_asset = (
+            db.query(AssetModel)
+            .filter(AssetModel.id == payload["parent_asset_id"])
+            .one_or_none()
+        )
+        if not source_asset:
+            raise AppError("invalid_request", "source asset not found", 400)
+        source_snapshot = source_asset.generation_snapshot or {}
+        source_final_prompt = source_snapshot.get("final_prompt", "")
+        if not source_final_prompt:
+            raise AppError("invalid_request", "source asset has no final_prompt in generation_snapshot", 400)
+
+        update_job_status(db, job, status="running", progress=10, stage="loading_references")
+
+        # --- Load generated image as primary reference ---
+        generated_ref = _load_asset_as_reference_image(source_asset, storage=storage)
+
+        # --- Load session product images as secondary references (max 2) ---
+        session_images = _session_images(db, session.id)
+        product_refs: list[LoadedReferenceImage] = []
+        if session_images:
+            product_refs = load_reference_images(session_images, storage=storage)
+        all_references = [generated_ref, *product_refs[:2]]
+
+        update_job_status(db, job, status="running", progress=20, stage="composing_prompt")
+
+        # --- Build text-edit prompt ---
+        source_copy_blocks = source_snapshot.get("copy_blocks") or {}
+        new_copy_blocks = payload.get("copy_blocks") or {}
+        platform_overlay = source_snapshot.get("platform_overlay") or {}
+        platform_overlay_id = platform_overlay.get("overlay_id") if isinstance(platform_overlay, dict) else None
+        if not platform_overlay_id and session.active_platform_id:
+            platform_overlay_id = session.active_platform_id
+
+        prompt_payload = compose_text_edit_prompt(
+            source_final_prompt=source_final_prompt,
+            source_copy_blocks=source_copy_blocks,
+            new_copy_blocks=new_copy_blocks,
+            platform_overlay_id=platform_overlay_id,
+            instruction=payload.get("instruction"),
+        )
+
+        update_job_status(db, job, status="running", progress=30, stage="generating_image")
+
+        # --- Generate image ---
+        aspect_ratio = payload.get("aspect_ratio") or source_snapshot.get("aspect_ratio") or "1:1"
+        image_size = _resolve_image_size(aspect_ratio)
+        role = payload.get("asset_role") or source_asset.asset_role or ""
+        display_order = payload.get("display_order") if payload.get("display_order") is not None else (source_asset.display_order or 0)
+        slot_id = payload.get("slot_id") or source_asset.slot_id or role
+
+        client = WhataiClient()
+        started_at = time.perf_counter()
+        image_bytes = _generate_image_with_asset_retry(
+            client=client,
+            prompt=prompt_payload["final_prompt"],
+            image_size=image_size,
+            aspect_ratio=aspect_ratio,
+            reference_images=all_references,
+            role=role,
+            display_order=display_order,
+        )
+        render_ms = int((time.perf_counter() - started_at) * 1000)
+
+        update_job_status(db, job, status="running", progress=70, stage="saving")
+
+        # --- Save to storage ---
+        last_version = session.latest_result_version or 0
+        round_no = session.generation_round or 1
+        version_no = last_version + 1
+
+        image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
+            session_id=session.id,
+            round_no=round_no,
+            version_no=version_no,
+            role=role,
+            display_order=display_order,
+            image_bytes=image_bytes,
+            ext=".jpg",
+        )
+
+        # --- Build generation snapshot ---
+        generation_snapshot = {
+            "final_prompt": prompt_payload["final_prompt"],
+            "prompt_blocks": prompt_payload["blocks"],
+            "copy_blocks": prompt_payload.get("copy_blocks") or {},
+            "edit_mode": "text_replace",
+            "source_asset_id": source_asset.id,
+            "source_version_no": source_asset.version_no,
+            "text_changes": {
+                "source_copy_blocks": source_copy_blocks,
+                "new_copy_blocks": new_copy_blocks,
+                "merged_copy_blocks": prompt_payload.get("copy_blocks") or {},
+            },
+            "reference_image_ids": [ref.image_id for ref in all_references],
+            "reference_slots": [ref.slot_type for ref in all_references],
+            "upstream_endpoint": "/v1/images/edits",
+            "aspect_ratio": aspect_ratio,
+            "size": image_size,
+            "slot_id": slot_id,
+            "expression_mode": payload.get("expression_mode") or source_asset.expression_mode,
+            "rule_pack_id": payload.get("rule_pack_id") or source_asset.rule_pack_id,
+            "timing": {"render_total_ms": render_ms},
+        }
+
+        # --- Create new asset ---
+        new_asset = AssetModel(
+            session_id=session.id,
+            job_id=job.id,
+            round_no=round_no,
+            version_no=version_no,
+            parent_asset_id=source_asset.id,
+            platform_id=session.active_platform_id,
+            asset_family="main_gallery",
+            asset_kind="panel",
+            asset_role=role,
+            slot_id=slot_id,
+            expression_mode=payload.get("expression_mode") or source_asset.expression_mode,
+            rule_pack_id=payload.get("rule_pack_id") or source_asset.rule_pack_id,
+            display_order=display_order,
+            image_url=image_url,
+            thumbnail_url=thumb_url,
+            width=width,
+            height=height,
+            mime_type=mime_type,
+            file_size=file_size,
+            prompt_snapshot=prompt_payload["final_prompt"][:4000],
+            edit_instruction=payload.get("instruction"),
+            generation_snapshot=generation_snapshot,
+            status="ready",
+        )
+        db.add(new_asset)
+        db.flush()
+
+        append_job_event(
+            db,
+            job.id,
+            "asset_ready",
+            {
+                "event": "asset_ready",
+                "asset_id": new_asset.id,
+                "display_order": display_order,
+                "render_total_ms": render_ms,
+                "edit_mode": "text_replace",
+            },
+        )
+
+        update_job_status(db, job, status="running", progress=80, stage="carry_forward")
+
+        # --- Carry forward other slots from the source version ---
+        carry_forward_version = _resolve_regenerate_carry_forward_version(
+            db,
+            session_id=session.id,
+            asset_family="main_gallery",
+            parent_asset_id=source_asset.id,
+            last_version=last_version,
+        )
+        created_assets = [new_asset]
+        regenerated_slot_id = str(slot_id).strip()
+        for existing_asset in _version_assets(db, session.id, carry_forward_version, asset_family="main_gallery"):
+            if existing_asset.id == source_asset.id:
+                continue
+            existing_slot = str(existing_asset.slot_id or existing_asset.asset_role or "").strip()
+            if existing_slot == regenerated_slot_id:
+                continue
+            cloned = _clone_asset_for_version(
+                existing_asset,
+                job_id=job.id,
+                round_no=round_no,
+                version_no=version_no,
+                edit_instruction=payload.get("instruction"),
+            )
+            db.add(cloned)
+            db.flush()
+            created_assets.append(cloned)
+            append_job_event(
+                db,
+                job.id,
+                "asset_ready",
+                {
+                    "event": "asset_ready",
+                    "asset_id": cloned.id,
+                    "display_order": cloned.display_order,
+                    "carry_forward": True,
+                    "render_total_ms": 0,
+                },
+            )
+
+        # --- Update session ---
+        session.generation_round = max(session.generation_round, round_no)
+        session.latest_result_version = version_no
+        session.latest_generate_job_id = job.id
+        session.status = "completed"
+        session.current_step = 6
+        update_session_last_generated_at(session)
+        refresh_session_search_cache(session)
+
+        result_payload = {
+            "asset_ids": [a.id for a in created_assets],
+            "generation_round": session.generation_round,
+            "version_no": version_no,
+            "edit_mode": "text_replace",
+            "edited_asset_id": new_asset.id,
+            "edited_slot_id": slot_id,
+        }
+        update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
+        append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+
+        if session.user_id:
+            create_job_completion_notification(
+                db,
+                user_id=session.user_id,
+                session_id=session.id,
+                job_type=job.job_type,
+                succeeded=True,
+            )
+
+        # --- Dispatch quality review if applicable ---
+        _pending_review_job_id = _dispatch_quality_review(db, session, job, created_assets)
+        return {"quality_review_job_id": _pending_review_job_id}
+
+    except AppError as exc:
+        update_job_status(
+            db,
+            job,
+            status="failed",
+            progress=100,
+            stage="failed",
+            error_code=str(exc.error.code),
+            error_message=exc.message,
+            result_payload=_job_failure_payload(exc, planner_stage=None),
+        )
+        append_job_event(
+            db,
+            job.id,
+            "job_failed",
+            {
+                "event": "job_failed",
+                "error": exc.message,
+                "error_code": exc.error.code,
+                "upstream_reason": exc.key,
+                "upstream_http_status": exc.http_status,
+            },
+        )
+        session.status = "failed"
+        raise
+    finally:
+        release_locks(lock_keys)

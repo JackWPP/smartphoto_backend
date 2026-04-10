@@ -13,6 +13,9 @@ FIDELITY_ISSUE_TAXONOMY = (
     "selling_point_not_rendered",
     "text_mismatch",
     "insufficient_reference_evidence",
+    "logo_position_drift",
+    "product_text_altered",
+    "color_palette_drift",
 )
 
 STRUCTURE_SENSITIVE_CATEGORIES = {
@@ -252,6 +255,32 @@ def build_truth_contract(
         "按上传参考图保持高度、宽度、厚薄和部件相对比例。" if proportion_score >= 45 else "缺少明确尺寸证据，避免夸张强调迷你/超大/手持比例。"
     )
 
+    # --- Truth Contract v3: Hardened Fidelity Locks ---
+    logo_lock_mode = "strict" if brand_marks_preserve else "relaxed"
+
+    # Detect text-on-product: check control_panel_note and do_not_move_features
+    _text_keywords = ("文字", "标签", "按键", "按钮", "屏幕", "面板", "显示", "字样", "型号", "logo", "LOGO", "Logo")
+    _panel_note = str(summary.get("control_panel_note") or "")
+    _do_not_move = str(summary.get("do_not_move_features") or "")
+    text_on_product_lock = any(kw in _panel_note or kw in _do_not_move for kw in _text_keywords)
+
+    # Color drift tolerance based on fidelity tier
+    color_drift_tolerance = "zero" if fidelity_tier in ("critical", "high") else ("low" if fidelity_tier == "standard" else "relaxed")
+
+    # Pre-composed hard constraint summary for high-salience prompt placement
+    hard_parts: list[str] = []
+    if logo_lock_mode == "strict":
+        hard_parts.append("不得移动、旋转、缩放或去除任何品牌logo和商标")
+    if text_on_product_lock:
+        hard_parts.append("产品本体上的型号、按键标签、屏幕文���必须与原图完全一致")
+    if color_drift_tolerance == "zero":
+        hard_parts.append("色相、饱和度、明度必须与参考图一致，不允许任何色偏")
+    elif color_drift_tolerance == "low":
+        hard_parts.append("主色调和材质色必须与参考图一致")
+    if immutable_features:
+        hard_parts.append(f"保持{immutable_features[0]}的完整外观不变")
+    hard_constraint_summary = "；".join(hard_parts[:4]) + "。" if hard_parts else ""
+
     return {
         "immutable_features": immutable_features[:6],
         "forbidden_drift": forbidden_drift[:6],
@@ -265,6 +294,11 @@ def build_truth_contract(
         "component_locks": component_locks[:8],
         "color_palette_hex": color_palette_hex,
         "brand_marks_preserve": brand_marks_preserve,
+        # Truth Contract v3: Hardened Fidelity Locks
+        "logo_lock_mode": logo_lock_mode,
+        "text_on_product_lock": text_on_product_lock,
+        "color_drift_tolerance": color_drift_tolerance,
+        "hard_constraint_summary": hard_constraint_summary,
     }
 
 

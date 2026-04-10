@@ -17,7 +17,17 @@ from app.services.jobs import now_utc
 
 router = APIRouter(prefix="/assets", tags=["feedback"])
 
-ALLOWED_ISSUE_TAGS = {"deformed", "wrong_color", "bad_text", "wrong_style", "platform_violation", "low_fidelity", "other"}
+ALLOWED_ISSUE_TAGS = {
+    # existing
+    "deformed", "wrong_color", "bad_text", "wrong_style",
+    "platform_violation", "low_fidelity", "other",
+    # layout issues
+    "weak_frame_structure", "not_platform_native", "too_photographic",
+    "insufficient_title_zone", "lack_of_proof_blocks",
+    "layout_too_empty", "layout_too_busy",
+    # fidelity issues
+    "logo_moved", "product_text_changed", "color_shifted",
+}
 
 
 class FeedbackRequest(BaseModel):
