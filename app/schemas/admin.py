@@ -287,6 +287,8 @@ class AdminCategoryCatalogItem(BaseModel):
     is_featured: bool
     is_system: bool
     is_active: bool
+    confusion_pairs: list[str] = Field(default_factory=list)
+    expected_components: list[str] = Field(default_factory=list)
     created_by: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -393,6 +395,8 @@ class AdminCategoryCatalogCreateRequest(AdminOperatorNoteMixin):
     sample_keywords: list[str] = Field(default_factory=list)
     notes: str | None = Field(default=None, max_length=1000)
     is_featured: bool = False
+    confusion_pairs: list[str] = Field(default_factory=list)
+    expected_components: list[str] = Field(default_factory=list)
 
 
 class AdminCategoryCatalogUpdateRequest(AdminOperatorNoteMixin):
@@ -404,6 +408,8 @@ class AdminCategoryCatalogUpdateRequest(AdminOperatorNoteMixin):
     notes: str | None = Field(default=None, max_length=1000)
     is_featured: bool | None = None
     is_active: bool | None = None
+    confusion_pairs: list[str] | None = None
+    expected_components: list[str] | None = None
 
 
 class AdminCategoryCatalogMutationRequest(AdminOperatorNoteMixin):

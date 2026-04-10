@@ -8,7 +8,7 @@ from app.core.response import success_response
 from app.db.session import get_db
 from app.models.asset import AssetModel
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
-from app.schemas.session import AssetRegenerateRequest, GenericGenerationJobData, AssetHistoryItem, AssetRestoreResponse
+from app.schemas.session import AssetRegenerateRequest, AssetEditTextRequest, GenericGenerationJobData, AssetHistoryItem, AssetRestoreResponse
 from app.services.dispatcher import dispatch_job
 from app.services.guards import ensure_no_running_generation_jobs
 from app.services.idempotency import check_or_create_idempotency
@@ -384,3 +384,90 @@ def restore_asset(
         "previous_asset_id": previous_asset.id if previous_asset else "",
         "slot_id": slot_id,
     })
+
+
+@router.post(
+    "/{asset_id}/edit-text",
+    response_model=APIResponse[GenericGenerationJobData],
+    summary="文字编辑 - 保持构图不变，仅替换可见文案",
+    description="使用已生成的图片作为参考，仅替换图上可见文案。当前仅支持 main_gallery 类型资产。",
+    operation_id="editAssetText",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def edit_asset_text(
+    asset_id: str,
+    req: AssetEditTextRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", description="可选幂等键。"),
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    asset = get_asset_or_404(db, asset_id)
+    session = get_session_or_404(db, asset.session_id, service_id=principal.app_id)
+    asset_family = getattr(asset, "asset_family", "main_gallery")
+    if asset_family != "main_gallery":
+        raise AppError("invalid_request", "text edit is only supported for main_gallery assets", 400)
+    if session.latest_result_version <= 0:
+        raise AppError("invalid_session_status", "results not ready", 400)
+
+    generation_snapshot = asset.generation_snapshot or {}
+    if not generation_snapshot.get("final_prompt"):
+        raise AppError("invalid_request", "source asset has no generation snapshot with final_prompt", 400)
+    if not asset.image_url:
+        raise AppError("invalid_request", "source asset has no image_url", 400)
+
+    ensure_no_running_generation_jobs(db, session.id)
+
+    input_payload = {
+        "parent_asset_id": asset.id,
+        "copy_blocks": req.copy_blocks,
+        "instruction": req.instruction,
+        "edit_mode": "text_replace",
+        "source_generation_snapshot": generation_snapshot,
+        "source_image_url": asset.image_url,
+        "slot_id": asset.slot_id,
+        "asset_role": asset.asset_role,
+        "display_order": asset.display_order,
+        "aspect_ratio": generation_snapshot.get("aspect_ratio", "1:1"),
+        "expression_mode": asset.expression_mode,
+        "rule_pack_id": asset.rule_pack_id,
+    }
+
+    idem_record = None
+    if idempotency_key:
+        hit, cached, idem_record = check_or_create_idempotency(
+            db,
+            session.id,
+            f"POST /assets/{asset_id}/edit-text",
+            idempotency_key,
+            input_payload,
+            service_id=principal.app_id,
+        )
+        if hit:
+            return success_response(cached)
+
+    lock_keys = acquire_generation_locks(session.id)
+    input_payload["lock_keys"] = lock_keys
+    try:
+        job = create_job(
+            db,
+            session_id=session.id,
+            job_type="edit_asset_text",
+            input_payload=input_payload,
+            idempotency_key=idempotency_key,
+            service_id=principal.app_id,
+        )
+    except Exception:
+        release_locks(lock_keys)
+        raise
+
+    response_data = {
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "status": job.status,
+    }
+    if idem_record is not None:
+        idem_record.response_payload = response_data
+
+    db.commit()
+    dispatch_job(job.id, queue="q.generation.main")
+    return success_response(response_data)

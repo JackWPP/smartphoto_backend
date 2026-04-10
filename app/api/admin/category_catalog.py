@@ -112,6 +112,8 @@ def create_category(
         sort_order=req.sort_order,
         aliases=req.aliases or [],
         sample_keywords=req.sample_keywords or [],
+        confusion_pairs=req.confusion_pairs or [],
+        expected_components=req.expected_components or [],
         notes=req.notes,
         is_featured=req.is_featured,
         is_system=False,

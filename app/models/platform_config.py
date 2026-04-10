@@ -36,5 +36,6 @@ class PlatformConfigModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     negative_prompt_additions: Mapped[list] = mapped_column(JSON, default=list)
     constraints: Mapped[list] = mapped_column(JSON, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    grammar_family: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     operator_note: Mapped[str | None] = mapped_column(String(512), nullable=True)

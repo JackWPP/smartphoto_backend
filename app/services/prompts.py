@@ -73,6 +73,17 @@ PROMPT_MODULE_DIRECTIVES: dict[str, str] = {
     "summary_closure": "作为尾屏收束，总结核心购买理由，完成转化闭环。",
 }
 
+_AVOID_PATTERN_PROMPT_LABELS = {
+    "pure_photo_no_structure": "禁止纯摄影无结构无导购骨架的画面",
+    "magazine_spread": "禁止杂志排版",
+    "collage_grid": "禁止拼贴网格排版",
+    "dense_text_overlay": "禁止密集文字覆盖",
+    "hard_sell_layout": "禁止传统硬广电商排版",
+    "empty_center_composition": "禁止空洞居中构图",
+    "empty_background_no_frame": "禁止纯空背景无版式承托",
+    "certificate_wall": "禁止大面积认证/证书堆砌",
+}
+
 
 def compose_prompt(
     confirmed_copy: dict,
@@ -139,6 +150,7 @@ def compose_prompt(
             copy_blocks=copy_blocks,
             text_policy=text_policy,
             platform_overlay=prompt_plan.get("platform_overlay"),
+            truth_contract=prompt_plan.get("truth_contract") if isinstance(prompt_plan.get("truth_contract"), dict) else None,
         )
     )
     strategy_fields_used = _collect_strategy_fields_used(
@@ -203,6 +215,7 @@ def format_prompt_blocks(
     copy_blocks: dict[str, Any],
     text_policy: str,
     platform_overlay: dict[str, Any] | None = None,
+    truth_contract: dict[str, Any] | None = None,
 ) -> str:
     parts = [f"请生成一张适用于电商主图组的商品图片，参考画幅比例 {aspect_ratio}。"]
     overlay_id = (platform_overlay or {}).get("overlay_id")
@@ -265,6 +278,12 @@ def format_prompt_blocks(
         parts.append("默认不要生成图上文案。")
     # --- Language constraint repeated at end (recency anchor) ---
     parts.append(platform_language_hard_constraint(overlay_id))
+    # --- Fidelity recency anchor ---
+    _hard_summary = ""
+    if isinstance(truth_contract, dict):
+        _hard_summary = str(truth_contract.get("hard_constraint_summary") or "")
+    if _hard_summary:
+        parts.append(f"【最后提醒】{_hard_summary}")
     return " ".join(parts)
 
 
@@ -300,6 +319,60 @@ def build_prompt_previews(
         ]
         previews.append(preview)
     return previews
+
+
+def compose_text_edit_prompt(
+    *,
+    source_final_prompt: str,
+    source_copy_blocks: dict[str, Any],
+    new_copy_blocks: dict[str, Any],
+    platform_overlay_id: str | None = None,
+    instruction: str | None = None,
+) -> dict[str, Any]:
+    """Build a prompt that replaces visible copy on an existing image while preserving everything else."""
+    merged = {**source_copy_blocks, **new_copy_blocks}
+    new_visible_copy = _copy_blocks_to_text(merged)
+
+    # --- Replace visible copy section in source prompt ---
+    visible_copy_pattern = re.compile(
+        r"【可见文案区】.*?(?=(?:【[^】]+】)|\Z)",
+        re.DOTALL,
+    )
+    replacement_section = f"【可见文案区】以下是允许渲染到图上的文案候选：{new_visible_copy}。" if new_visible_copy else "【可见文案区】本图不需要可见文案。"
+    if visible_copy_pattern.search(source_final_prompt):
+        modified_prompt = visible_copy_pattern.sub(replacement_section + " ", source_final_prompt)
+    else:
+        modified_prompt = source_final_prompt + " " + replacement_section
+
+    # --- Prepend preservation instruction ---
+    preserve_instruction = (
+        "【重要指令】你正在对一张已有的电商图片进行文字替换。"
+        "请严格保持原图的画面构图、色调配色、背景场景、产品位置、产品外观、整体风格和所有非文字视觉元素完全不变。"
+        "仅将图中的可见文案替换为下方指定的新文案内容。"
+        "如果原图中有文字区域，在相同位置用新文案替换。"
+        "如果新文案比原文案更短，保持相同的排版位置和字号。"
+    )
+    modified_prompt = preserve_instruction + " " + modified_prompt
+
+    # --- Append user instruction if provided ---
+    if instruction:
+        modified_prompt = modified_prompt.rstrip() + f" 额外要求：{instruction}"
+
+    # --- Append platform language constraint ---
+    lang_constraint = platform_language_hard_constraint(platform_overlay_id)
+    if lang_constraint:
+        modified_prompt = modified_prompt.rstrip() + " " + lang_constraint
+
+    return {
+        "final_prompt": modified_prompt,
+        "blocks": {
+            "text_edit_instruction": preserve_instruction,
+            "visible_copy": new_visible_copy,
+            "source_prompt_digest": source_final_prompt[:200],
+        },
+        "copy_blocks": merged,
+        "edit_mode": "text_replace",
+    }
 
 
 def _find_plan_item(strategy_preview: dict, asset_role: str) -> dict[str, Any]:
@@ -368,10 +441,21 @@ def _compose_subject_block(
         if scale_anchor:
             suffix_parts.append(f"比例锚点：{scale_anchor}")
         suffix_parts.extend(identity_parts)
-        return f"{base} {'。'.join(suffix_parts)}"
-    if identity_parts:
-        return f"{base} {'。'.join(identity_parts)}"
-    return base
+        base_result = f"{base} {'。'.join(suffix_parts)}"
+    elif identity_parts:
+        base_result = f"{base} {'。'.join(identity_parts)}"
+    else:
+        base_result = base
+
+    # 获取 truth_contract 中的硬约束摘要
+    hard_summary = ""
+    if isinstance(prompt_plan, dict):
+        tc = prompt_plan.get("truth_contract", {})
+        if isinstance(tc, dict):
+            hard_summary = str(tc.get("hard_constraint_summary") or "")
+    if hard_summary:
+        return f"{base_result} {hard_summary}"
+    return base_result
 
 
 def _compose_composition_block(slot_id: str, plan: dict[str, Any], prompt_plan: dict[str, Any]) -> str:
@@ -380,6 +464,9 @@ def _compose_composition_block(slot_id: str, plan: dict[str, Any], prompt_plan: 
     rule = _clean_text(prompt_plan.get("composition_rule"))
     expression_mode = str(plan.get("expression_mode") or prompt_plan.get("expression_mode") or "")
     pieces: list[str] = []
+    layout_directive = prompt_plan.get("layout_structure_directive", "")
+    if layout_directive:
+        pieces.append(layout_directive)
     if visual_structure:
         pieces.append(f"版式结构采用 {visual_structure}")
     if slot_id == "primary_kv":
@@ -562,6 +649,12 @@ def _compose_constraints_block(slot_id: str, asset_role: str, prompt_plan: dict[
         role_constraints.append("当前平台首图严禁任何文字覆盖，包括标题、副标题、角标和品牌名")
     if platform_overlay.get("white_bg_mandatory") and asset_role == "white_bg":
         role_constraints.append("当前平台强制要求白底图，背景必须为纯白 #FFFFFF，无任何渐变或灰度")
+    # Add layout recipe avoid pattern constraints
+    layout_recipe = prompt_plan.get("resolved_layout_recipe", {})
+    for pattern in layout_recipe.get("avoid_patterns", [])[:3]:
+        label = _AVOID_PATTERN_PROMPT_LABELS.get(pattern)
+        if label and label not in role_constraints:
+            role_constraints.append(label)
     return "；".join(_unique_texts(role_constraints)[:24])
 
 

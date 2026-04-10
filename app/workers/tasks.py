@@ -6,6 +6,7 @@ from app.models.asset import AssetModel
 from app.services.jobs import append_job_event, update_job_status
 from app.services.pipeline import (
     run_analysis_job,
+    run_edit_asset_text_job,
     run_extract_parameters_job,
     run_generate_detail_page_job,
     run_generate_family_job,
@@ -68,6 +69,7 @@ def _mark_job_failed(db, job, error_code: str, error_message: str) -> None:
         "regenerate_asset",
         "generate_detail_page",
         "regenerate_detail_panel",
+        "edit_asset_text",
     }:
         if job.user_id:
             create_job_completion_notification(
@@ -110,6 +112,8 @@ def execute_job(self, job_id: str) -> None:
             run_generate_detail_page_job(db, job_id)
         elif job.job_type == "quality_review":
             _post_commit_result = run_quality_review_job(db, job_id)
+        elif job.job_type == "edit_asset_text":
+            _post_commit_result = run_edit_asset_text_job(db, job_id)
         else:
             raise ValueError(f"unsupported job type: {job.job_type}")
         db.commit()

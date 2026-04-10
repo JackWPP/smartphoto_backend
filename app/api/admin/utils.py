@@ -149,6 +149,8 @@ def serialize_category_catalog(item: CategoryCatalogModel) -> dict[str, Any]:
         "is_featured": bool(item.is_featured),
         "is_system": bool(item.is_system),
         "is_active": bool(item.is_active),
+        "confusion_pairs": [str(p).strip() for p in (item.confusion_pairs or []) if str(p).strip()],
+        "expected_components": [str(c).strip() for c in (item.expected_components or []) if str(c).strip()],
         "created_by": item.created_by,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,

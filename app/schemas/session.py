@@ -602,6 +602,17 @@ class AssetRegenerateRequest(BaseModel):
     edit_constraints: EditConstraints | None = Field(default=None, description="可选的结构化编辑约束，与 instruction 互补。")
 
 
+class AssetEditTextRequest(BaseModel):
+    """文字编辑请求 - 保持图片构图不变，仅替换可见文案。"""
+    copy_blocks: dict[str, Any] = Field(
+        description="要替换的文案块。key 与 generation_snapshot.copy_blocks 一致：headline/supporting/proof_lines/matrix_lines。"
+    )
+    instruction: str | None = Field(
+        default=None,
+        description="可选附加指令，如'字体改大一点'、'标题换成红色'。"
+    )
+
+
 class AnalysisTriggerData(BaseModel):
     job_id: str = Field(description="分析任务 ID。")
     session_id: str = Field(description="会话 ID。")
