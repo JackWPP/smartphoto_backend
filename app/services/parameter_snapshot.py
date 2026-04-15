@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.copy_normalization import key_parameter_strings, normalize_copy_payload, normalize_string_list
+from app.services.copy_normalization import (
+    key_parameter_strings,
+    normalize_copy_payload,
+    normalize_string_list,
+    sync_legacy_copy_fields,
+)
 
 
 def merge_parameter_snapshot_into_copy(
@@ -59,6 +64,7 @@ def apply_parameter_snapshot_to_copy(
         normalized["core_selling_points"] = mapped["core_selling_points"]
         normalized["key_parameters"] = mapped["key_parameters"]
         normalized["product_advantages"] = mapped["product_advantages"]
+        normalized = sync_legacy_copy_fields(normalized, overwrite=True)
     else:
         if not normalized.get("hero_scene") and mapped["hero_scene"]:
             normalized["hero_scene"] = mapped["hero_scene"]
@@ -68,6 +74,7 @@ def apply_parameter_snapshot_to_copy(
             normalized["key_parameters"] = mapped["key_parameters"]
         if not normalized.get("product_advantages") and mapped["product_advantages"]:
             normalized["product_advantages"] = mapped["product_advantages"]
+        normalized = sync_legacy_copy_fields(normalized, overwrite=False)
     return normalize_copy_payload(normalized)
 
 

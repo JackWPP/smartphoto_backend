@@ -237,9 +237,16 @@
   - `product_advantages`
   - `style_preset_id`
   - `style_custom`
+- 正式字段语义：
+  - `hero_scene`：首图优先场景。默认应直接约束首张主图（`hero` / `primary_kv`）的场景表达，不只是给 `scene` 槽位参考
+  - `core_selling_points` / `key_parameters` / `product_advantages`：作为主图与详情页策略的主消费字段
 - 兼容字段：
   - `style_choice`：deprecated，只兼容旧前端读写
   - `headline/selling_points/usage_scenes/specs`：legacy 输入，后端会转换成正式字段
+  - 当 Step 3 `PUT /parameters` 或参数提取 `replace_all` 覆盖正式字段后，后端会同步镜像：
+    - `usage_scenes <- hero_scene`
+    - `selling_points <- core_selling_points`
+    - `specs <- key_parameters`
 - regenerate 支持字段：
   - 正式字段：`hero_scene` `core_selling_points` `key_parameters` `product_advantages`
   - legacy 字段：`headline` `selling_points` `usage_scenes` `specs`
@@ -277,6 +284,7 @@
     - `core_selling_points`
     - `key_parameters`
     - `product_advantages`
+  - 覆盖后会同步刷新 legacy 镜像字段，避免旧前端或旧策略分支继续读到历史 `usage_scenes/selling_points/specs`
   - `parameter_snapshot` 至少包含：
     - `relevance_status`
     - `rejection_reason`

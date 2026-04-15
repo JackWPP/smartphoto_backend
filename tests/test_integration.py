@@ -329,6 +329,54 @@ def test_complete_parameters_enriches_snapshot_and_copy_fields(client, monkeypat
     assert session_snapshot["detail_strategy_preview"] is None
 
 
+def test_put_parameters_updates_hero_prompt_and_syncs_legacy_copy_fields(client):
+    sid = create_ready_session(client)
+
+    response = client.put(
+        f"/api/v2/sessions/{sid}/parameters",
+        json={
+            "hero_scene": "宠物家庭沙发旁净化",
+            "core_selling_points": ["宠物浮毛过滤", "过敏季防护"],
+            "key_parameters": [{"key": "cadr", "label": "CADR", "value": "500", "unit": "m3/h"}],
+            "product_advantages": ["低噪陪伴"],
+            "feature_highlights": ["宠物家庭"],
+            "source_mode": "analysis_only",
+            "evidence_priority": "analysis_then_copy",
+            "evidence_summary": [],
+        },
+    )
+    assert response.status_code == 200
+
+    with db_session.SessionLocal() as db:
+        session = db.query(SessionModel).filter(SessionModel.id == sid).one()
+        assert session.confirmed_copy["hero_scene"] == "宠物家庭沙发旁净化"
+        assert session.confirmed_copy["usage_scenes"] == "宠物家庭沙发旁净化"
+        assert session.confirmed_copy["selling_points"] == "宠物浮毛过滤\n过敏季防护"
+        assert session.confirmed_copy["specs"] == "CADR 500m3/h"
+
+    strategy_preview = client.post(f"/api/v2/sessions/{sid}/strategy/preview").json()["data"]["strategy_preview"]
+    hero_plan = next(item for item in strategy_preview["prompt_plan"] if item["slot_id"] == "hero")
+    scene_plan = next(item for item in strategy_preview["prompt_plan"] if item["slot_id"] == "scene")
+    white_bg_plan = next(item for item in strategy_preview["prompt_plan"] if item["slot_id"] == "white_bg")
+
+    assert "宠物家庭沙发旁净化" in hero_plan["final_prompt_base"]
+    assert "首图场景锚点" in " ".join(hero_plan["resolved_constraints"])
+    assert "宠物家庭沙发旁净化" in scene_plan["final_prompt_base"]
+    assert "宠物家庭沙发旁净化" not in white_bg_plan["final_prompt_base"]
+
+    prompt_preview = client.post(
+        f"/api/v2/sessions/{sid}/prompts/preview",
+        json={"instruction": None, "include_latest_assets": False},
+    ).json()["data"]["prompts"]
+    hero_prompt = next(item for item in prompt_preview if item["slot_id"] == "hero")
+    scene_prompt = next(item for item in prompt_preview if item["slot_id"] == "scene")
+    white_bg_prompt = next(item for item in prompt_preview if item["slot_id"] == "white_bg")
+
+    assert "宠物家庭沙发旁净化" in hero_prompt["final_prompt"]
+    assert "宠物家庭沙发旁净化" in scene_prompt["final_prompt"]
+    assert "宠物家庭沙发旁净化" not in white_bg_prompt["final_prompt"]
+
+
 def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, monkeypatch):
     sid = create_ready_session(client)
 
