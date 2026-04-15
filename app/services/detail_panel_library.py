@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.services.copy_normalization import is_low_information_copy_text, key_parameter_strings, normalize_copy_payload
 from app.services.rule_packs import DETAIL_RULE_PACK_ID, load_published_rule_pack_config
 
 
@@ -110,10 +111,13 @@ def recommend_panel_types(
     style_images_present: bool,
     db: Session | None = None,
 ) -> list[dict[str, Any]]:
-    selling_points = _split_points(confirmed_copy.get("selling_points"))
-    usage_scenes = _split_points(confirmed_copy.get("usage_scenes"))
-    specs = _split_points(confirmed_copy.get("specs"))
-    parameters = _parameter_strings(confirmed_copy.get("key_parameters"))
+    normalized_copy = normalize_copy_payload(confirmed_copy)
+    selling_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
+    usage_scenes = _split_points(normalized_copy.get("hero_scene") or normalized_copy.get("usage_scenes"))
+    product_name = str(normalized_copy.get("product_name") or "").strip()
+    usage_scenes = [item for item in usage_scenes if not is_low_information_copy_text(item, product_name=product_name)]
+    specs = key_parameter_strings(normalized_copy.get("key_parameters")) or _split_points(normalized_copy.get("specs"))
+    parameters = _parameter_strings(normalized_copy.get("key_parameters"))
     must_keep = _analysis_value(analysis_snapshot, "reference_summary", "must_keep")
 
     recommended: list[dict[str, Any]] = []

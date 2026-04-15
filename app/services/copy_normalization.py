@@ -80,6 +80,21 @@ def normalize_copy_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     return normalized
 
 
+def sync_legacy_copy_fields(payload: dict[str, Any] | None, *, overwrite: bool) -> dict[str, Any]:
+    normalized = normalize_copy_payload(payload)
+    selling_points_text = "\n".join(normalized.get("core_selling_points", []))
+    usage_scenes_text = normalize_copy_text(normalized.get("hero_scene"))
+    specs_text = "\n".join(key_parameter_strings(normalized.get("key_parameters"))[:4])
+
+    if overwrite or not normalized.get("selling_points"):
+        normalized["selling_points"] = selling_points_text
+    if overwrite or not normalized.get("usage_scenes"):
+        normalized["usage_scenes"] = usage_scenes_text
+    if overwrite or not normalized.get("specs"):
+        normalized["specs"] = specs_text
+    return normalize_copy_payload(normalized)
+
+
 def normalize_copy_text(value: Any) -> str:
     if value is None:
         return ""

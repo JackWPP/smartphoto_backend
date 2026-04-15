@@ -8,7 +8,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.session_image import SessionImageModel
-from app.services.copy_normalization import normalize_phrase_list, repair_broken_text
+from app.services.copy_normalization import (
+    is_low_information_copy_text,
+    key_parameter_strings,
+    normalize_phrase_list,
+    repair_broken_text,
+    sync_legacy_copy_fields,
+)
 from app.services.main_gallery_rules import (
     build_copy_blocks,
     expression_metadata,
@@ -54,7 +60,10 @@ def strategy_preview_input_hash(
 ) -> str:
     settings = get_settings()
     client = WhataiClient()
-    normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
+    normalized_copy = sync_legacy_copy_fields(
+        merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot),
+        overwrite=True,
+    )
     loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
     loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
     reference_manifest = reference_manifest if reference_manifest is not None else build_reference_manifest(loaded_reference_images)
@@ -101,7 +110,10 @@ def build_strategy_preview(
     strategy_reference_manifest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
-    normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
+    normalized_copy = sync_legacy_copy_fields(
+        merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot),
+        overwrite=True,
+    )
     profile = platform_profile(active_platform_id)
     platform_name = profile.name if profile else active_platform_id
     aspect_ratio = profile.default_aspect_ratio if profile else "1:1"
@@ -235,7 +247,10 @@ def normalize_strategy_preview(
     prompt_overrides: list[dict[str, Any]] | None = None,
     parameter_snapshot: dict[str, Any] | None = None,
 ) -> dict:
-    confirmed_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
+    confirmed_copy = sync_legacy_copy_fields(
+        merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot),
+        overwrite=True,
+    )
     existing_preferences = []
     if isinstance(strategy_preview, dict):
         existing_preferences = strategy_preview.get("slot_preferences") or []
@@ -415,7 +430,8 @@ def _allocate_exclusive_selling_points(
     Each eligible slot gets a unique subset of selling points so the
     generated gallery doesn't repeat the same point on every image.
     """
-    all_points = _split_points(confirmed_copy.get("selling_points"))
+    normalized_copy = sync_legacy_copy_fields(confirmed_copy, overwrite=True)
+    all_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
     if len(all_points) < 2:
         return prompt_plan
 
@@ -715,6 +731,7 @@ def _build_default_prompt_plan_item(
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
 ) -> dict[str, Any]:
+    normalized_copy = sync_legacy_copy_fields(confirmed_copy, overwrite=True)
     role_hint = str(plan_item.get("reference_role_hint") or plan_item["role"])
     reference_images = reference_images_used_for_role(
         reference_manifest,
@@ -731,19 +748,25 @@ def _build_default_prompt_plan_item(
     slot_id = str(plan_item["slot_id"])
     layout_recipe = plan_item.get("resolved_layout_recipe") or plan_item.get("layout_recipe", {})
     layout_structure_directive = _compile_layout_directive(layout_recipe)
-    product_name = confirmed_copy.get("product_name") or "商品"
+    product_name = normalized_copy.get("product_name") or "商品"
     copy_blocks = dict(plan_item.get("copy_blocks") or {})
-    selling_points = _split_points(confirmed_copy.get("selling_points"))
-    scenes = _split_points(confirmed_copy.get("usage_scenes"))
-    specs = _split_points(confirmed_copy.get("specs"))
+    selling_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
+    product_advantages = _split_points(normalized_copy.get("product_advantages"))
+    scenes = _split_points(normalized_copy.get("hero_scene") or normalized_copy.get("usage_scenes"))
+    specs = key_parameter_strings(normalized_copy.get("key_parameters")) or _split_points(normalized_copy.get("specs"))
+    raw_hero_scene_anchor = scenes[0] if scenes else ""
+    hero_scene_anchor = ""
+    if raw_hero_scene_anchor and not is_low_information_copy_text(raw_hero_scene_anchor, product_name=product_name):
+        hero_scene_anchor = raw_hero_scene_anchor
     top_point = (
         copy_blocks.get("headline")
         or copy_blocks.get("supporting")
         or (copy_blocks.get("matrix_lines") or [None])[0]
-        or (selling_points[0] if selling_points else "核心卖点")
+        or ((selling_points + product_advantages)[0] if (selling_points + product_advantages) else "核心卖点")
     )
     top_scene = (
-        (copy_blocks.get("matrix_lines") or [None])[0]
+        hero_scene_anchor
+        or (copy_blocks.get("matrix_lines") or [None])[0]
         or (scenes[0] if scenes else "真实使用场景")
     )
     top_spec = (
@@ -805,36 +828,60 @@ def _build_default_prompt_plan_item(
         must_avoid.append("不要生成长段落文字、复杂参数墙、密集小字或平台 UI 截图")
 
     background_rule_map = {
-        "hero": "背景简洁高级，允许轻微摄影棚氛围，但不要复杂场景。",
+        "hero": (
+            f"首图优先把商品放进“{hero_scene_anchor}”对应的真实使用环境中，环境只做轻量场景承托，不能喧宾夺主。"
+            if hero_scene_anchor
+            else "背景简洁高级，允许轻微摄影棚氛围，但不要复杂场景。"
+        ),
         "white_bg": "纯白无缝背景，画面中只有单个商品主体，不出现人物和道具。",
         "selling_point": f"背景服务于卖点“{top_point}”，只保留最少的功能化辅助元素。",
         "scene": f"在 {top_scene} 中自然展示商品，但环境只能作为陪衬。",
         "detail": "背景简洁或轻微虚化，重点让材质、纹理、做工细节清晰可见。",
-        "primary_kv": "背景允许极简高级场景或轻材质层次，但不能只是纯空白渲染；必须衬托标题区和底部利益点。",
+        "primary_kv": (
+            f"首图优先把商品放进“{hero_scene_anchor}”对应的真实使用环境中，同时保留标题区和底部利益点的承托空间。"
+            if hero_scene_anchor
+            else "背景允许极简高级场景或轻材质层次，但不能只是纯空白渲染；必须衬托标题区和底部利益点。"
+        ),
         "reason_why": "背景支持理由卡、机制卡或分镜摘要，不做纯白无信息背景，也不要做重复生活场景。",
         "proof_authority": "背景只服务于参数、证书、面板特写或结构放大，避免人物、大场景和复杂合成。",
         "benefit_scene_or_compare": "背景必须带出利益场景或对比空间，并通过色块、光区或层次强化视觉重点。",
         "closing_selling_point": "背景保持干净但要有质感，可用优质场景收束卖点，不能只是平拍产品。",
     }
     composition_rule_map = {
-        "hero": "商品完整入镜，主体明确，适合做主图首图。",
+        "hero": (
+            f"商品完整入镜，主体明确，首图优先在“{hero_scene_anchor}”所表达的场景里展示，但不要被环境抢走注意力。"
+            if hero_scene_anchor
+            else "商品完整入镜，主体明确，适合做主图首图。"
+        ),
         "white_bg": "商品完整居中，保留适当留白，边缘清晰干净。",
         "selling_point": f"围绕“{top_point}”做近景或中近景功能化构图。",
         "scene": "构图真实自然，商品清晰可辨，不要让场景喧宾夺主。",
         "detail": f"做局部近景或微距表现，重点展示 {top_spec}。",
-        "primary_kv": "采用“标题区 + 产品主体 + 背景结构 + 底部利益点”结构，产品主体约占画面一半。",
+        "primary_kv": (
+            f"采用“标题区 + 产品主体 + 背景结构 + 底部利益点”结构，产品主体约占画面一半，并优先放在“{hero_scene_anchor}”场景中展示。"
+            if hero_scene_anchor
+            else "采用“标题区 + 产品主体 + 背景结构 + 底部利益点”结构，产品主体约占画面一半。"
+        ),
         "reason_why": "采用多理由卡、机制卡或小分镜结构，至少表达 2 个不同理由点，不要用重复角度凑画面。",
         "proof_authority": "采用信息卡式构图，主体卖点旁必须放参数、证书、面板特写或结构放大等证明性元素。",
         "benefit_scene_or_compare": "采用“颜色强化 + 核心利益点 + 场景/对比”结构，利益点必须直接可感知。",
         "closing_selling_point": "采用“优质场景 + 核心卖点 + 1-2 个辅助卖点”的收束式构图，不做简单平拍。",
     }
     final_prompt_base_map = {
-        "hero": f"以 {product_name} 为唯一主体，生成一张高转化电商主图，突出 {top_point}。",
+        "hero": (
+            f"让 {product_name} 作为首图主角，优先置于 {hero_scene_anchor} 场景中展示，同时突出 {top_point}。"
+            if hero_scene_anchor
+            else f"以 {product_name} 为唯一主体，生成一张高转化电商主图，突出 {top_point}。"
+        ),
         "white_bg": f"以 {product_name} 为唯一主体，生成标准电商白底图，完整展示外观。",
         "selling_point": f"以 {product_name} 为唯一主体，聚焦表达卖点 {top_point}。",
         "scene": f"让 {product_name} 自然置入 {top_scene}，突出真实使用感。",
         "detail": f"放大表现 {product_name} 的 {top_spec}，强调质感与做工。",
-        "primary_kv": f"让 {product_name} 一眼说明“产品是什么、解决什么问题”，形成强点击首图，而不是单纯白底渲染。",
+        "primary_kv": (
+            f"让 {product_name} 在 {hero_scene_anchor} 场景中一眼说明“产品是什么、解决什么问题”，形成强点击首图。"
+            if hero_scene_anchor
+            else f"让 {product_name} 一眼说明“产品是什么、解决什么问题”，形成强点击首图，而不是单纯白底渲染。"
+        ),
         "reason_why": f"解释为什么 {product_name} 能解决“{top_point}”，优先使用理由卡、机制卡或多理由分镜。",
         "proof_authority": f"把 {product_name} 的最强卖点“{top_point}”与参数、证书、面板特写或结构佐证绑定，提升可信度。",
         "benefit_scene_or_compare": f"用利益场景或对比方式说明 {product_name} 对消费者的实际收益，同时做强视觉重点。",
@@ -867,6 +914,9 @@ def _build_default_prompt_plan_item(
         resolved_constraints.append("Visible copy must stay short, high-contrast and integrated into the layout.")
     if slot_id == "proof_authority":
         resolved_constraints.append("没有真实证书素材时，优先参数标签、面板特写或结构放大，不伪造权威认证。")
+    if slot_id in {"hero", "primary_kv"} and hero_scene_anchor:
+        resolved_constraints.append(f"首图场景锚点：优先在“{hero_scene_anchor}”对应的空间关系中展示商品，不要改成其他无关环境。")
+        resolved_constraints.append("如果场景证据不足，只允许做保守的场景暗示，不允许凭空添加强叙事人物互动或无关空间。")
     if slot_id == "primary_kv":
         resolved_constraints.append("首图优先形成一句明确中文主利益点，并搭配 0-2 个短辅助利益点；不要再叠长副标题或大段解释。")
         if requires_simplified_chinese_visible_copy(platform_overlay.get("overlay_id")):

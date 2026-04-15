@@ -120,6 +120,8 @@
     - `feature_highlights`
   - 无附件时仍可运行，属于 `analysis_only` 轻策划模式
   - 有附件时附件优先，属于 `attachment_backed` 模式，可整页覆盖旧的 analysis-only 结果
+  - `hero_scene` 是首图优先场景，不是只给 `scene` 槽位参考；主图策略构建时应直接约束首张主图 (`hero` / `primary_kv`)
+  - Step3 覆盖正式字段后，需要同步镜像 legacy 字段 `usage_scenes/selling_points/specs`，避免旧策略分支读到历史值
   - 不相关附件返回 `invalid`，但 job 仍可成功完成，供前端展示解释
   - 快照额外补充：
     - `source_mode`

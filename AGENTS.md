@@ -416,3 +416,8 @@
 - 2026-04-07 Native Ops Docs:
   - 新增 `docs/原生运维指南.md`，面向日常巡检、发版、迁移、Redis/DB/storage 运维、API/Worker 救火与发版前后检查
   - `Readme.md`、`docs/生产上线SOP.md` 与 `scripts/package-prod.sh` 补充该运维指南入口
+- 2026-04-13 Hero Scene Fix:
+  - 修复 Step3 `PUT /api/v2/sessions/{session_id}/parameters` 手动改意图后，主图首图未稳定跟随新 `hero_scene` 的问题
+  - `apply_parameter_snapshot_to_copy` 改为在覆盖正式字段时同步镜像 `usage_scenes/selling_points/specs`，避免旧字段残留把策略拉回历史值
+  - 主图策略与首图 prompt 收口为正式字段优先，`hero_scene` 现在会直接约束首张主图 (`hero` / `primary_kv`) 的场景表达；`white_bg` 不消费该场景锚点
+  - 补充参数镜像、首图场景锚点与 prompt preview 回归测试，并同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`

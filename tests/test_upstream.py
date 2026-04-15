@@ -330,6 +330,36 @@ def test_proof_authority_prompt_prefers_proof_elements_and_blocks_fake_certifica
     assert "不要堆砌虚假证书" in prompt["blocks"]["constraints"]
 
 
+def test_hero_scene_prompt_prioritizes_formal_field_over_stale_legacy_scene():
+    from app.services.prompts import build_prompt_previews
+
+    confirmed_copy = {
+        "product_name": "空气净化器",
+        "headline": "净化看得见",
+        "hero_scene": "宠物家庭沙发旁净化",
+        "usage_scenes": "卧室/客厅旧场景",
+        "core_selling_points": ["宠物浮毛过滤", "低噪陪伴"],
+        "selling_points": "旧卖点A｜旧卖点B",
+        "product_advantages": ["过敏季也能安心呼吸"],
+        "key_parameters": [{"label": "CADR", "value": "500", "unit": "m3/h"}],
+        "specs": "旧参数 300m3/h",
+        "style_choice": "现代简约",
+        "style_custom": "",
+    }
+    strategy_preview = build_strategy_preview(confirmed_copy, "temu")
+    prompts = build_prompt_previews(confirmed_copy, strategy_preview)
+
+    hero_prompt = next(item for item in prompts if item["slot_id"] == "hero")
+    scene_prompt = next(item for item in prompts if item["slot_id"] == "scene")
+    white_bg_prompt = next(item for item in prompts if item["slot_id"] == "white_bg")
+
+    assert "宠物家庭沙发旁净化" in hero_prompt["final_prompt"]
+    assert "首图场景锚点" in hero_prompt["blocks"]["constraints"]
+    assert "卧室/客厅旧场景" not in hero_prompt["final_prompt"]
+    assert "宠物家庭沙发旁净化" in scene_prompt["final_prompt"]
+    assert "宠物家庭沙发旁净化" not in white_bg_prompt["final_prompt"]
+
+
 def test_copy_blocks_to_text_truncates_long_paragraph_to_brief_copy():
     from app.services.prompts import _copy_blocks_to_text
 
@@ -1865,4 +1895,3 @@ def test_product_name_correction_notice_empty_when_no_analysis():
     assert _product_name_correction_notice({"product_name": "空气净化器"}, None) == ""
     assert _product_name_correction_notice({"product_name": "空气净化器"}, {}) == ""
     assert _product_name_correction_notice({"product_name": ""}, {"recognized_product": {"product_name": "除湿机"}}) == ""
-

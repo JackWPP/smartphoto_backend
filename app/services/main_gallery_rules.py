@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 from app.services.copy_normalization import (
     is_low_information_copy_text,
     is_placeholder_copy_text,
+    key_parameter_strings,
     normalize_phrase_list,
+    sync_legacy_copy_fields,
     repair_broken_text,
 )
 from app.services.platforms import PlatformProfile, get_platform_or_none
@@ -1028,12 +1030,18 @@ def recommend_expression_mode(
     analysis_snapshot: dict[str, Any],
     planner_instruction: str | None,
 ) -> tuple[str, str]:
+    normalized_copy = sync_legacy_copy_fields(confirmed_copy, overwrite=True)
     slot_id = str(slot_blueprint["slot_id"])
     candidates = [str(item) for item in slot_blueprint.get("candidate_expression_modes", []) if str(item).strip()]
-    selling_points = _split_points(confirmed_copy.get("selling_points"))
-    usage_scenes = _split_points(confirmed_copy.get("usage_scenes"))
-    specs = _split_points(confirmed_copy.get("specs"))
-    key_parameters = _key_parameter_strings(confirmed_copy.get("key_parameters"))
+    selling_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
+    usage_scenes = _split_points(normalized_copy.get("hero_scene") or normalized_copy.get("usage_scenes"))
+    product_name = _text(normalized_copy.get("product_name"), "产品")
+    usage_scenes = [
+        item for item in usage_scenes
+        if not is_low_information_copy_text(item, product_name=product_name)
+    ]
+    specs = key_parameter_strings(normalized_copy.get("key_parameters")) or _split_points(normalized_copy.get("specs"))
+    key_parameters = _key_parameter_strings(normalized_copy.get("key_parameters"))
     must_keep = _safe_analysis_value(analysis_snapshot, "reference_summary", "must_keep")
     evidence_scores = (analysis_snapshot or {}).get("evidence_scores") if isinstance((analysis_snapshot or {}).get("evidence_scores"), dict) else {}
     risk_flags = {str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()}
@@ -1136,13 +1144,14 @@ def build_copy_blocks(
     confirmed_copy: dict[str, Any],
     expression_mode: str,
 ) -> dict[str, Any]:
-    product_name = _text(confirmed_copy.get("product_name"), "产品")
-    headline = _text(confirmed_copy.get("headline"), product_name)
-    selling_points = _split_points(confirmed_copy.get("core_selling_points") or confirmed_copy.get("selling_points"))
-    usage_scenes = _split_points(confirmed_copy.get("hero_scene") or confirmed_copy.get("usage_scenes"))
-    specs = _split_points(confirmed_copy.get("specs"))
-    product_advantages = _split_points(confirmed_copy.get("product_advantages"))
-    key_parameters = _key_parameter_strings(confirmed_copy.get("key_parameters"))
+    normalized_copy = sync_legacy_copy_fields(confirmed_copy, overwrite=True)
+    product_name = _text(normalized_copy.get("product_name"), "产品")
+    headline = _text(normalized_copy.get("headline"), product_name)
+    selling_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
+    usage_scenes = _split_points(normalized_copy.get("hero_scene") or normalized_copy.get("usage_scenes"))
+    specs = key_parameter_strings(normalized_copy.get("key_parameters")) or _split_points(normalized_copy.get("specs"))
+    product_advantages = _split_points(normalized_copy.get("product_advantages"))
+    key_parameters = _key_parameter_strings(normalized_copy.get("key_parameters"))
     overlay = get_platform_overlay(platform_id)
     copy_language = overlay.get("copy_language", "zh")
     if copy_language == "en":
