@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.contracts.copy import MainCopyBlocks
+from app.contracts.parameter import ParameterSnapshotPayload
+from app.contracts.strategy import AssetPlanItem, PromptPlanItem, StrategyPreviewPayload
+from app.contracts.validation import validate_contract_warn
 from app.core.config import get_settings
 from app.models.session_image import SessionImageModel
 from app.services.copy_normalization import (
@@ -40,6 +45,8 @@ from app.services.upstream import WhataiClient
 from app.services.strategy_overrides import resolve_session_overrides
 from app.services.visible_copy_policy import requires_simplified_chinese_visible_copy
 
+logger = logging.getLogger(__name__)
+
 
 def strategy_preview_input_hash(
     confirmed_copy: dict,
@@ -60,6 +67,11 @@ def strategy_preview_input_hash(
 ) -> str:
     settings = get_settings()
     client = WhataiClient()
+    parameter_snapshot = validate_contract_warn(
+        ParameterSnapshotPayload,
+        parameter_snapshot or {},
+        context={"active_platform_id": active_platform_id, "stage": "strategy_preview_input_hash_parameter_snapshot"},
+    )
     normalized_copy = sync_legacy_copy_fields(
         merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot),
         overwrite=True,
@@ -110,6 +122,11 @@ def build_strategy_preview(
     strategy_reference_manifest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
+    parameter_snapshot = validate_contract_warn(
+        ParameterSnapshotPayload,
+        parameter_snapshot or {},
+        context={"active_platform_id": active_platform_id, "stage": "build_strategy_preview_parameter_snapshot"},
+    )
     normalized_copy = sync_legacy_copy_fields(
         merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot),
         overwrite=True,
@@ -180,7 +197,7 @@ def build_strategy_preview(
         detected_slots = [str(s).strip() for s in (analysis_snapshot.get("detected_view_slots") or []) if str(s).strip()]
     supplementary_suggestions = suggest_supplementary_views(category_slug, detected_slots)
 
-    return {
+    preview = {
         "product_name": normalized_copy.get("product_name", ""),
         "hero_scene": normalized_copy.get("hero_scene", ""),
         "core_selling_points": normalized_copy.get("core_selling_points", []),
@@ -236,6 +253,11 @@ def build_strategy_preview(
             strategy_reference_manifest=strategy_reference_manifest,
         ),
     }
+    return validate_contract_warn(
+        StrategyPreviewPayload,
+        preview,
+        context={"active_platform_id": active_platform_id, "stage": "build_strategy_preview"},
+    )
 
 
 def normalize_strategy_preview(
@@ -287,7 +309,11 @@ def normalize_strategy_preview(
         platform_overlay=normalized.get("platform_overlay") or get_platform_overlay(active_platform_id, db=db),
     )
     normalized["image_count"] = len(normalized["asset_plan"])
-    return normalized
+    return validate_contract_warn(
+        StrategyPreviewPayload,
+        normalized,
+        context={"active_platform_id": active_platform_id, "stage": "normalize_strategy_preview"},
+    )
 
 
 def _style_summary(confirmed_copy: dict[str, Any]) -> str:
@@ -355,7 +381,9 @@ def _build_asset_plan(
         role = str(slot.get("compat_role") or slot["slot_id"])
         role_spec = get_prompt_role_spec(role)
         plan.append(
-            {
+            validate_contract_warn(
+                AssetPlanItem,
+                {
                 **slot,
                 **meta,
                 "role": role,
@@ -372,7 +400,9 @@ def _build_asset_plan(
                 "reference_image_limit": _reference_image_limit_for_plan(slot, analysis_snapshot, []),
                 "risk_flags": [str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()],
                 "resolved_layout_recipe": resolved_layout,
-            }
+                },
+                context={"active_platform_id": active_platform_id, "slot_id": slot["slot_id"], "stage": "asset_plan_item"},
+            )
         )
     return sorted(plan, key=lambda item: int(item.get("display_order") or 0))
 
@@ -940,7 +970,9 @@ def _build_default_prompt_plan_item(
         if label and label not in resolved_constraints:
             resolved_constraints.append(label)
 
-    return {
+    return validate_contract_warn(
+        PromptPlanItem,
+        {
         "slot_id": slot_id,
         "slot_label": plan_item.get("slot_label"),
         "slot_family": plan_item.get("slot_family"),
@@ -985,7 +1017,9 @@ def _build_default_prompt_plan_item(
         "text_policy": plan_item.get("text_policy"),
         "layout_structure_directive": layout_structure_directive,
         "resolved_layout_recipe": layout_recipe,
-    }
+        },
+        context={"slot_id": slot_id, "role": plan_item["role"], "stage": "prompt_plan_item"},
+    )
 
 
 def _merge_prompt_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | None) -> dict[str, Any]:
