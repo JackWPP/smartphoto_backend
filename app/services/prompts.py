@@ -1,6 +1,9 @@
 import re
 from typing import Any
 
+from app.contracts.copy import MainCopyBlocks
+from app.contracts.strategy import AssetPlanItem, PromptPlanItem, StrategyPreviewPayload
+from app.contracts.validation import validate_contract_warn
 from app.services.copy_normalization import (
     is_low_information_copy_text,
     is_placeholder_copy_text,
@@ -92,10 +95,25 @@ def compose_prompt(
     instruction: str | None = None,
     plan_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    plan = plan_item or _find_plan_item(strategy_preview, asset_role)
+    strategy_preview = validate_contract_warn(
+        StrategyPreviewPayload,
+        strategy_preview,
+        context={"asset_role": asset_role, "stage": "compose_prompt_strategy_preview"},
+    )
+    raw_plan = plan_item or _find_plan_item(strategy_preview, asset_role)
+    plan = validate_contract_warn(
+        AssetPlanItem,
+        raw_plan,
+        context={"asset_role": asset_role, "slot_id": raw_plan.get("slot_id"), "stage": "compose_prompt_plan_item"},
+    )
     prompt_plan = find_prompt_plan_item(strategy_preview, plan.get("slot_id") or asset_role)
     if not prompt_plan:
         prompt_plan = find_prompt_plan_item(strategy_preview, asset_role)
+    prompt_plan = validate_contract_warn(
+        PromptPlanItem,
+        prompt_plan,
+        context={"asset_role": asset_role, "slot_id": plan.get("slot_id"), "stage": "compose_prompt_prompt_plan"},
+    )
     slot_id = str(plan.get("slot_id") or prompt_plan.get("slot_id") or asset_role)
     role_spec = get_prompt_role_spec(str(plan.get("role") or asset_role))
 
@@ -113,6 +131,7 @@ def compose_prompt(
         raw_copy_blocks = {**dict(prompt_plan.get("copy_blocks") or {}), **dict(plan_item["copy_blocks"])}
     else:
         raw_copy_blocks = dict(prompt_plan.get("copy_blocks") or plan.get("copy_blocks") or {})
+    raw_copy_blocks = MainCopyBlocks.from_dict(raw_copy_blocks).to_dict()
     copy_blocks, sanitized_fields, copy_safety_notes = sanitize_main_copy_blocks(
         raw_copy_blocks,
         product_name=confirmed_copy.get("product_name", ""),

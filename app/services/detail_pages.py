@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -11,6 +12,9 @@ from typing import Any
 from PIL import Image, ImageOps
 from sqlalchemy.orm import Session
 
+from app.contracts.detail_strategy import DetailPanelPlanItem, DetailStrategyPreviewPayload
+from app.contracts.parameter import ParameterSnapshotPayload
+from app.contracts.validation import validate_contract_warn
 from app.core.config import get_settings
 from app.services.copy_normalization import normalize_copy_payload
 from app.services.main_gallery_rules import get_platform_overlay
@@ -58,6 +62,7 @@ DETAIL_STORY_SECTIONS = (
     "differentiator",
     "closing_cta",
 )
+logger = logging.getLogger(__name__)
 
 
 def _empty_detail_story_brief() -> dict[str, str]:
@@ -136,6 +141,11 @@ def build_detail_strategy_preview(
     prompt_overrides: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
+    parameter_snapshot = validate_contract_warn(
+        ParameterSnapshotPayload,
+        parameter_snapshot or {},
+        context={"active_platform_id": active_platform_id, "stage": "build_detail_strategy_preview_parameter_snapshot"},
+    )
     normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
     platform_overlay = _detail_platform_overlay(active_platform_id)
     copy_language = str(platform_overlay.get("copy_language") or "en")
@@ -152,7 +162,7 @@ def build_detail_strategy_preview(
     resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
 
     if not product_loaded:
-        return {
+        preview = {
             "use_case": DETAIL_PAGE_USE_CASE,
             "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
             "panel_count": DETAIL_PAGE_PANEL_COUNT,
@@ -196,6 +206,11 @@ def build_detail_strategy_preview(
                 active_platform_id=active_platform_id,
             ),
         }
+        return validate_contract_warn(
+            DetailStrategyPreviewPayload,
+            preview,
+            context={"active_platform_id": active_platform_id, "stage": "build_detail_strategy_preview_empty"},
+        )
 
     product_manifest = build_reference_manifest(product_loaded)
     style_manifest = build_reference_manifest(style_loaded)
@@ -234,7 +249,7 @@ def build_detail_strategy_preview(
         confirmed_copy=normalized_copy,
         copy_language=copy_language,
     )
-    return {
+    preview = {
         "use_case": DETAIL_PAGE_USE_CASE,
         "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
         "panel_count": DETAIL_PAGE_PANEL_COUNT,
@@ -283,6 +298,11 @@ def build_detail_strategy_preview(
             active_platform_id=active_platform_id,
         ),
     }
+    return validate_contract_warn(
+        DetailStrategyPreviewPayload,
+        preview,
+        context={"active_platform_id": active_platform_id, "stage": "build_detail_strategy_preview"},
+    )
 
 
 def normalize_detail_strategy_preview(
@@ -324,7 +344,11 @@ def normalize_detail_strategy_preview(
                 current_input_hash=current_input_hash,
             )
         ):
-            return strategy_preview
+            return validate_contract_warn(
+                DetailStrategyPreviewPayload,
+                strategy_preview,
+                context={"active_platform_id": active_platform_id, "stage": "normalize_detail_strategy_preview_reuse"},
+            )
     return build_detail_strategy_preview(
         confirmed_copy,
         db=db,
@@ -720,7 +744,9 @@ def _build_default_panel_plan(
             product_name=product_name,
         )
         panel_plan.append(
-            {
+            validate_contract_warn(
+                DetailPanelPlanItem,
+                {
                 "slot_id": spec["slot_id"],
                 "panel_id": spec["panel_id"],
                 "panel_label": _detail_display_module_title(panel_type, spec["slot_id"]),
@@ -767,7 +793,9 @@ def _build_default_panel_plan(
                 "product_reference_ids": product_ids,
                 "style_reference_ids": style_ids,
                 "rule_modules_used": [panel_type, panel_meta["layout_template"], panel_meta["copy_policy"]],
-            }
+                },
+                context={"slot_id": spec["slot_id"], "panel_id": spec["panel_id"], "stage": "detail_panel_plan_item"},
+            )
         )
     return sorted(panel_plan, key=lambda item: int(item["display_order"]))
 

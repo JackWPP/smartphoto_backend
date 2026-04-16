@@ -13,6 +13,11 @@ from PIL import Image
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from app.contracts.generation import DetailGenerationSnapshot, MainGenerationSnapshot
+from app.contracts.parameter import ParameterSnapshotPayload
+from app.contracts.strategy import AssetPlanItem, StrategyPreviewPayload
+from app.contracts.detail_strategy import DetailPanelPlanItem, DetailStrategyPreviewPayload
+from app.contracts.validation import validate_contract_warn
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.models.asset import AssetModel
@@ -2030,6 +2035,11 @@ def _finalize_main_rendered_asset(
         logger.warning("sync_quality_check failed, defaulting to pass: %s", exc)
         sync_result = {"passed": True, "checks": {}, "failure_reason": None, "error": str(exc)}
     generation_snapshot["sync_quality_check"] = sync_result
+    generation_snapshot = validate_contract_warn(
+        MainGenerationSnapshot,
+        generation_snapshot,
+        context={"slot_id": render_spec["slot_id"], "role": render_spec["role"], "stage": "finalize_main_render"},
+    )
     return {
         "role": render_spec["role"],
         "slot_id": render_spec["slot_id"],
@@ -2052,6 +2062,16 @@ def _render_single_asset(
     instruction: str | None,
     loaded_reference_images: list,
 ) -> dict[str, object]:
+    strategy_preview = validate_contract_warn(
+        StrategyPreviewPayload,
+        strategy_preview,
+        context={"stage": "pipeline_render_single_asset_strategy_preview"},
+    )
+    plan_item = validate_contract_warn(
+        AssetPlanItem,
+        plan_item,
+        context={"slot_id": plan_item.get("slot_id"), "role": plan_item.get("role"), "stage": "pipeline_render_single_asset_plan_item"},
+    )
     role = str(plan_item["role"])
     slot_id = str(plan_item.get("slot_id") or role)
     display_order = int(plan_item["display_order"])
@@ -2134,6 +2154,11 @@ def _render_single_asset(
         "download_rescued": False,
         "download_rescue_reason": None,
     }
+    generation_snapshot = validate_contract_warn(
+        MainGenerationSnapshot,
+        generation_snapshot,
+        context={"slot_id": slot_id, "role": role, "stage": "render_single_main_asset"},
+    )
     return {
         "role": role,
         "slot_id": slot_id,
@@ -2941,6 +2966,11 @@ def _finalize_detail_rendered_panel(
         "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
         "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
     }
+    generation_snapshot = validate_contract_warn(
+        DetailGenerationSnapshot,
+        generation_snapshot,
+        context={"slot_id": render_spec["slot_id"], "panel_id": render_spec["panel_id"], "stage": "finalize_detail_render"},
+    )
     return {
         "panel_id": render_spec["panel_id"],
         "slot_id": render_spec["slot_id"],
@@ -3001,6 +3031,16 @@ def _render_single_detail_panel(
     instruction: str | None,
     reference_grids: list,
 ) -> dict[str, object]:
+    strategy_preview = validate_contract_warn(
+        DetailStrategyPreviewPayload,
+        strategy_preview,
+        context={"stage": "pipeline_render_single_detail_strategy_preview"},
+    )
+    plan_item = validate_contract_warn(
+        DetailPanelPlanItem,
+        plan_item,
+        context={"slot_id": plan_item.get("slot_id"), "panel_id": plan_item.get("panel_id"), "stage": "pipeline_render_single_detail_plan_item"},
+    )
     panel_id = str(plan_item["panel_id"])
     slot_id = str(plan_item.get("slot_id") or panel_id)
     display_order = int(plan_item["display_order"])
@@ -3068,6 +3108,11 @@ def _render_single_detail_panel(
         "submission_batch_size": 1,
         "submit_strategy_version": "single_asset_sync",
     }
+    generation_snapshot = validate_contract_warn(
+        DetailGenerationSnapshot,
+        generation_snapshot,
+        context={"slot_id": slot_id, "panel_id": panel_id, "stage": "render_single_detail_panel"},
+    )
     return {
         "panel_id": panel_id,
         "slot_id": slot_id,

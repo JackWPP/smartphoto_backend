@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.contracts.parameter import ParameterSnapshotPayload
+from app.contracts.validation import validate_contract_warn
 from app.services.copy_normalization import (
     key_parameter_strings,
     normalize_copy_payload,
@@ -15,7 +17,11 @@ def merge_parameter_snapshot_into_copy(
     parameter_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any]:
     normalized = normalize_copy_payload(confirmed_copy)
-    snapshot = parameter_snapshot or {}
+    snapshot = validate_contract_warn(
+        ParameterSnapshotPayload,
+        parameter_snapshot or {},
+        context={"stage": "merge_parameter_snapshot_into_copy"},
+    )
     if not isinstance(snapshot, dict):
         return normalized
 
@@ -35,7 +41,11 @@ def merge_parameter_snapshot_into_copy(
 
 
 def parameter_snapshot_to_copy_fields(parameter_snapshot: dict[str, Any] | None) -> dict[str, Any]:
-    snapshot = parameter_snapshot or {}
+    snapshot = validate_contract_warn(
+        ParameterSnapshotPayload,
+        parameter_snapshot or {},
+        context={"stage": "parameter_snapshot_to_copy_fields"},
+    )
     key_parameters = snapshot.get("key_parameters") if isinstance(snapshot.get("key_parameters"), list) else []
     inferred_key_parameters = snapshot.get("inferred_key_parameters") if isinstance(snapshot.get("inferred_key_parameters"), list) else []
     merged_key_parameters = key_parameters + [item for item in inferred_key_parameters if item not in key_parameters]
