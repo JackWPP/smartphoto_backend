@@ -91,6 +91,8 @@ def test_strategy_preview_contains_prompt_plan_metadata(client):
     assert [item["role"] for item in prompt_plan] == ["hero", "white_bg", "selling_point", "scene", "detail"]
     assert all("reference_image_ids" in item for item in prompt_plan)
     assert all("final_prompt_base" in item for item in prompt_plan)
+    assert "resolved_copy_attribution" in strategy_preview
+    assert "hero_scene" in strategy_preview["resolved_copy_attribution"]
     assert prompt_plan[1]["white_bg_mode"] is True
 
     rebuilt = client.post(
@@ -99,6 +101,15 @@ def test_strategy_preview_contains_prompt_plan_metadata(client):
     ).json()["data"]["strategy_preview"]
     assert rebuilt["planner_instruction"] == "白底图必须更标准，主图更像参考图"
     assert rebuilt["prompt_plan"][1]["role"] == "white_bg"
+
+
+def test_copy_response_does_not_leak_internal_copy_meta(client):
+    sid = create_ready_session(client)
+
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+
+    assert "__copy_meta__" not in copy_data
+    assert "copy_attribution" in copy_data
 
 
 def test_trigger_analysis_recovers_created_session_with_uploaded_images(client):
@@ -367,14 +378,19 @@ def test_put_parameters_updates_hero_prompt_and_syncs_legacy_copy_fields(client)
     prompt_preview = client.post(
         f"/api/v2/sessions/{sid}/prompts/preview",
         json={"instruction": None, "include_latest_assets": False},
-    ).json()["data"]["prompts"]
-    hero_prompt = next(item for item in prompt_preview if item["slot_id"] == "hero")
-    scene_prompt = next(item for item in prompt_preview if item["slot_id"] == "scene")
-    white_bg_prompt = next(item for item in prompt_preview if item["slot_id"] == "white_bg")
+    ).json()["data"]
+    assert "copy_attribution" in prompt_preview
+    assert "hero_scene" in prompt_preview["copy_attribution"]
+    hero_prompt = next(item for item in prompt_preview["prompts"] if item["slot_id"] == "hero")
+    scene_prompt = next(item for item in prompt_preview["prompts"] if item["slot_id"] == "scene")
+    white_bg_prompt = next(item for item in prompt_preview["prompts"] if item["slot_id"] == "white_bg")
 
     assert "宠物家庭沙发旁净化" in hero_prompt["final_prompt"]
     assert "宠物家庭沙发旁净化" in scene_prompt["final_prompt"]
     assert "宠物家庭沙发旁净化" not in white_bg_prompt["final_prompt"]
+
+
+    assert "copy_blocks_attribution" in hero_prompt
 
 
 def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, monkeypatch):
@@ -386,6 +402,8 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
     )
     assert first.status_code == 200
     original = first.json()["data"]["detail_strategy_preview"]
+    assert original["hash_policy_version"] == "preview_hash_layers_v1"
+    assert set(original["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash"}
 
     def _unexpected_rebuild(*args, **kwargs):
         raise AssertionError("detail strategy preview should have been served from cache")
@@ -398,6 +416,48 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
     )
     assert reused.status_code == 200
     assert reused.json()["data"]["detail_strategy_preview"]["input_hash"] == original["input_hash"]
+
+
+def test_detail_strategy_preview_cache_ignores_non_consumed_fields(client):
+    sid = create_ready_session(client)
+
+    first = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert first.status_code == 200
+    original = first.json()["data"]["detail_strategy_preview"]
+
+    with db_session.SessionLocal() as db:
+        session = db.query(SessionModel).filter(SessionModel.id == sid).one()
+        session.analysis_snapshot = {
+            **dict(session.analysis_snapshot or {}),
+            "reanalysis_required": True,
+            "category_candidates": [{"name": "dryer"}],
+        }
+        db.commit()
+
+    reused = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert reused.status_code == 200
+    preview = reused.json()["data"]["detail_strategy_preview"]
+    assert preview["input_hash"] == original["input_hash"]
+    assert preview["hash_layers"]["content_hash"] == original["hash_layers"]["content_hash"]
+
+
+def test_detail_strategy_preview_cache_misses_when_headline_changes(client):
+    sid = create_ready_session(client)
+
+    first = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert first.status_code == 200
+    original = first.json()["data"]["detail_strategy_preview"]
+
+    copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
+    copy_data["headline"] = "全新更强干衣速度"
+    saved = client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
+    assert saved.status_code == 200
+
+    rebuilt = client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    assert rebuilt.status_code == 200
+    preview = rebuilt.json()["data"]["detail_strategy_preview"]
+    assert preview["input_hash"] != original["input_hash"]
+    assert preview["hash_layers"]["content_hash"] != original["hash_layers"]["content_hash"]
 
 
 def test_detail_generation_reuses_cached_strategy_preview_in_worker(client, monkeypatch):
@@ -448,6 +508,8 @@ def test_detail_generation_job_emits_detail_specific_events(client):
 def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, monkeypatch):
     sid = create_ready_session(client)
     original = client.get(f"/api/v2/sessions/{sid}").json()["data"]["strategy_preview"]
+    assert original["hash_policy_version"] == "preview_hash_layers_v1"
+    assert set(original["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash"}
 
     def _unexpected_rebuild(*args, **kwargs):
         raise AssertionError("strategy preview should have been served from cache")
@@ -457,6 +519,50 @@ def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, m
     reused = client.post(f"/api/v2/sessions/{sid}/strategy/preview", json={})
     assert reused.status_code == 200
     assert reused.json()["data"]["strategy_preview"]["input_hash"] == original["input_hash"]
+
+
+def test_strategy_preview_cache_ignores_non_consumed_fields(client):
+    sid = create_ready_session(client)
+    original = client.get(f"/api/v2/sessions/{sid}").json()["data"]["strategy_preview"]
+
+    with db_session.SessionLocal() as db:
+        session = db.query(SessionModel).filter(SessionModel.id == sid).one()
+        session.analysis_snapshot = {
+            **dict(session.analysis_snapshot or {}),
+            "reanalysis_required": True,
+            "scene_tags": ["home", "office"],
+            "supplement_image_recommendations": [{"slot_type": "extra"}],
+        }
+        session.parameter_snapshot = {
+            **dict(session.parameter_snapshot or {}),
+            "evidence_summary": [{"source": "manual"}],
+        }
+        db.commit()
+
+    reused = client.post(f"/api/v2/sessions/{sid}/strategy/preview", json={})
+    assert reused.status_code == 200
+    preview = reused.json()["data"]["strategy_preview"]
+    assert preview["input_hash"] == original["input_hash"]
+    assert preview["hash_layers"]["content_hash"] == original["hash_layers"]["content_hash"]
+
+
+def test_strategy_preview_cache_misses_when_feature_highlights_change(client):
+    sid = create_ready_session(client)
+    original = client.get(f"/api/v2/sessions/{sid}").json()["data"]["strategy_preview"]
+
+    with db_session.SessionLocal() as db:
+        session = db.query(SessionModel).filter(SessionModel.id == sid).one()
+        session.parameter_snapshot = {
+            **dict(session.parameter_snapshot or {}),
+            "feature_highlights": ["editorial contrast"],
+        }
+        db.commit()
+
+    rebuilt = client.post(f"/api/v2/sessions/{sid}/strategy/preview", json={})
+    assert rebuilt.status_code == 200
+    preview = rebuilt.json()["data"]["strategy_preview"]
+    assert preview["input_hash"] != original["input_hash"]
+    assert preview["hash_layers"]["content_hash"] != original["hash_layers"]["content_hash"]
 
 
 def test_alibaba_rule_pack_and_slot_preferences(client):
@@ -815,6 +921,57 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
     assert data["prompts"][0]["product_reference_images_used"][0]["slot_type"] == "front"
     assert data["prompts"][0]["style_reference_images_used"] == []
     assert data["latest_assets"] == []
+
+
+    assert "copy_attribution" in data
+    assert "hero_scene" in data["copy_attribution"]
+    assert "copy_blocks_attribution" in data["prompts"][0]
+    assert "copy_lines_attribution" in data["prompts"][0]
+
+
+def test_detail_prompt_preview_marks_sanitized_copy_block_attribution(client):
+    sid = create_ready_session(client, platform_id="1688")
+
+    preview = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
+        json={},
+    )
+    assert preview.status_code == 200
+
+    with db_session.SessionLocal() as db:
+        session = db.query(SessionModel).filter(SessionModel.id == sid).one()
+        detail_strategy_preview = dict(session.detail_strategy_preview or {})
+        panel_plan = list(detail_strategy_preview.get("panel_plan") or [])
+        panel_plan[0] = {
+            **dict(panel_plan[0]),
+            "copy_blocks": {
+                "headline": "SAVE $999 NOW!!!",
+                "supporting": "",
+                "bullet_points": ["FREE GIFT!!!"],
+                "proof_lines": [],
+                "cta_line": "CLICK NOW!!!",
+            },
+            "copy_blocks_attribution": {
+                "headline": {"source": "rule_based", "source_path": "fixture.headline", "source_stage": "detail_strategy_preview", "fallback_used": False, "sanitized": False},
+                "bullet_points": {"source": "rule_based", "source_path": "fixture.bullet_points", "source_stage": "detail_strategy_preview", "fallback_used": False, "sanitized": False},
+                "cta_line": {"source": "rule_based", "source_path": "fixture.cta_line", "source_stage": "detail_strategy_preview", "fallback_used": False, "sanitized": False},
+            },
+        }
+        detail_strategy_preview["panel_plan"] = panel_plan
+        session.detail_strategy_preview = detail_strategy_preview
+        db.commit()
+
+    prompt_preview = client.post(
+        f"/api/v2/sessions/{sid}/detail-pages/prompts/preview",
+        json={"instruction": None, "include_latest_assets": False},
+    )
+    assert prompt_preview.status_code == 200
+    first_prompt = prompt_preview.json()["data"]["prompts"][0]
+
+    assert "copy_blocks_attribution" in first_prompt
+    assert first_prompt["copy_language"] == "zh"
+    assert first_prompt["copy_blocks"] != panel_plan[0]["copy_blocks"]
+    assert set(first_prompt["copy_blocks_attribution"].keys()) == set(first_prompt["copy_blocks"].keys())
 
 
 def test_detail_page_panel_preferences_and_result_metadata(client):

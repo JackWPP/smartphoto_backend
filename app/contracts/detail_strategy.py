@@ -32,7 +32,9 @@ class DetailPanelPlanItem(ContractModel):
     copy_policy: str | None = None
     planner_prompt_base: str | None = None
     copy_lines: list[str] = Field(default_factory=list)
+    copy_lines_attribution: list[dict[str, Any]] = Field(default_factory=list)
     copy_blocks: DetailCopyBlocks = Field(default_factory=DetailCopyBlocks)
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict)
     raw_prompt_override: str | None = None
     applied_preset_id: str | None = None
     layout_notes: str | None = None
@@ -48,6 +50,7 @@ class DetailStrategyPreviewPayload(ContractModel):
     panel_count: int | None = None
     platform_overlay: PlatformOverlay = Field(default_factory=PlatformOverlay)
     copy_language: str | None = None
+    resolved_copy_attribution: dict[str, Any] = Field(default_factory=dict)
     product_reference_manifest: list[ReferenceManifestItem] = Field(default_factory=list)
     style_reference_manifest: list[ReferenceManifestItem] = Field(default_factory=list)
     detail_story_brief: dict[str, str] = Field(default_factory=dict)
@@ -55,4 +58,6 @@ class DetailStrategyPreviewPayload(ContractModel):
     detail_rule_pack: str | None = None
     panel_preferences: list[dict[str, Any]] = Field(default_factory=list)
     strategy_overrides: list[dict[str, Any]] = Field(default_factory=list)
+    hash_policy_version: str | None = None
+    hash_layers: dict[str, str] = Field(default_factory=dict)
     input_hash: str | None = None

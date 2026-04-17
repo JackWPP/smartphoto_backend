@@ -23,6 +23,12 @@ class KeyParameter(ContractModel):
     unit: str = ""
 
 
+class ComponentLock(ContractModel):
+    component: str = ""
+    position: str | None = None
+    constraint: str | None = None
+
+
 class TruthContract(ContractModel):
     hard_constraint_summary: str | None = None
     fidelity_tier: str | None = None
@@ -30,7 +36,7 @@ class TruthContract(ContractModel):
     immutable_features: list[str] = Field(default_factory=list)
     forbidden_drift: list[str] = Field(default_factory=list)
     required_entities: list[str] = Field(default_factory=list)
-    component_locks: list[str] = Field(default_factory=list)
+    component_locks: list[ComponentLock | str] = Field(default_factory=list)
     color_palette_hex: list[str] = Field(default_factory=list)
     brand_marks_preserve: list[str] = Field(default_factory=list)
     scale_anchor: str | None = None

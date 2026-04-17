@@ -905,8 +905,6 @@ def ensure_system_platform_configs(db: Session) -> bool:
     Skips DB check after first successful seed within this process.
     """
     global _platform_configs_seeded
-    if _platform_configs_seeded:
-        return False
     from app.models.platform_config import PlatformConfigModel
 
     existing_platform_ids = {
@@ -914,6 +912,8 @@ def ensure_system_platform_configs(db: Session) -> bool:
         for row in db.query(PlatformConfigModel.platform_id).all()
         if str(row[0]).strip()
     }
+    if _platform_configs_seeded and existing_platform_ids:
+        return False
     changed = False
     for pid, overlay in PLATFORM_OVERLAYS.items():
         if pid in existing_platform_ids:
@@ -948,43 +948,9 @@ def ensure_system_platform_configs(db: Session) -> bool:
 
 
 def get_platform_overlay(platform_id: str | None, *, db: Session | None = None) -> dict[str, Any]:
-    """Return the effective platform overlay for prompt assembly.
+    from app.services.rule_resolution import resolve_main_platform_overlay
 
-    Priority: DB PlatformConfigModel (if active) > hardcoded PLATFORM_OVERLAYS > default.
-    """
-    # --- DB-first lookup ---
-    if platform_id and db is not None:
-        try:
-            from app.models.platform_config import PlatformConfigModel
-
-            db_config = (
-                db.query(PlatformConfigModel)
-                .filter(PlatformConfigModel.platform_id == platform_id, PlatformConfigModel.is_active.is_(True))
-                .first()
-            )
-            if db_config:
-                base = {**PLATFORM_OVERLAYS["default"]}
-                base.update({
-                    "id": db_config.platform_id,
-                    "overlay_id": db_config.platform_id,
-                    "copy_language": db_config.copy_language,
-                    "allow_dense_copy": db_config.allow_dense_copy,
-                    "allow_certificate_elements": db_config.allow_certificate_elements,
-                    "allow_compare_overlay": db_config.allow_compare_overlay,
-                    "hero_text_overlay": db_config.hero_text_overlay,
-                    "white_bg_mandatory": db_config.white_bg_mandatory,
-                    "prohibited_elements": db_config.prohibited_elements or [],
-                    "negative_prompt_additions": db_config.negative_prompt_additions or [],
-                    "constraints": db_config.constraints or base.get("constraints", []),
-                })
-                return base
-        except Exception:
-            pass  # Fall through to hardcoded lookup on any DB error
-
-    # --- Hardcoded fallback ---
-    overlay = {**PLATFORM_OVERLAYS["default"], **PLATFORM_OVERLAYS.get(platform_id or "", {})}
-    overlay["overlay_id"] = overlay.get("id")
-    return overlay
+    return resolve_main_platform_overlay(platform_id, db=db)
 
 
 def get_main_rule_pack_id(platform_id: str) -> str:
@@ -993,33 +959,9 @@ def get_main_rule_pack_id(platform_id: str) -> str:
 
 
 def get_main_gallery_slot_blueprints(platform_id: str, *, db: Session | None = None) -> list[dict[str, Any]]:
-    rule_pack_id = get_main_rule_pack_id(platform_id)
-    rule_pack, version, config = load_published_rule_pack_config(
-        asset_family="main_gallery",
-        rule_pack_key=rule_pack_id,
-        platform_id=platform_id,
-        db=db,
-    )
-    seed_slot_blueprints = MAIN_GALLERY_SLOT_PRESETS.get(
-        rule_pack_id,
-        MAIN_GALLERY_SLOT_PRESETS[DEFAULT_MAIN_RULE_PACK_ID],
-    )
-    seed_by_slot = {
-        str(item.get("slot_id") or item.get("compat_role") or ""): item
-        for item in seed_slot_blueprints
-        if str(item.get("slot_id") or item.get("compat_role") or "")
-    }
-    slot_blueprints = (config or {}).get("slot_plan") or seed_slot_blueprints
-    return [
-        {
-            **seed_by_slot.get(str(item.get("slot_id") or item.get("compat_role") or ""), {}),
-            **item,
-            "platform_rule_pack": rule_pack.id if rule_pack is not None else rule_pack_id,
-            "platform_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else rule_pack_id,
-            "platform_rule_pack_version": version.version_no if version is not None else 1,
-        }
-        for item in slot_blueprints
-    ]
+    from app.services.rule_resolution import resolve_main_slot_rules
+
+    return [dict(rule.slot_blueprint) for rule in resolve_main_slot_rules(platform_id, db=db)]
 
 
 def recommend_expression_mode(
@@ -1103,38 +1045,9 @@ def recommend_expression_mode(
 
 
 def expression_metadata(expression_mode: str, *, db: Session | None = None, platform_id: str | None = None) -> dict[str, Any]:
-    """Look up expression mode metadata.
+    from app.services.rule_resolution import resolve_main_expression_metadata
 
-    Priority: Rule Pack config_snapshot['expression_library'] > hardcoded EXPRESSION_LIBRARY.
-    """
-    # --- DB-first lookup ---
-    if db is not None and platform_id:
-        try:
-            from app.services.rule_packs import get_harness_config
-
-            harness = get_harness_config(platform_id=platform_id, db=db)
-            db_library = harness.get("expression_library")
-            if isinstance(db_library, dict) and expression_mode in db_library:
-                value = db_library[expression_mode]
-                return {
-                    "expression_mode": expression_mode,
-                    "expression_label": value.get("label", expression_mode),
-                    "rule_modules_used": [str(item) for item in value.get("prompt_modules", []) if str(item).strip()],
-                    "layout_policy": value.get("layout_policy"),
-                    "copy_policy": value.get("copy_policy"),
-                }
-        except Exception:
-            pass
-
-    # --- Hardcoded fallback ---
-    value = EXPRESSION_LIBRARY.get(expression_mode, {})
-    return {
-        "expression_mode": expression_mode,
-        "expression_label": value.get("label", expression_mode),
-        "rule_modules_used": [str(item) for item in value.get("prompt_modules", []) if str(item).strip()],
-        "layout_policy": value.get("layout_policy"),
-        "copy_policy": value.get("copy_policy"),
-    }
+    return resolve_main_expression_metadata(expression_mode, db=db, platform_id=platform_id)
 
 
 def build_copy_blocks(
@@ -1265,21 +1178,9 @@ def resolve_slot_preferences(
     *,
     db: Session | None = None,
 ) -> dict[str, dict[str, Any]]:
-    valid_slots = {item["slot_id"] for item in get_main_gallery_slot_blueprints(platform_id, db=db)}
-    resolved: dict[str, dict[str, Any]] = {}
-    for item in incoming or []:
-        if not isinstance(item, dict):
-            continue
-        slot_id = str(item.get("slot_id") or "").strip()
-        if slot_id not in valid_slots:
-            continue
-        expression_mode = str(item.get("expression_mode") or "").strip() or None
-        resolved[slot_id] = {
-            "slot_id": slot_id,
-            "expression_mode": expression_mode,
-            "locked": bool(item.get("locked")),
-        }
-    return resolved
+    from app.services.rule_resolution import resolve_main_slot_preferences
+
+    return resolve_main_slot_preferences(platform_id, incoming, db=db)
 
 
 def preview_hash_payload(

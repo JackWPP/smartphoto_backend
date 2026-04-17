@@ -25,6 +25,7 @@ class AssetPlanItem(ContractModel):
     copy_focus: str | None = None
     focus_selling_point: str | None = None
     copy_blocks: MainCopyBlocks = Field(default_factory=MainCopyBlocks)
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict)
     raw_prompt_override: str | None = None
     applied_preset_id: str | None = None
     visual_structure: str | None = None
@@ -52,6 +53,7 @@ class PromptPlanItem(ContractModel):
     copy_focus: str | None = None
     focus_selling_point: str | None = None
     copy_blocks: MainCopyBlocks = Field(default_factory=MainCopyBlocks)
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict)
     raw_prompt_override: str | None = None
     applied_preset_id: str | None = None
     visual_structure: str | None = None
@@ -91,8 +93,11 @@ class StrategyPreviewPayload(ContractModel):
     platform_overlay: PlatformOverlay = Field(default_factory=PlatformOverlay)
     reference_manifest: list[ReferenceManifestItem] = Field(default_factory=list)
     strategy_reference_manifest: list[ReferenceManifestItem] = Field(default_factory=list)
+    resolved_copy_attribution: dict[str, Any] = Field(default_factory=dict)
     asset_plan: list[AssetPlanItem] = Field(default_factory=list)
     prompt_plan: list[PromptPlanItem] = Field(default_factory=list)
     slot_preferences: list[dict[str, Any]] = Field(default_factory=list)
     strategy_overrides: list[dict[str, Any]] = Field(default_factory=list)
+    hash_policy_version: str | None = None
+    hash_layers: dict[str, str] = Field(default_factory=dict)
     input_hash: str | None = None

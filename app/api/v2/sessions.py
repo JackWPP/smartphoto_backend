@@ -72,6 +72,11 @@ from app.schemas.session import (
     DeleteStrategyReferenceImageData,
 )
 from app.services.copy_normalization import normalize_copy_payload
+from app.services.copy_resolution import (
+    apply_explicit_copy_input_with_attribution,
+    resolve_session_copy,
+    strip_copy_meta,
+)
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
@@ -92,6 +97,7 @@ from app.services.jobs import append_job_event, create_job, update_job_status
 from app.services.locking import acquire_generation_locks, release_locks
 from app.services.parameter_snapshot import (
     apply_parameter_snapshot_to_copy,
+    parameter_snapshot_to_copy_attribution,
     merge_parameter_snapshot_into_copy,
     parameter_snapshot_to_copy_fields,
 )
@@ -113,10 +119,11 @@ from app.services.repo import (
     list_active_strategy_reference_images,
     list_session_prompt_overrides,
 )
+from app.services.preview_hashing import PREVIEW_HASH_POLICY_VERSION
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter, public_url_for
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview, strategy_preview_input_hash
-from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
+from app.services.strategy_overrides import resolve_session_overrides, serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
 from app.services.user_accounts import refresh_session_search_cache
 
@@ -420,7 +427,8 @@ def _serialized_session_overrides(db: Session, session_id: str, *, asset_family:
 
 
 def _copy_response_payload(session: SessionModel, db: Session) -> dict:
-    copy_data = _resolved_copy_for_session(session, db)
+    resolution = _resolved_copy_for_session(session, db, include_attribution=True)
+    copy_data = resolution["copy"]
     return {
         "product_name": copy_data.get("product_name", ""),
         "category": copy_data.get("category", ""),
@@ -431,20 +439,28 @@ def _copy_response_payload(session: SessionModel, db: Session) -> dict:
         "style_preset_id": copy_data.get("style_preset_id"),
         "style_custom": copy_data.get("style_custom", ""),
         "style_choice": copy_data.get("style_choice", ""),
+        "copy_attribution": resolution["copy_attribution"],
     }
 
 
-def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
-    copy_data = sanitize_copy_form_payload(session.confirmed_copy)
-    if session.parameter_snapshot:
-        copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
-    preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"), session.service_id)
+def _resolved_copy_for_session(session: SessionModel, db: Session, *, include_attribution: bool = False) -> dict:
+    base_copy = sanitize_copy_form_payload(strip_copy_meta(session.confirmed_copy))
+    preset = get_prompt_preset_or_none(db, base_copy.get("style_preset_id"), session.service_id)
+    resolved_preset = serialize_prompt_preset(preset) if preset is not None else None
+    resolution = resolve_session_copy(
+        session.confirmed_copy or {},
+        parameter_snapshot=session.parameter_snapshot or {},
+        resolved_style_preset=resolved_preset,
+    )
+    copy_data = resolution["copy"]
     if preset is not None:
         copy_data["style_preset_id"] = preset.id
-        copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
+        copy_data["resolved_style_preset"] = resolved_preset
         if not copy_data.get("style_choice"):
             copy_data["style_choice"] = preset.name
-    return sanitize_copy_form_payload(copy_data)
+    if include_attribution:
+        return resolution
+    return copy_data
 
 
 def _invalidate_analysis_outputs(session: SessionModel) -> None:
@@ -1197,6 +1213,7 @@ def get_parameters(
             "session_id": session.id,
             "parameter_snapshot": session.parameter_snapshot or {},
             "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "applied_copy_attribution": parameter_snapshot_to_copy_attribution(session.parameter_snapshot or {}),
             "overwrite_mode": "replace_all",
         }
     )
@@ -1236,6 +1253,7 @@ def complete_parameters(
             "session_id": session.id,
             "parameter_snapshot": session.parameter_snapshot or {},
             "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "applied_copy_attribution": parameter_snapshot_to_copy_attribution(session.parameter_snapshot or {}),
             "overwrite_mode": "replace_all",
         }
     )
@@ -1266,6 +1284,7 @@ def put_parameters(
             "session_id": session.id,
             "parameter_snapshot": session.parameter_snapshot or {},
             "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "applied_copy_attribution": parameter_snapshot_to_copy_attribution(session.parameter_snapshot or {}),
             "overwrite_mode": "replace_all",
         }
     )
@@ -1367,7 +1386,7 @@ def put_copy_form(
     payload["resolved_style_preset"] = serialize_prompt_preset(preset) if preset is not None else None
     if preset is not None and not payload.get("style_choice"):
         payload["style_choice"] = preset.name
-    session.confirmed_copy = sanitize_copy_form_payload(payload)
+    session.confirmed_copy = apply_explicit_copy_input_with_attribution(session.confirmed_copy or {}, payload)
 
     # --- Fix: 同步 analysis_snapshot.recognized_product ---
     # 当用户修正了 product_name/category 时，同步更新 analysis_snapshot 中的对应字段，
@@ -1506,7 +1525,11 @@ def build_strategy(
         strategy_reference_manifest=strategy_reference_manifest,
     )
     existing_preview = session.strategy_preview if isinstance(session.strategy_preview, dict) else None
-    if existing_preview and existing_preview.get("input_hash") == input_hash:
+    if (
+        existing_preview
+        and existing_preview.get("hash_policy_version") == PREVIEW_HASH_POLICY_VERSION
+        and existing_preview.get("input_hash") == input_hash
+    ):
         session.status = "strategy_ready"
         session.current_step = max(session.current_step, 5)
         db.commit()
@@ -1615,6 +1638,9 @@ def build_detail_strategy(
         planner_instruction=payload.get("planner_instruction"),
         panel_preferences=resolve_panel_preferences(resolved_panel_preferences, db=db),
         active_platform_id=session.active_platform_id,
+        prompt_overrides=resolve_session_overrides(prompt_overrides),
+        analysis_snapshot=session.analysis_snapshot or {},
+        db=db,
     )
     existing_preview = session.detail_strategy_preview if isinstance(session.detail_strategy_preview, dict) else None
     if existing_preview and not detail_strategy_preview_needs_rebuild(
@@ -1841,7 +1867,8 @@ def preview_prompts(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    resolved_copy = _resolved_copy_for_session(session, db)
+    copy_resolution = _resolved_copy_for_session(session, db, include_attribution=True)
+    resolved_copy = copy_resolution["copy"]
     strategy_preview = _effective_strategy_preview(session, db)
     if not strategy_preview.get("reference_manifest"):
         strategy_preview = build_strategy_preview(
@@ -1897,6 +1924,7 @@ def preview_prompts(
             "product_advantages": resolved_copy.get("product_advantages", []),
             "style_preset_id": resolved_copy.get("style_preset_id"),
             "style_custom": resolved_copy.get("style_custom", ""),
+            "copy_attribution": copy_resolution["copy_attribution"],
             "model": settings.whatai_image_model,
             "image_size": "1024x1024",
             "reference_manifest": strategy_preview.get("reference_manifest", []),
@@ -1921,7 +1949,8 @@ def preview_detail_prompts(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    resolved_copy = _resolved_copy_for_session(session, db)
+    copy_resolution = _resolved_copy_for_session(session, db, include_attribution=True)
+    resolved_copy = copy_resolution["copy"]
     detail_strategy_preview = _effective_detail_strategy_preview(session, db)
     prompts = build_detail_prompt_previews(
         confirmed_copy=resolved_copy,
@@ -1963,6 +1992,7 @@ def preview_detail_prompts(
             "product_advantages": resolved_copy.get("product_advantages", []),
             "style_preset_id": resolved_copy.get("style_preset_id"),
             "style_custom": resolved_copy.get("style_custom", ""),
+            "copy_attribution": copy_resolution["copy_attribution"],
             "model": settings.whatai_image_model,
             "image_size": DETAIL_PAGE_IMAGE_SIZE,
             "product_reference_manifest": detail_strategy_preview.get("product_reference_manifest", []),

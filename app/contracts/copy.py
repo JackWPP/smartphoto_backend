@@ -7,6 +7,14 @@ from pydantic import Field
 from app.contracts.common import ContractModel, KeyParameter
 
 
+class CopyAttributionEntry(ContractModel):
+    source: str = ""
+    source_path: str = ""
+    source_stage: str = ""
+    fallback_used: bool = False
+    sanitized: bool = False
+
+
 class MainCopyBlocks(ContractModel):
     headline: str = ""
     supporting: str = ""

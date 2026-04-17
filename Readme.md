@@ -347,3 +347,24 @@ npm run dev
 - 调试前端现在应直接带 `X-App-Key` 调图片主链路，不再依赖 `/api/v2/auth`
 - Job 事件流与 ZIP 下载同样走 `X-App-Key`，不再区分 user/guest
 - 浏览器上传默认改走 `/api/v2/uploads/presign -> 直传对象存储 -> /api/v2/uploads/complete`
+
+## Windows 本地 Worker 说明
+
+- Windows 本地联调若直接让 Celery 使用默认 `billiard` 多进程池，容易出现 `WinError 5`、`WinError 6`、`句柄无效`、`SpawnPoolWorker-* exited with exitcode 1`
+- 当前 `scripts/dev-worker.ps1` 已默认改为安全模式启动：
+  - `--pool=solo`
+  - `--concurrency=1`
+  - 默认消费队列 `q.analysis,q.copy,q.generation.main,q.generation.detail,q.quality`
+- 这项适配只针对 Windows 本地联调稳定性；Linux / Docker 侧仍可继续使用常规 worker 配置验证真实异步并发
+- 若你确实要在本地覆盖 Windows worker 启动参数，可设置：
+  - `CELERY_WORKER_POOL`
+  - `CELERY_WORKER_CONCURRENCY`
+  - `CELERY_QUEUES`
+
+PowerShell 示例：
+
+```powershell
+$env:CELERY_WORKER_POOL = "threads"
+$env:CELERY_WORKER_CONCURRENCY = "4"
+.\scripts\dev-worker.ps1
+```

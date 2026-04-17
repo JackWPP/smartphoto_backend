@@ -138,6 +138,41 @@ def test_compose_prompt_does_not_embed_group_output_count_and_normalizes_string_
     assert "整体圆柱形结构" in prompt["final_prompt"]
 
 
+def test_compose_prompt_uses_readable_default_style_fallback():
+    from app.services.prompts import compose_prompt
+
+    strategy_preview = build_strategy_preview(
+        {
+            "product_name": "测试净化器",
+            "headline": "",
+            "selling_points": "",
+            "usage_scenes": "",
+            "specs": "",
+            "style_choice": "",
+            "style_custom": "",
+        },
+        "temu",
+    )
+    strategy_preview["style_summary"] = ""
+
+    prompt = compose_prompt(
+        {
+            "product_name": "测试净化器",
+            "headline": "",
+            "selling_points": "",
+            "usage_scenes": "",
+            "specs": "",
+            "style_choice": "",
+            "style_custom": "",
+        },
+        strategy_preview,
+        "hero",
+    )
+
+    assert "简洁高级的电商摄影风格" in prompt["blocks"]["style"]
+    assert "绠" not in prompt["blocks"]["style"]
+
+
 def test_alibaba_prompt_exposes_slot_structure_and_copy_policy():
     from app.services.prompts import compose_prompt
 
@@ -1477,6 +1512,50 @@ def test_compose_detail_panel_prompt_filters_machine_keys_and_duplicate_copy_lin
     assert prompt["copy_blocks"]["headline"] == "物理循环除湿"
     assert prompt["copy_blocks"]["supporting"] == "物理循环除湿机"
     assert prompt["display_tags"]
+
+
+def test_merge_panel_plan_uses_platform_aware_panel_metadata():
+    from app.services.detail_pages import _merge_panel_plan
+
+    fallback_plan = [
+        {
+            "panel_id": "panel_1",
+            "slot_id": "detail_slot_01",
+            "panel_type": "feature_benefit",
+            "panel_type_label": "利益点详解",
+            "layout_template": "benefit_story",
+            "copy_policy": "headline_plus_supporting",
+            "copy_lines": ["原始卖点"],
+            "panel_goal": "原始目标",
+            "copy_focus": "原始焦点",
+            "narrative_section": "trust_overview",
+            "visual_truth_mode": "faithful_closeup",
+            "origin_note": "",
+            "risk_flags": [],
+        }
+    ]
+    llm_plan = [
+        {
+            "panel_id": "panel_1",
+            "panel_type": "icon_island",
+            "copy_lines": ["卖点A", "卖点B"],
+            "panel_goal": "概览卖点",
+            "copy_focus": "概览卖点",
+        }
+    ]
+
+    merged = _merge_panel_plan(
+        fallback_plan,
+        llm_plan,
+        confirmed_copy={"product_name": "测试商品"},
+        copy_language="en",
+        active_platform_id="1688",
+        db=None,
+    )
+
+    assert merged[0]["panel_type"] == "icon_island"
+    assert merged[0]["panel_type_label"].startswith("Icon")
+    assert merged[0]["layout_template"] == "icon_grid"
 
 
 # ---------------------------------------------------------------------------

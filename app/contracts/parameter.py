@@ -15,8 +15,8 @@ class ParameterSnapshotPayload(ContractModel):
     inferred_key_parameters: list[KeyParameter] = Field(default_factory=list)
     inferred_advantages: list[str] = Field(default_factory=list)
     source_mode: str | None = None
-    evidence_priority: list[str] = Field(default_factory=list)
-    evidence_summary: list[str] = Field(default_factory=list)
+    evidence_priority: str | None = None
+    evidence_summary: list[dict] = Field(default_factory=list)
     completion_status: str | None = None
     completion_source: str | None = None
     confidence_notes: list[str] = Field(default_factory=list)

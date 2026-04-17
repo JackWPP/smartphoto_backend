@@ -253,6 +253,8 @@ class CopyData(BaseModel):
     style_choice: str = Field(default="", description="旧版风格选择字段，仅兼容读取。")
 
 
+    copy_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠 copy 瀛楁鐨勬潵婧愬綊鍥犱俊鎭€?")
+
 class CopySaveData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     status: str = Field(description="保存 copy 后的 session 状态。")
@@ -376,6 +378,9 @@ class PromptPreviewItem(BaseModel):
     resolved_constraints: list[str] = Field(default_factory=list, description="本次 prompt 的最终约束列表。")
 
 
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠妲戒綅 copy blocks 鐨勬潵婧愬綊鍥犱俊鎭€?")
+
+
 class PromptPreviewLatestAsset(BaseModel):
     asset_id: str = Field(description="资产 ID。")
     version_no: int = Field(description="结果版本号。")
@@ -410,6 +415,9 @@ class PromptPreviewData(BaseModel):
     latest_assets: list[PromptPreviewLatestAsset] = Field(description="最近一版结果的执行快照。")
 
 
+    copy_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠 session 绾?copy 鏉ユ簮褰掑洜銆?")
+
+
 class DetailPromptPreviewItem(BaseModel):
     panel_id: str = Field(description="详情页 panel ID。")
     slot_id: str | None = Field(default=None, description="详情页固定槽位 ID。")
@@ -442,6 +450,10 @@ class DetailPromptPreviewItem(BaseModel):
     rule_modules_used: list[str] = Field(default_factory=list, description="详情页规则模块列表。")
     platform_overlay: dict[str, Any] | None = Field(default=None, description="详情页平台 overlay 元数据。")
     copy_language: str | None = Field(default=None, description="当前详情页 panel 的图上文案语言策略。")
+
+
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠 panel copy blocks 鐨勬潵婧愬綊鍥犱俊鎭€?")
+    copy_lines_attribution: list[dict[str, Any]] = Field(default_factory=list, description="褰撳墠 panel copy lines 鐨勬潵婧愬綊鍥犱俊鎭€?")
 
 
 class DetailPromptPreviewLatestAsset(BaseModel):
@@ -479,6 +491,9 @@ class DetailPromptPreviewData(BaseModel):
     latest_assets: list[DetailPromptPreviewLatestAsset] = Field(description="最近一版详情页结果的执行快照。")
 
 
+    copy_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠 session 绾?copy 鏉ユ簮褰掑洜銆?")
+
+
 class GenerateGalleryRequest(BaseModel):
     instruction: str | None = Field(default=None, description="本轮整组生图附加指令。")
     slot_ids: list[str] = Field(
@@ -501,6 +516,9 @@ class ParameterSnapshotData(BaseModel):
     parameter_snapshot: dict[str, Any] = Field(description="参数提取结果快照。")
     applied_copy_fields: dict[str, Any] = Field(default_factory=dict, description="当前参数结果映射到 copy 的正式字段。")
     overwrite_mode: str = Field(default="replace_all", description="参数结果映射到 copy 的默认策略。")
+
+
+    applied_copy_attribution: dict[str, Any] = Field(default_factory=dict, description="鍙傛暟缁撴灉鏄犲皠鍒?copy 鐨勬潵婧愬綊鍥犱俊鎭€?")
 
 
 class ParameterCompletionRequest(BaseModel):
