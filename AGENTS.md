@@ -421,3 +421,7 @@
   - `apply_parameter_snapshot_to_copy` 改为在覆盖正式字段时同步镜像 `usage_scenes/selling_points/specs`，避免旧字段残留把策略拉回历史值
   - 主图策略与首图 prompt 收口为正式字段优先，`hero_scene` 现在会直接约束首张主图 (`hero` / `primary_kv`) 的场景表达；`white_bg` 不消费该场景锚点
   - 补充参数镜像、首图场景锚点与 prompt preview 回归测试，并同步更新 `docs/API_联调指南.md`、`docs/生图Agent协作逻辑.md`、`docs/运行与排障手册.md`
+- 2026-04-17 Windows Dev Worker:
+  - `scripts/dev-worker.ps1` 默认改为 `--pool=solo --concurrency=1` 启动 Celery，避免 Windows 下 `billiard` 默认多进程池触发 `WinError 5/6` 与 `SpawnPoolWorker` 崩溃
+  - `scripts/dev-worker.ps1` 与 `scripts/dev-worker.sh` 统一支持 `CELERY_WORKER_POOL`、`CELERY_WORKER_CONCURRENCY`、`CELERY_QUEUES` 覆盖启动参数，并补齐 `q.quality` 队列
+  - `Readme.md` 与 `docs/运行与排障手册.md` 补充 Windows 本地 Worker 启动约束、覆盖方式与排障路径

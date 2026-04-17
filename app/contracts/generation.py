@@ -12,6 +12,7 @@ class MainGenerationSnapshot(ContractModel):
     final_prompt: str
     prompt_blocks: dict[str, Any] = Field(default_factory=dict)
     copy_blocks: MainCopyBlocks = Field(default_factory=MainCopyBlocks)
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict)
     sanitized_fields: list[str] = Field(default_factory=list)
     copy_safety_notes: list[str] = Field(default_factory=list)
     raw_prompt_override: str | None = None
@@ -55,6 +56,7 @@ class DetailGenerationSnapshot(ContractModel):
     final_prompt: str
     prompt_blocks: dict[str, Any] = Field(default_factory=dict)
     copy_blocks: DetailCopyBlocks = Field(default_factory=DetailCopyBlocks)
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict)
     sanitized_fields: list[str] = Field(default_factory=list)
     copy_safety_notes: list[str] = Field(default_factory=list)
     truth_contract: TruthContract = Field(default_factory=TruthContract)

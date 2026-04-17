@@ -17,15 +17,22 @@ from app.contracts.parameter import ParameterSnapshotPayload
 from app.contracts.validation import validate_contract_warn
 from app.core.config import get_settings
 from app.services.copy_normalization import normalize_copy_payload
-from app.services.main_gallery_rules import get_platform_overlay
+from app.services.copy_resolution import resolve_session_copy
 from app.services.detail_panel_library import (
     list_detail_panel_slots,
     panel_type_metadata,
     recommend_panel_types,
     resolve_panel_preferences,
 )
-from app.services.platforms import get_platform_or_none
 from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
+from app.services.preview_hashing import (
+    PREVIEW_HASH_POLICY_VERSION,
+    build_hash_layers,
+    normalize_manifest_item,
+    normalize_text_list,
+    sort_dicts,
+)
+from app.services.prompt_pipeline import build_detail_prompt_pipeline, normalize_detail_prompt_stage
 from app.services.prompt_safety import (
     prompt_matrix_guardrails,
     sanitize_detail_copy_blocks,
@@ -35,7 +42,16 @@ from app.services.prompt_safety import (
 )
 from app.services.quality_signals import build_truth_contract
 from app.services.reference_images import LoadedReferenceImage, build_reference_manifest, load_reference_images
-from app.services.rule_packs import DETAIL_RULE_PACK_ID, load_published_rule_pack_config
+from app.services.rule_resolution import (
+    resolve_detail_display_module_intent,
+    resolve_detail_display_module_kind,
+    resolve_detail_display_module_title,
+    resolve_detail_display_tags,
+    resolve_detail_page_context,
+    resolve_detail_panel_by_panel_id,
+    resolve_detail_platform_overlay,
+    resolve_detail_visual_truth_mode,
+)
 from app.services.strategy_overrides import resolve_session_overrides
 from app.services.upstream import WhataiClient
 from app.services.visible_copy_policy import (
@@ -65,6 +81,182 @@ DETAIL_STORY_SECTIONS = (
 logger = logging.getLogger(__name__)
 
 
+def _resolved_style_preset_hash_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "id": str(value.get("id") or ""),
+        "name": str(value.get("name") or ""),
+        "style_summary": str(value.get("style_summary") or ""),
+    }
+
+
+def _detail_preview_hash_bundle(
+    *,
+    confirmed_copy: dict[str, Any],
+    product_manifest: list[dict[str, Any]],
+    style_manifest: list[dict[str, Any]],
+    planner_instruction: str | None,
+    panel_preferences: dict[str, dict[str, Any]],
+    active_platform_id: str | None,
+    prompt_overrides: dict[str, dict[str, Any]] | None = None,
+    analysis_snapshot: dict[str, Any] | None = None,
+    planner_profile: str | None = None,
+    planner_provider: str | None = None,
+    planner_model: str | None = None,
+    detail_rule_context: Any | None = None,
+    platform_overlay: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_copy = normalize_copy_payload(confirmed_copy)
+    analysis_snapshot = analysis_snapshot or {}
+    prompt_overrides = prompt_overrides or {}
+    detail_rule_context = detail_rule_context or resolve_detail_page_context(active_platform_id)
+    platform_overlay = platform_overlay or _detail_platform_overlay(active_platform_id)
+    normalized_overrides = []
+    for slot_id, value in prompt_overrides.items():
+        if not isinstance(value, dict):
+            continue
+        normalized_overrides.append(
+            {
+                "slot_id": str(slot_id),
+                "raw_prompt_override": str(value.get("raw_prompt_override") or ""),
+                "applied_preset_id": str(value.get("applied_preset_id") or ""),
+                "copy_blocks_override": value.get("copy_blocks_override") if isinstance(value.get("copy_blocks_override"), dict) else {},
+                "copy_blocks_template": value.get("applied_preset", {}).get("copy_blocks_template")
+                if isinstance(value.get("applied_preset"), dict)
+                else {},
+            }
+        )
+    panel_slots = [
+        {
+            "slot_id": str(item.get("slot_id") or ""),
+            "panel_id": str(item.get("panel_id") or ""),
+            "default_panel_type": str(item.get("default_panel_type") or ""),
+            "candidate_panel_types": [str(candidate) for candidate in item.get("candidate_panel_types", []) if str(candidate).strip()],
+        }
+        for item in getattr(detail_rule_context, "panel_slots", [])
+        if isinstance(item, dict) and item.get("slot_id")
+    ]
+    panel_type_library = [
+        {
+            "panel_type": str(panel_type),
+            "label": str(meta.get("label") or ""),
+            "layout_template": str(meta.get("layout_template") or ""),
+            "copy_policy": str(meta.get("copy_policy") or ""),
+        }
+        for panel_type, meta in (detail_rule_context.panel_type_library or {}).items()
+        if isinstance(meta, dict)
+    ]
+    config_payload = {
+        "platform_id": active_platform_id or "amazon",
+        "planner_profile": planner_profile or "",
+        "planner_provider": planner_provider or "",
+        "planner_model": planner_model or "",
+        "language_policy_version": DETAIL_LANGUAGE_POLICY_VERSION,
+        "detail_policy_version": DETAIL_POLICY_VERSION,
+        "platform_overlay": platform_overlay,
+        "detail_rule_pack_id": getattr(detail_rule_context, "rule_pack_id", None),
+        "detail_rule_pack_key": detail_rule_context.rule_pack.rule_pack_key if getattr(detail_rule_context, "rule_pack", None) is not None else getattr(detail_rule_context, "rule_pack_id", None),
+        "detail_rule_pack_version": detail_rule_context.rule_pack_version.version_no if getattr(detail_rule_context, "rule_pack_version", None) is not None else 1,
+        "panel_slots": sort_dicts(panel_slots, "slot_id"),
+        "panel_type_library": sort_dicts(panel_type_library, "panel_type"),
+    }
+    content_payload = {
+        "confirmed_copy": {
+            "product_name": str(normalized_copy.get("product_name") or ""),
+            "category": str(normalized_copy.get("category") or ""),
+            "headline": str(normalized_copy.get("headline") or ""),
+            "hero_scene": str(normalized_copy.get("hero_scene") or ""),
+            "core_selling_points": normalize_text_list(normalized_copy.get("core_selling_points")),
+            "key_parameters": normalized_copy.get("key_parameters") if isinstance(normalized_copy.get("key_parameters"), list) else [],
+            "product_advantages": normalize_text_list(normalized_copy.get("product_advantages")),
+            "style_preset_id": normalized_copy.get("style_preset_id"),
+            "style_custom": str(normalized_copy.get("style_custom") or ""),
+            "resolved_style_preset": _resolved_style_preset_hash_payload(normalized_copy.get("resolved_style_preset")),
+        },
+        "planner_instruction": str(planner_instruction or ""),
+        "copy_language": str(platform_overlay.get("copy_language") or ""),
+        "analysis_reference_summary": analysis_snapshot.get("reference_summary") if isinstance(analysis_snapshot.get("reference_summary"), dict) else {},
+        "risk_flags": normalize_text_list(analysis_snapshot.get("risk_flags")),
+        "panel_preferences": sort_dicts(list(panel_preferences.values()), "slot_id"),
+        "strategy_overrides": sort_dicts(normalized_overrides, "slot_id"),
+    }
+    reference_payload = {
+        "product_reference_manifest": sort_dicts(
+            [normalize_manifest_item(item) for item in product_manifest if isinstance(item, dict) and item.get("image_id")],
+            "display_order",
+            "slot_type",
+            "image_id",
+        ),
+        "style_reference_manifest": sort_dicts(
+            [normalize_manifest_item(item, include_slot_type=False) for item in style_manifest if isinstance(item, dict) and item.get("image_id")],
+            "display_order",
+            "image_id",
+        ),
+    }
+    return build_hash_layers(
+        stage="detail_strategy_preview",
+        config_payload=config_payload,
+        content_payload=content_payload,
+        reference_payload=reference_payload,
+    )
+
+
+def _rebuild_detail_copy_lines_attribution(
+    lines: list[str],
+    *,
+    base_attribution: list[dict[str, Any]] | None,
+    original_lines: list[str] | None = None,
+    default_source: str,
+    default_source_path: str,
+) -> list[dict[str, Any]]:
+    source_stage = "detail_strategy_preview"
+    normalized_base = [dict(item) for item in (base_attribution or []) if isinstance(item, dict)]
+    original = [str(item).strip() for item in (original_lines or []) if str(item).strip()]
+    rebuilt: list[dict[str, Any]] = []
+    for index, _line in enumerate(lines):
+        meta = dict(normalized_base[index]) if index < len(normalized_base) else {}
+        rebuilt.append(
+            {
+                "source": str(meta.get("source") or default_source),
+                "source_path": str(meta.get("source_path") or default_source_path),
+                "source_stage": str(meta.get("source_stage") or source_stage),
+                "fallback_used": bool(meta.get("fallback_used", False)),
+                "sanitized": bool(meta.get("sanitized", False)) or (index < len(original) and original[index] != lines[index]),
+            }
+        )
+    return rebuilt
+
+
+def _rebuild_detail_copy_blocks_attribution(
+    copy_blocks: dict[str, Any],
+    *,
+    base_attribution: dict[str, Any] | None,
+    original_copy_blocks: dict[str, Any] | None = None,
+    sanitized_fields: list[str] | None = None,
+    default_source: str,
+    default_source_path_prefix: str,
+) -> dict[str, Any]:
+    source_stage = "detail_strategy_preview"
+    sanitized_set = {str(item).strip() for item in (sanitized_fields or []) if str(item).strip()}
+    normalized_base = base_attribution if isinstance(base_attribution, dict) else {}
+    original_blocks = original_copy_blocks if isinstance(original_copy_blocks, dict) else {}
+    rebuilt: dict[str, Any] = {}
+    for key in copy_blocks.keys():
+        meta = normalized_base.get(key)
+        meta_dict = dict(meta) if isinstance(meta, dict) else {}
+        rebuilt[key] = {
+            "source": str(meta_dict.get("source") or default_source),
+            "source_path": str(meta_dict.get("source_path") or f"{default_source_path_prefix}.{key}"),
+            "source_stage": str(meta_dict.get("source_stage") or source_stage),
+            "fallback_used": bool(meta_dict.get("fallback_used", False)),
+            "sanitized": bool(meta_dict.get("sanitized", False))
+            or key in sanitized_set
+            or original_blocks.get(key) != copy_blocks.get(key),
+        }
+    return rebuilt
+
+
 def _empty_detail_story_brief() -> dict[str, str]:
     return {key: "" for key in DETAIL_STORY_SECTIONS}
 
@@ -83,47 +275,30 @@ def detail_strategy_preview_input_hash(
     planner_instruction: str | None,
     panel_preferences: dict[str, dict[str, Any]],
     active_platform_id: str | None,
+    prompt_overrides: dict[str, dict[str, Any]] | None = None,
+    analysis_snapshot: dict[str, Any] | None = None,
+    db: Session | None = None,
 ) -> str:
     settings = get_settings()
     client = WhataiClient()
     normalized_copy = normalize_copy_payload(confirmed_copy)
-    platform_overlay = _detail_platform_overlay(active_platform_id)
-    return _stable_hash(
-        {
-            "planner_profile": settings.planner_profile,
-            "planner_provider": client.llm_router.provider_for_task("detail_planner"),
-            "planner_model": client.llm_router.model_for_task("detail_planner"),
-            "language_policy_version": DETAIL_LANGUAGE_POLICY_VERSION,
-            "copy_language": platform_overlay.get("copy_language"),
-            "panel_preferences": panel_preferences,
-            "planner_instruction": planner_instruction or "",
-            "platform_id": active_platform_id or "amazon",
-            "product_reference_manifest": [
-                {
-                    "image_id": item["image_id"],
-                    "slot_type": item["slot_type"],
-                    "display_order": item["display_order"],
-                }
-                for item in product_manifest
-            ],
-            "style_reference_manifest": [
-                {
-                    "image_id": item["image_id"],
-                    "display_order": item["display_order"],
-                }
-                for item in style_manifest
-            ],
-            "confirmed_copy": {
-                "product_name": normalized_copy.get("product_name", ""),
-                "category": normalized_copy.get("category", ""),
-                "hero_scene": normalized_copy.get("hero_scene", ""),
-                "core_selling_points": normalized_copy.get("core_selling_points", []),
-                "key_parameters": normalized_copy.get("key_parameters", []),
-                "product_advantages": normalized_copy.get("product_advantages", []),
-                "style_preset_id": normalized_copy.get("style_preset_id"),
-                "style_custom": normalized_copy.get("style_custom", ""),
-            },
-        }
+    platform_overlay = _detail_platform_overlay(active_platform_id, db=db)
+    return str(
+        _detail_preview_hash_bundle(
+            confirmed_copy=normalized_copy,
+            product_manifest=product_manifest,
+            style_manifest=style_manifest,
+            planner_instruction=planner_instruction,
+            panel_preferences=panel_preferences,
+            active_platform_id=active_platform_id,
+            prompt_overrides=prompt_overrides,
+            analysis_snapshot=analysis_snapshot or {},
+            planner_profile=settings.planner_profile,
+            planner_provider=client.llm_router.provider_for_task("detail_planner"),
+            planner_model=client.llm_router.model_for_task("detail_planner"),
+            platform_overlay=platform_overlay,
+            detail_rule_context=resolve_detail_page_context(active_platform_id, db=db),
+        )["input_hash"]
     )
 
 
@@ -146,19 +321,14 @@ def build_detail_strategy_preview(
         parameter_snapshot or {},
         context={"active_platform_id": active_platform_id, "stage": "build_detail_strategy_preview_parameter_snapshot"},
     )
-    normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
-    platform_overlay = _detail_platform_overlay(active_platform_id)
+    copy_resolution = resolve_session_copy(confirmed_copy, parameter_snapshot=parameter_snapshot)
+    normalized_copy = copy_resolution["copy"]
+    platform_overlay = _detail_platform_overlay(active_platform_id, db=db)
     copy_language = str(platform_overlay.get("copy_language") or "en")
-    platform_profile = get_platform_or_none(active_platform_id or "amazon")
-    rule_pack, version, _ = load_published_rule_pack_config(
-        asset_family="detail_page",
-        rule_pack_key=DETAIL_RULE_PACK_ID,
-        platform_id=active_platform_id,
-        db=db,
-    )
+    detail_rule_context = resolve_detail_page_context(active_platform_id, db=db)
     product_loaded = load_reference_images(product_images) if product_images else []
     style_loaded = load_reference_images(style_images or []) if style_images else []
-    resolved_panel_preferences = resolve_panel_preferences(panel_preferences, db=db)
+    resolved_panel_preferences = resolve_panel_preferences(panel_preferences, platform_id=active_platform_id, db=db)
     resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
 
     if not product_loaded:
@@ -177,6 +347,7 @@ def build_detail_strategy_preview(
             "style_reference_manifest": [],
             "style_summary": _style_summary(normalized_copy, style_loaded),
             "style_source": "style_images" if style_loaded else "copy_fields",
+            "resolved_copy_attribution": copy_resolution["copy_attribution"],
             "platform_overlay": platform_overlay,
             "copy_language": copy_language,
             "language_policy_version": DETAIL_LANGUAGE_POLICY_VERSION,
@@ -191,21 +362,30 @@ def build_detail_strategy_preview(
             "detail_story_brief": _empty_detail_story_brief(),
             "detail_planner_ms": 0,
             "detail_reviewer_ms": 0,
-            "detail_rule_pack": rule_pack.id if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
-            "detail_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
-            "detail_rule_pack_version": version.version_no if version is not None else 1,
+            "detail_rule_pack": detail_rule_context.rule_pack.id if detail_rule_context.rule_pack is not None else detail_rule_context.rule_pack_id,
+            "detail_rule_pack_key": detail_rule_context.rule_pack.rule_pack_key if detail_rule_context.rule_pack is not None else detail_rule_context.rule_pack_id,
+            "detail_rule_pack_version": detail_rule_context.rule_pack_version.version_no if detail_rule_context.rule_pack_version is not None else 1,
             "panel_preferences": list(resolved_panel_preferences.values()),
             "strategy_overrides": list(resolved_prompt_overrides.values()),
             "panel_plan": [],
-            "input_hash": detail_strategy_preview_input_hash(
-                normalized_copy,
+        }
+        preview.update(
+            _detail_preview_hash_bundle(
+                confirmed_copy=normalized_copy,
                 product_manifest=[],
                 style_manifest=[],
                 planner_instruction=planner_instruction,
                 panel_preferences=resolved_panel_preferences,
                 active_platform_id=active_platform_id,
-            ),
-        }
+                prompt_overrides=resolved_prompt_overrides,
+                analysis_snapshot=analysis_snapshot or {},
+                planner_profile=settings.planner_profile,
+                planner_provider=client.llm_router.provider_for_task("detail_planner"),
+                planner_model=client.llm_router.model_for_task("detail_planner"),
+                detail_rule_context=detail_rule_context,
+                platform_overlay=platform_overlay,
+            )
+        )
         return validate_contract_warn(
             DetailStrategyPreviewPayload,
             preview,
@@ -248,6 +428,8 @@ def build_detail_strategy_preview(
         llm_result.get("panel_plan") or [],
         confirmed_copy=normalized_copy,
         copy_language=copy_language,
+        active_platform_id=active_platform_id,
+        db=db,
     )
     preview = {
         "use_case": DETAIL_PAGE_USE_CASE,
@@ -264,6 +446,7 @@ def build_detail_strategy_preview(
         "style_reference_manifest": style_manifest,
         "style_summary": _style_summary(normalized_copy, style_loaded),
         "style_source": "style_images" if style_loaded else "copy_fields",
+        "resolved_copy_attribution": copy_resolution["copy_attribution"],
         "platform_overlay": platform_overlay,
         "copy_language": copy_language,
         "language_policy_version": DETAIL_LANGUAGE_POLICY_VERSION,
@@ -283,21 +466,30 @@ def build_detail_strategy_preview(
         "source": str(llm_result.get("source") or "rule_based"),
         "detail_planner_ms": detail_planner_ms,
         "detail_reviewer_ms": 0,
-        "detail_rule_pack": rule_pack.id if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
-        "detail_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else (platform_profile.detail_rule_pack_id if platform_profile else DETAIL_RULE_PACK_ID),
-        "detail_rule_pack_version": version.version_no if version is not None else 1,
+        "detail_rule_pack": detail_rule_context.rule_pack.id if detail_rule_context.rule_pack is not None else detail_rule_context.rule_pack_id,
+        "detail_rule_pack_key": detail_rule_context.rule_pack.rule_pack_key if detail_rule_context.rule_pack is not None else detail_rule_context.rule_pack_id,
+        "detail_rule_pack_version": detail_rule_context.rule_pack_version.version_no if detail_rule_context.rule_pack_version is not None else 1,
         "panel_preferences": list(resolved_panel_preferences.values()),
         "strategy_overrides": list(resolved_prompt_overrides.values()),
         "panel_plan": merged_plan,
-        "input_hash": detail_strategy_preview_input_hash(
-            normalized_copy,
+    }
+    preview.update(
+        _detail_preview_hash_bundle(
+            confirmed_copy=normalized_copy,
             product_manifest=product_manifest,
             style_manifest=style_manifest,
             planner_instruction=planner_instruction,
             panel_preferences=resolved_panel_preferences,
             active_platform_id=active_platform_id,
-        ),
-    }
+            prompt_overrides=resolved_prompt_overrides,
+            analysis_snapshot=analysis_snapshot or {},
+            planner_profile=settings.planner_profile,
+            planner_provider=client.llm_router.provider_for_task("detail_planner"),
+            planner_model=client.llm_router.model_for_task("detail_planner"),
+            detail_rule_context=detail_rule_context,
+            platform_overlay=platform_overlay,
+        )
+    )
     return validate_contract_warn(
         DetailStrategyPreviewPayload,
         preview,
@@ -331,6 +523,9 @@ def normalize_detail_strategy_preview(
                 if isinstance(item, dict) and item.get("slot_id")
             },
             active_platform_id=active_platform_id,
+            prompt_overrides=resolve_session_overrides(prompt_overrides),
+            analysis_snapshot=analysis_snapshot or {},
+            db=db,
         )
         if (
             strategy_preview.get("panel_plan")
@@ -609,9 +804,20 @@ def find_detail_panel_plan_item(strategy_preview: dict[str, Any], panel_id: str,
     for item in strategy_preview.get("panel_plan", []):
         if isinstance(item, dict) and (item.get("panel_id") == panel_id or item.get("slot_id") == panel_id):
             return item
-    spec = next((item for item in list_detail_panel_slots(db=db) if item["panel_id"] == panel_id), None)
+    spec = next(
+        (
+            item
+            for item in list_detail_panel_slots(
+                platform_id=str(strategy_preview.get("active_platform_id") or "amazon"),
+                db=db,
+            )
+            if item["panel_id"] == panel_id
+        ),
+        None,
+    )
     panel_type = (spec or {}).get("default_panel_type", "feature_benefit")
-    meta = panel_type_metadata(panel_type, db=db)
+    active_platform_id = str(strategy_preview.get("active_platform_id") or "amazon")
+    meta = panel_type_metadata(panel_type, platform_id=active_platform_id, db=db)
     return {
         "panel_id": panel_id,
         "slot_id": (spec or {}).get("slot_id", panel_id),
@@ -640,6 +846,8 @@ def find_detail_panel_plan_item(strategy_preview: dict[str, Any], panel_id: str,
         "product_reference_ids": [],
         "style_reference_ids": [],
         "copy_blocks": _copy_blocks_from_lines([], panel_type=panel_type),
+        "copy_blocks_attribution": {},
+        "copy_lines_attribution": [],
         "raw_prompt_override": None,
         "applied_preset_id": None,
         "candidate_panel_types": (spec or {}).get("candidate_panel_types", []),
@@ -660,7 +868,7 @@ def _build_default_panel_plan(
     style_images_present: bool,
     db: Session | None = None,
 ) -> list[dict[str, Any]]:
-    copy_language = _detail_copy_language(active_platform_id)
+    copy_language = _detail_copy_language(active_platform_id, db=db)
     product_name = _detail_preferred_copy_text(
         confirmed_copy.get("product_name"),
         fallback="产品",
@@ -699,11 +907,11 @@ def _build_default_panel_plan(
     product_ids = [item["image_id"] for item in product_manifest]
     panel_plan: list[dict[str, Any]] = []
 
-    for default_order, spec in enumerate(list_detail_panel_slots(db=db), start=1):
+    for default_order, spec in enumerate(list_detail_panel_slots(platform_id=active_platform_id, db=db), start=1):
         recommended_item = recommended.get(spec["slot_id"], {})
         chosen_pref = resolved_panel_preferences.get(spec["slot_id"], {})
         panel_type = str(chosen_pref.get("panel_type") or recommended_item.get("panel_type") or spec["default_panel_type"])
-        panel_meta = panel_type_metadata(panel_type, db=db)
+        panel_meta = panel_type_metadata(panel_type, platform_id=active_platform_id, db=db)
         panel_type_reason = str(chosen_pref.get("panel_type_reason") or recommended_item.get("panel_type_reason") or "按默认推荐组合生成。")
         display_order = int(chosen_pref.get("display_order") or default_order)
         copy_lines = _copy_lines_for_panel_type(
@@ -725,6 +933,22 @@ def _build_default_panel_plan(
             **_copy_blocks_from_lines(copy_lines, panel_type=panel_type),
             **dict(override.get("copy_blocks_override") or {}),
         }
+        copy_blocks_attribution = {
+            key: {
+                "source": "session_override" if dict(override.get("copy_blocks_override") or {}).get(key) else ("preset_template" if dict(preset.get("copy_blocks_template") or {}).get(key) else "rule_based"),
+                "source_path": (
+                    f"strategy_overrides.{spec['slot_id']}.copy_blocks_override.{key}"
+                    if dict(override.get("copy_blocks_override") or {}).get(key)
+                    else f"prompt_presets.{override.get('applied_preset_id')}.copy_blocks_template.{key}"
+                    if dict(preset.get("copy_blocks_template") or {}).get(key)
+                    else f"detail_rule_based.{spec['slot_id']}.{key}"
+                ),
+                "source_stage": "detail_strategy_preview",
+                "fallback_used": False,
+                "sanitized": False,
+            }
+            for key in ("headline", "supporting", "bullet_points", "proof_lines", "cta_line")
+        }
         copy_blocks, _, _ = sanitize_detail_copy_blocks(copy_blocks, fallback_lines=copy_lines)
         copy_blocks = _normalize_detail_visible_copy_blocks(
             copy_blocks,
@@ -734,6 +958,16 @@ def _build_default_panel_plan(
             fallback_lines=copy_lines,
         )
         copy_lines = _copy_lines_from_detail_blocks(copy_blocks) or copy_lines
+        copy_lines_attribution = [
+            {
+                "source": "session_override" if dict(override.get("copy_blocks_override") or {}) else ("preset_template" if dict(preset.get("copy_blocks_template") or {}) else "rule_based"),
+                "source_path": f"detail_panel_plan.{spec['slot_id']}.copy_lines",
+                "source_stage": "detail_strategy_preview",
+                "fallback_used": False,
+                "sanitized": False,
+            }
+            for _ in copy_lines
+        ]
         narrative_section = DETAIL_STORY_SECTIONS[min(default_order - 1, len(DETAIL_STORY_SECTIONS) - 1)]
         panel_goal = copy_lines[0] if copy_lines else product_name
         truth_contract = build_truth_contract(
@@ -785,7 +1019,9 @@ def _build_default_panel_plan(
                     f"{(' 额外策略指令：' + planner_instruction + '。') if planner_instruction else ''}"
                 ),
                 "copy_lines": copy_lines,
+                "copy_lines_attribution": copy_lines_attribution,
                 "copy_blocks": copy_blocks,
+                "copy_blocks_attribution": copy_blocks_attribution,
                 "raw_prompt_override": override.get("raw_prompt_override") or preset.get("raw_prompt_template"),
                 "applied_preset_id": override.get("applied_preset_id"),
                 "layout_notes": _layout_notes_for_panel_type(panel_type),
@@ -806,6 +1042,8 @@ def _merge_panel_plan(
     *,
     confirmed_copy: dict[str, Any],
     copy_language: str,
+    active_platform_id: str | None = None,
+    db: Session | None = None,
 ) -> list[dict[str, Any]]:
     llm_by_id = {
         str(item.get("panel_id")): item
@@ -844,7 +1082,11 @@ def _merge_panel_plan(
                 if cleaned:
                     merged_item[key] = cleaned
         if merged_item.get("panel_type") and merged_item.get("panel_type") != item.get("panel_type"):
-            panel_meta = panel_type_metadata(str(merged_item["panel_type"]))
+            panel_meta = panel_type_metadata(
+                str(merged_item["panel_type"]),
+                platform_id=active_platform_id,
+                db=db,
+            )
             merged_item["panel_type_label"] = panel_meta["panel_type_label"]
             merged_item["copy_policy"] = panel_meta["copy_policy"]
             if not str(llm_item.get("layout_template") or "").strip():
@@ -860,6 +1102,20 @@ def _merge_panel_plan(
             fallback_lines=item.get("copy_lines") or [],
         )
         merged_item["copy_lines"] = _copy_lines_from_detail_blocks(merged_item["copy_blocks"]) or list(merged_item.get("copy_lines") or [])
+        merged_item["copy_lines_attribution"] = _rebuild_detail_copy_lines_attribution(
+            list(merged_item.get("copy_lines") or []),
+            base_attribution=item.get("copy_lines_attribution") or [],
+            original_lines=list(item.get("copy_lines") or []),
+            default_source="llm_enriched",
+            default_source_path=f"detail_planner.{merged_item.get('panel_id') or item.get('panel_id')}.copy_lines",
+        )
+        merged_item["copy_blocks_attribution"] = _rebuild_detail_copy_blocks_attribution(
+            dict(merged_item.get("copy_blocks") or {}),
+            base_attribution=item.get("copy_blocks_attribution") or {},
+            original_copy_blocks=item.get("copy_blocks") or {},
+            default_source="llm_enriched",
+            default_source_path_prefix=f"detail_planner.{merged_item.get('panel_id') or item.get('panel_id')}.copy_blocks",
+        )
         effective_panel_type = str(merged_item.get("panel_type") or item.get("panel_type") or "feature_benefit")
         effective_slot_id = str(merged_item.get("slot_id") or item.get("slot_id") or "")
         merged_item["display_module_title"] = _detail_display_module_title(effective_panel_type, effective_slot_id)
@@ -1002,13 +1258,7 @@ def _layout_notes_for_panel_type(panel_type: str) -> str:
 
 
 def _default_visual_truth_mode(panel_type: str) -> str:
-    if panel_type in {"feature_exploded_view", "feature_process_material"}:
-        return "mechanism_illustration"
-    if panel_type in {"feature_scene", "feature_compare", "feature_benefit", "kv_problem_solution"}:
-        return "scene_reconstruction"
-    if panel_type in {"parameter_explainer", "sales_proof"}:
-        return "parameter_board"
-    return "faithful_closeup"
+    return resolve_detail_visual_truth_mode(panel_type)
 
 
 def _visual_truth_constraint(visual_truth_mode: str, origin_note: str) -> str:
@@ -1142,6 +1392,8 @@ def detail_strategy_preview_needs_rebuild(
 ) -> bool:
     if not isinstance(strategy_preview, dict):
         return True
+    if strategy_preview.get("hash_policy_version") != PREVIEW_HASH_POLICY_VERSION:
+        return True
     expected_overlay = _detail_platform_overlay(active_platform_id)
     if strategy_preview.get("input_hash") != current_input_hash:
         return True
@@ -1166,28 +1418,12 @@ def detail_strategy_preview_needs_rebuild(
     return False
 
 
-def _detail_platform_overlay(active_platform_id: str | None) -> dict[str, Any]:
-    platform_id = str(active_platform_id or "amazon").strip().lower() or "amazon"
-    profile = get_platform_or_none(platform_id)
-    base_overlay = dict(get_platform_overlay(platform_id))
-    copy_language = visible_copy_language_for_platform(platform_id)
-    locale = profile.locale if profile is not None else ("zh-CN" if copy_language == "zh" else "en-US")
-    constraints = [str(item) for item in base_overlay.get("constraints", []) if str(item).strip()]
-    if copy_language == "zh":
-        constraints.extend(simplified_chinese_visible_copy_constraints())
-    else:
-        constraints.append("Visible copy should stay concise and commercially usable.")
-    return {
-        "id": platform_id,
-        "overlay_id": platform_id,
-        "locale": locale,
-        "copy_language": copy_language,
-        "constraints": list(dict.fromkeys(constraints)),
-    }
+def _detail_platform_overlay(active_platform_id: str | None, db: Session | None = None) -> dict[str, Any]:
+    return resolve_detail_platform_overlay(active_platform_id, db=db)
 
 
-def _detail_copy_language(active_platform_id: str | None) -> str:
-    return str(_detail_platform_overlay(active_platform_id).get("copy_language") or "en")
+def _detail_copy_language(active_platform_id: str | None, db: Session | None = None) -> str:
+    return str(_detail_platform_overlay(active_platform_id, db=db).get("copy_language") or "en")
 
 
 def _detail_fallback_copy_lines(
@@ -1446,50 +1682,11 @@ def _display_parameter_label(item: dict[str, Any]) -> str:
 
 
 def _detail_display_module_title(panel_type: str, slot_id: str) -> str:
-    return {
-        "detail_slot_01": "首屏亮点",
-        "detail_slot_02": "核心概览",
-        "detail_slot_03": "核心卖点",
-        "detail_slot_04": "场景价值",
-        "detail_slot_05": "使用收益",
-        "detail_slot_06": "结构工艺",
-        "detail_slot_07": "细节参数",
-        "detail_slot_08": "收尾总结",
-    }.get(slot_id) or {
-        "kv_problem_solution": "首屏亮点",
-        "icon_island": "核心概览",
-        "feature_proof": "卖点佐证",
-        "feature_scene": "场景价值",
-        "feature_benefit": "利益说明",
-        "feature_compare": "对比优势",
-        "feature_exploded_view": "结构示意",
-        "feature_process_material": "工艺材质",
-        "detail_closeup": "细节特写",
-        "parameter_explainer": "参数说明",
-        "brand_authority": "品牌背书",
-        "sales_proof": "实力证明",
-        "promo_gift": "活动亮点",
-        "product_selector": "选购建议",
-    }.get(panel_type, "详情模块")
+    return resolve_detail_display_module_title(panel_type, slot_id)
 
 
 def _detail_display_module_kind(panel_type: str) -> str:
-    return {
-        "kv_problem_solution": "首屏亮点",
-        "icon_island": "核心概览",
-        "feature_proof": "卖点佐证",
-        "feature_scene": "场景价值",
-        "feature_benefit": "利益说明",
-        "feature_compare": "对比优势",
-        "feature_exploded_view": "结构示意",
-        "feature_process_material": "工艺材质",
-        "detail_closeup": "细节特写",
-        "parameter_explainer": "参数说明",
-        "brand_authority": "品牌背书",
-        "sales_proof": "实力证明",
-        "promo_gift": "活动亮点",
-        "product_selector": "选购建议",
-    }.get(panel_type, "详情模块")
+    return resolve_detail_display_module_kind(panel_type)
 
 
 def _detail_display_module_intent(
@@ -1499,29 +1696,14 @@ def _detail_display_module_intent(
     copy_focus: str,
     panel_type_reason: str,
 ) -> str:
-    explicit = sanitize_surface_text(panel_goal) or sanitize_surface_text(copy_focus)
-    if explicit and not _looks_like_detail_internal_label(explicit):
-        return explicit
-    fallback = {
-        "kv_problem_solution": "突出产品核心价值和第一卖点",
-        "icon_island": "汇总核心卖点并快速建立认知",
-        "feature_proof": "突出核心卖点并补充可信佐证",
-        "feature_scene": "强调真实使用场景中的收益",
-        "feature_benefit": "解释用户能获得的实际好处",
-        "feature_compare": "说明产品相较同类的优势",
-        "feature_exploded_view": "解释结构能力与工作逻辑",
-        "feature_process_material": "说明材质、做工与细节质感",
-        "detail_closeup": "放大关键细节与结构特征",
-        "parameter_explainer": "用更清晰的方式呈现参数与要点",
-        "brand_authority": "补充品牌与信任信息",
-        "sales_proof": "加强实力与认可度表达",
-        "promo_gift": "补充下单理由与优惠信息",
-        "product_selector": "帮助用户快速判断适合场景",
-    }.get(panel_type, "")
-    reason = sanitize_surface_text(panel_type_reason)
-    if reason and not _looks_like_detail_internal_label(reason):
-        return reason
-    return fallback or "围绕商品核心价值做清晰表达"
+    return resolve_detail_display_module_intent(
+        panel_type=panel_type,
+        panel_goal=panel_goal,
+        copy_focus=copy_focus,
+        panel_type_reason=panel_type_reason,
+        sanitize=sanitize_surface_text,
+        is_internal_label=_looks_like_detail_internal_label,
+    )
 
 
 def _detail_display_tags(
@@ -1530,23 +1712,11 @@ def _detail_display_tags(
     narrative_section: str,
     visual_truth_mode: str,
 ) -> list[str]:
-    section_label = {
-        "trust_overview": "可信概览",
-        "mechanism": "机制说明",
-        "feature_a": "核心卖点",
-        "feature_b": "场景延展",
-        "usage_scene": "使用场景",
-        "parameter_proof": "参数佐证",
-        "differentiator": "差异优势",
-        "closing_cta": "收尾总结",
-    }.get(str(narrative_section or "").strip(), "")
-    truth_label = {
-        "faithful_closeup": "真实局部图",
-        "mechanism_illustration": "机制示意图",
-        "scene_reconstruction": "场景重建图",
-        "parameter_board": "参数说明图",
-    }.get(str(visual_truth_mode or "").strip(), "")
-    return _dedupe_texts([display_module_kind, section_label, truth_label])
+    return resolve_detail_display_tags(
+        display_module_kind=display_module_kind,
+        narrative_section=narrative_section,
+        visual_truth_mode=visual_truth_mode,
+    )
 
 
 def _detail_visual_contract(
@@ -1641,3 +1811,187 @@ def _looks_like_detail_internal_label(text: Any) -> bool:
         "panel_0",
     )
     return any(pattern in cleaned or pattern in lowered for pattern in patterns)
+
+
+def _stage_d_build_detail_prompt_pipeline(
+    *,
+    confirmed_copy: dict[str, Any],
+    strategy_preview: dict[str, Any],
+    panel_id: str,
+    instruction: str | None,
+    plan: dict[str, Any],
+    db: Session | None = None,
+):
+    product_name = _fallback_text(confirmed_copy.get("product_name"), "产品")
+    style_summary = _fallback_text(strategy_preview.get("style_summary"), "干净、高级、适合电商详情页的信息化设计")
+    panel_type = str(plan.get("panel_type") or "feature_benefit")
+    raw_copy_lines = [str(item).strip() for item in plan.get("copy_lines", []) if str(item).strip()]
+    raw_copy_blocks = dict(plan.get("copy_blocks") or _copy_blocks_from_lines(raw_copy_lines, panel_type=panel_type))
+    platform_overlay = dict(strategy_preview.get("platform_overlay") or {})
+    if not platform_overlay:
+        platform_overlay = _detail_platform_overlay(strategy_preview.get("active_platform_id"), db=db)
+    copy_language = str(strategy_preview.get("copy_language") or platform_overlay.get("copy_language") or "en")
+    fallback_lines = _detail_fallback_copy_lines(
+        confirmed_copy=confirmed_copy,
+        panel_type=panel_type,
+        copy_language=copy_language,
+    )
+    planner_base = sanitize_planning_context_text(
+        plan.get("planner_prompt_base"),
+        f"为 {product_name} 生成一张层级清晰、商品保真优先的电商详情页横向 panel。",
+    )
+    reference_rule = (
+        "优先以当前 panel 选中的商品参考图作为商品保真基准。"
+        "如果存在风格/字体参考图，只吸收其色彩、字体和版式方向，不要照搬无关文案。"
+    )
+    visual_truth_mode = str(plan.get("visual_truth_mode") or _default_visual_truth_mode(panel_type)).strip()
+    origin_note = str(plan.get("origin_note") or "").strip()
+    normalized = normalize_detail_prompt_stage(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        panel_id=panel_id,
+        plan=plan,
+        product_name=product_name,
+        style_summary=style_summary,
+        panel_type=panel_type,
+        raw_copy_lines=raw_copy_lines,
+        raw_copy_blocks=raw_copy_blocks,
+        platform_overlay=platform_overlay,
+        copy_language=copy_language,
+        fallback_lines=fallback_lines,
+        planner_base=planner_base,
+        reference_rule=reference_rule,
+        panel_type_label=str(plan.get("panel_type_label") or panel_type),
+        layout_template=str(plan.get("layout_template") or "feature_card"),
+        rule_modules_used=[str(item) for item in plan.get("rule_modules_used", []) if str(item).strip()],
+        raw_prompt_override=str(plan.get("raw_prompt_override") or "").strip(),
+        visual_truth_mode=visual_truth_mode,
+        origin_note=origin_note,
+        truth_constraint=_visual_truth_constraint(visual_truth_mode, origin_note),
+        truth_contract=plan.get("truth_contract") if isinstance(plan.get("truth_contract"), dict) else {},
+        truth_contract_text=_detail_truth_contract_text(plan.get("truth_contract") if isinstance(plan.get("truth_contract"), dict) else {}),
+        display_module_title=str(plan.get("display_module_title") or _detail_display_module_title(panel_type, str(plan.get("slot_id") or panel_id))).strip(),
+        display_module_kind=str(plan.get("display_module_kind") or _detail_display_module_kind(panel_type)).strip(),
+        display_module_intent=str(
+            plan.get("display_module_intent")
+            or _detail_display_module_intent(
+                panel_type=panel_type,
+                panel_goal=str(plan.get("panel_goal") or ""),
+                copy_focus=str(plan.get("copy_focus") or ""),
+                panel_type_reason=str(plan.get("panel_type_reason") or ""),
+            )
+        ).strip(),
+        instruction=instruction,
+    )
+    pipeline = build_detail_prompt_pipeline(
+        normalized=normalized,
+        sanitize_surface_list=sanitize_surface_list,
+        normalize_visible_copy_lines=_normalize_detail_visible_copy_lines,
+        sanitize_copy_blocks=sanitize_detail_copy_blocks,
+        normalize_visible_copy_blocks=_normalize_detail_visible_copy_blocks,
+        copy_lines_from_blocks=_copy_lines_from_detail_blocks,
+        sanitize_planning_context_text=sanitize_planning_context_text,
+        build_visual_contract=_detail_visual_contract,
+        build_copy_contract=_detail_copy_contract,
+        build_text_block=_build_text_block,
+        prompt_matrix_guardrails=prompt_matrix_guardrails,
+        simplified_chinese_visible_copy_constraints=simplified_chinese_visible_copy_constraints,
+        fallback_text=_fallback_text,
+        detail_page_aspect_ratio=DETAIL_PAGE_ASPECT_RATIO,
+    )
+    return pipeline
+
+
+def compose_detail_panel_prompt(
+    *,
+    confirmed_copy: dict[str, Any],
+    strategy_preview: dict[str, Any],
+    panel_id: str,
+    instruction: str | None = None,
+    panel_plan_item: dict[str, Any] | None = None,
+    db: Session | None = None,
+) -> dict[str, Any]:
+    plan = panel_plan_item or find_detail_panel_plan_item(strategy_preview, panel_id, db=db)
+    pipeline = _stage_d_build_detail_prompt_pipeline(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        panel_id=panel_id,
+        instruction=instruction,
+        plan=plan,
+        db=db,
+    )
+    normalized = pipeline.normalized
+    sanitized = pipeline.sanitized
+    copy_lines = sanitized.visible_copy_lines
+    copy_blocks = sanitized.visible_copy_blocks
+    copy_lines_attribution = _rebuild_detail_copy_lines_attribution(
+        copy_lines,
+        base_attribution=plan.get("copy_lines_attribution") or [],
+        original_lines=list(plan.get("copy_lines") or []),
+        default_source=str((plan.get("copy_lines_attribution") or [{}])[0].get("source") or "rule_based")
+        if isinstance(plan.get("copy_lines_attribution"), list) and (plan.get("copy_lines_attribution") or [])
+        else "rule_based",
+        default_source_path=f"detail_panel_plan.{panel_id}.copy_lines",
+    )
+    copy_blocks_attribution = _rebuild_detail_copy_blocks_attribution(
+        copy_blocks,
+        base_attribution=plan.get("copy_blocks_attribution") or {},
+        original_copy_blocks=plan.get("copy_blocks") or {},
+        sanitized_fields=sanitized.sanitized_fields,
+        default_source="rule_based",
+        default_source_path_prefix=f"detail_panel_plan.{panel_id}.copy_blocks",
+    )
+
+    return {
+        "panel_id": panel_id,
+        "slot_id": str(plan.get("slot_id") or ""),
+        "panel_label": normalized.display_module_title,
+        "panel_type": normalized.panel_type,
+        "panel_type_label": normalized.panel_type_label,
+        "panel_type_reason": str(plan.get("panel_type_reason") or ""),
+        "display_order": int(plan.get("display_order") or 0),
+        "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
+        "use_case": DETAIL_PAGE_USE_CASE,
+        "narrative_section": str(plan.get("narrative_section") or ""),
+        "panel_goal": str(plan.get("panel_goal") or ""),
+        "copy_focus": str(plan.get("copy_focus") or ""),
+        "layout_template": normalized.layout_template,
+        "layout_notes": str(plan.get("layout_notes") or ""),
+        "visual_truth_mode": normalized.visual_truth_mode,
+        "origin_note": normalized.origin_note,
+        "display_module_title": normalized.display_module_title,
+        "display_module_kind": normalized.display_module_kind,
+        "display_module_intent": normalized.display_module_intent,
+        "display_tags": _detail_display_tags(
+            display_module_kind=normalized.display_module_kind,
+            narrative_section=str(plan.get("narrative_section") or ""),
+            visual_truth_mode=normalized.visual_truth_mode,
+        ),
+        "planner_base": pipeline.composed.planning_context,
+        "blocks": pipeline.composed.blocks,
+        "copy_language": normalized.copy_language,
+        "copy_lines": copy_lines,
+        "copy_lines_attribution": copy_lines_attribution,
+        "copy_blocks": copy_blocks,
+        "copy_blocks_attribution": copy_blocks_attribution,
+        "raw_prompt_override": normalized.raw_prompt_override or None,
+        "applied_preset_id": plan.get("applied_preset_id"),
+        "platform_overlay": normalized.platform_overlay,
+        "product_reference_ids": [str(item) for item in plan.get("product_reference_ids", []) if str(item).strip()],
+        "style_reference_ids": [str(item) for item in plan.get("style_reference_ids", []) if str(item).strip()],
+        "rule_modules_used": normalized.rule_modules_used,
+        "planner_source": str(plan.get("planner_source") or "rule_based"),
+        "strategy_fields_used": [
+            "detail_strategy_preview.style_summary",
+            "detail_strategy_preview.panel_plan.copy_lines",
+            "detail_strategy_preview.panel_plan.copy_blocks",
+            "detail_strategy_preview.panel_plan.layout_notes",
+            "detail_strategy_preview.panel_plan.panel_type",
+            "detail_strategy_preview.panel_plan.planner_prompt_base",
+        ],
+        "risk_flags": [str(item) for item in plan.get("risk_flags", []) if str(item).strip()],
+        "truth_contract": normalized.truth_contract,
+        "sanitized_fields": sanitized.sanitized_fields,
+        "copy_safety_notes": sanitized.copy_safety_notes,
+        "final_prompt": pipeline.final_prompt,
+    }

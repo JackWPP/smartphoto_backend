@@ -34,6 +34,7 @@ from app.services.copy_normalization import (
     normalize_copy_payload,
     normalize_copy_text,
 )
+from app.services.copy_resolution import apply_analysis_defaults_with_attribution, resolve_session_copy
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
@@ -45,14 +46,15 @@ from app.services.detail_pages import (
 )
 from app.services.jobs import append_job_event, create_job, now_utc, update_job_status
 from app.services.locking import release_locks
-from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy, merge_parameter_snapshot_into_copy
+from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy
+from app.services.preview_hashing import PREVIEW_HASH_POLICY_VERSION
 from app.services.prompts import compose_prompt
 from app.services.repo import list_visible_prompt_presets_by_ids
 from app.services.reference_images import LoadedReferenceImage, build_reference_manifest, load_reference_images, select_reference_images_for_role
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter
 from app.services.strategy import build_strategy_preview, strategy_preview_input_hash
-from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
+from app.services.strategy_overrides import resolve_session_overrides, serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
 from app.services.user_accounts import create_job_completion_notification, refresh_session_search_cache, update_session_last_generated_at
 from app.services.white_bg import strengthen_white_bg_instruction, validate_white_background
@@ -159,9 +161,11 @@ def _session_prompt_overrides(db: Session, session_id: str) -> list[dict[str, An
 
 
 def _resolved_copy_for_session(db: Session, session: SessionModel, *, include_parameter_snapshot: bool = True) -> dict[str, Any]:
-    copy_data = normalize_copy_payload(session.confirmed_copy or {})
-    if include_parameter_snapshot and session.parameter_snapshot:
-        copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
+    resolution = resolve_session_copy(
+        session.confirmed_copy or {},
+        parameter_snapshot=session.parameter_snapshot if include_parameter_snapshot else None,
+    )
+    copy_data = resolution["copy"]
     preset_id = copy_data.get("style_preset_id")
     if preset_id:
         presets = list_visible_prompt_presets_by_ids(db, [str(preset_id)], user_id=session.user_id or "")
@@ -284,17 +288,8 @@ def _apply_analysis_defaults_to_copy(
     confirmed_copy: dict[str, Any] | None,
     snapshot: dict[str, Any],
 ) -> dict[str, Any]:
-    normalized = normalize_copy_payload(confirmed_copy or {})
     defaults = _analysis_defaults_from_snapshot(snapshot)
-
-    for field in ("product_name", "category", "headline", "hero_scene", "selling_points", "usage_scenes", "specs", "style_choice"):
-        if not normalized.get(field) and defaults.get(field):
-            normalized[field] = defaults[field]
-    for field in ("core_selling_points", "key_parameters", "product_advantages"):
-        if not normalized.get(field) and defaults.get(field):
-            normalized[field] = defaults[field]
-
-    return normalize_copy_payload(normalized)
+    return apply_analysis_defaults_with_attribution(confirmed_copy, defaults)
 
 
 def run_analysis_job(db: Session, job_id: str) -> None:
@@ -1452,9 +1447,10 @@ def _ensure_generation_strategy_preview(db: Session, session: SessionModel, sess
             prompt_overrides=prompt_overrides,
             strategy_reference_images=strategy_reference_images,
         )
-        if existing_preview.get("input_hash") in {None, "", current_input_hash}:
-            if existing_preview.get("input_hash") != current_input_hash:
-                session.strategy_preview = {**existing_preview, "input_hash": current_input_hash}
+        if (
+            existing_preview.get("hash_policy_version") == PREVIEW_HASH_POLICY_VERSION
+            and existing_preview.get("input_hash") == current_input_hash
+        ):
             logger.info(
                 "Reusing persisted strategy_preview during generation: session_id=%s input_hash=%s",
                 session.id,
@@ -1991,6 +1987,7 @@ def _finalize_main_rendered_asset(
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "copy_blocks_attribution": prompt_payload.get("copy_blocks_attribution") or {},
         "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
         "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
@@ -2123,6 +2120,7 @@ def _render_single_asset(
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "copy_blocks_attribution": prompt_payload.get("copy_blocks_attribution") or {},
         "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
         "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
@@ -2759,6 +2757,9 @@ def _ensure_detail_strategy_preview(
                 if isinstance(item, dict) and item.get("slot_id")
             },
             active_platform_id=session.active_platform_id,
+            prompt_overrides=resolve_session_overrides(prompt_overrides),
+            analysis_snapshot=session.analysis_snapshot or {},
+            db=db,
         )
         if not detail_strategy_preview_needs_rebuild(
             existing_preview,
@@ -2766,14 +2767,13 @@ def _ensure_detail_strategy_preview(
             active_platform_id=session.active_platform_id,
             current_input_hash=current_input_hash,
         ):
-            if existing_preview.get("input_hash") != current_input_hash:
-                session.detail_strategy_preview = {**existing_preview, "input_hash": current_input_hash}
-            logger.info(
-                "Reusing persisted detail_strategy_preview during generation: session_id=%s input_hash=%s",
-                session.id,
-                current_input_hash,
-            )
-            return session.detail_strategy_preview or existing_preview
+            if existing_preview.get("hash_policy_version") == PREVIEW_HASH_POLICY_VERSION:
+                logger.info(
+                    "Reusing persisted detail_strategy_preview during generation: session_id=%s input_hash=%s",
+                    session.id,
+                    current_input_hash,
+                )
+                return session.detail_strategy_preview or existing_preview
 
     rebuilt = build_detail_strategy_preview(
         resolved_copy,
@@ -2933,6 +2933,7 @@ def _finalize_detail_rendered_panel(
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "copy_blocks_attribution": prompt_payload.get("copy_blocks_attribution") or {},
         "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
         "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "truth_contract": prompt_payload.get("truth_contract") or {},
@@ -3076,6 +3077,7 @@ def _render_single_detail_panel(
         "final_prompt": prompt_payload["final_prompt"],
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
+        "copy_blocks_attribution": prompt_payload.get("copy_blocks_attribution") or {},
         "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
         "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "truth_contract": prompt_payload.get("truth_contract") or {},
