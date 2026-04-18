@@ -1584,6 +1584,47 @@ def test_restore_detail_panel_materializes_full_detail_version(client):
     assert len(v2_again["panels"]) == len(v2_by_slot)
 
 
+def test_detail_page_results_history_preserves_panel_order_and_stitched_asset(client):
+    sid = create_ready_session(client)
+
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "detail v1"})
+
+    v1_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=1").json()["data"]
+    assert v1_results["requested_version"] == 1
+    assert v1_results["available_versions"] == [1]
+    assert v1_results["missing_panel_ids"] == []
+    assert v1_results["stitched_asset"] is not None
+    assert [panel["display_order"] for panel in v1_results["panels"]] == sorted(
+        panel["display_order"] for panel in v1_results["panels"]
+    )
+    assert v1_results["stitched_asset"]["display_order"] > v1_results["panels"][-1]["display_order"]
+
+    first_panel_id = v1_results["panels"][0]["asset_id"]
+    client.post(
+        f"/api/v2/assets/{first_panel_id}/regenerate",
+        json={"instruction": "detail v2 tweak", "keep_style_consistency": True},
+    )
+
+    latest = client.get(f"/api/v2/sessions/{sid}/detail-pages/results").json()["data"]
+    assert latest["requested_version"] == 2
+    assert latest["available_versions"] == [2, 1]
+    assert latest["version_summaries"][0]["version_no"] == 2
+    assert latest["version_summaries"][0]["missing_panel_ids"] == []
+    assert latest["version_summaries"][0]["cover_asset_id"] is not None
+    assert latest["stitched_asset"] is not None
+    assert [panel["display_order"] for panel in latest["panels"]] == sorted(
+        panel["display_order"] for panel in latest["panels"]
+    )
+
+    v1_again = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=1").json()["data"]
+    assert v1_again["requested_version"] == 1
+    assert v1_again["available_versions"] == [2, 1]
+    assert v1_again["missing_panel_ids"] == []
+    assert v1_again["stitched_asset"] is not None
+    assert [panel["slot_id"] for panel in v1_again["panels"]] == [panel["slot_id"] for panel in v1_results["panels"]]
+
+
 def test_strategy_overrides_and_prompt_preset_flow(client):
     sid = create_ready_session(client)
 

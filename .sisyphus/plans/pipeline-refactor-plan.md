@@ -444,50 +444,76 @@ Brand memory is explicitly out of scope until this plan completes through Stage 
 **Rollback posture**
 - Old pipeline path remains serving until cutover approval.
 
-### H. Old Path Removal Assessment
+### H. Historical Read Compatibility Audit And Removal Assessment
 
 **Goal**
-- Decide whether the old serving path can be removed.
+- Audit historical result-read compatibility and collect evidence before any residual compat removal decision.
 
 **Scope**
-- No new architecture work. Validation and removal decision only.
+- No new worker dual-path or shadow-serving architecture.
+- Validation, inventory, and release-window observation only.
+
+**Current repo-state note**
+- The current repository no longer contains an active old-vs-new worker serving split.
+- Stage H therefore targets:
+  - historical result-read compatibility
+  - residual compat/legacy inventory
+  - pre-release and release-window observation readiness
 
 **Moved logic**
 - None.
 
 **Preserved logic**
-- New path serving behavior.
+- Current single worker hot path.
+- Current result projection behavior.
+- Compatibility adapters still required by read/write paths.
 
 **Deleted logic**
-- Old path only if all invariants hold over one release window.
+- None by default in this stage.
+- Residual compat helpers are only candidates for later deletion after audit evidence is complete.
 
 **Frozen interfaces after completion**
-- New pipeline path as sole path.
+- Public results/detail-results shape.
+- Admin wrapper results/detail-results shape.
+- Version/carry-forward/partial-success semantics.
 
 **Provisional interfaces/components**
-- None if removal passes; adapters remain if not.
+- Compatibility adapters remain until explicitly cleared by audit.
 
 **Go / No-Go exit gate**
 - One release window passes with zero rollback triggers hit.
-- Historical-read compatibility passes for at least 30 sessions across default main / Alibaba main / detail / partial / `carry_forward` cases, with 100% field completeness and no semantic drift in `asset_count`, `ready_count`, `available_versions`, `cover_asset_id`, `missing_*` outputs.
+- Historical-read compatibility passes for at least 30 sessions across default main / Alibaba main / detail / partial / regenerate / restore / `carry_forward` / text-edit cases.
+- No semantic drift in:
+  - `available_versions`
+  - `version_summaries`
+  - `cover_asset_id`
+  - `stitched_asset`
+  - `missing_*`
+  - `carry_forward/source_version_no`
 
 **Exact tests**
-- dual-path parity review
+- local historical-read compatibility matrix
 - pre-prod smoke
 - production canary observation
-- historical compatibility verification across at least 30 sessions
+- 30-session historical audit checklist
 
 **QA procedure**
-- Run locally/pre-prod: `pytest -q tests/test_pipeline_refactor_baseline.py tests/test_integration.py tests/test_worker_tasks.py`
+- Run locally/pre-prod:
+  - `pytest -q tests/test_pipeline_refactor_baseline.py`
+  - `pytest -q tests/test_integration.py`
+  - `pytest -q tests/test_stage_h_historical_read_compat.py`
 - Run pre-prod smoke:
   - `curl http://127.0.0.1:8000/healthz`
   - `curl -H "X-App-Key: <app-key>" http://127.0.0.1:8000/api/v2/sessions/<session_id>/results`
+  - `curl -H "X-App-Key: <app-key>" "http://127.0.0.1:8000/api/v2/sessions/<session_id>/results?version=<historical_version>"`
   - `curl -H "X-App-Key: <app-key>" http://127.0.0.1:8000/api/v2/sessions/<session_id>/detail-pages/results`
-- Historical validation dataset: at least 30 sessions spanning default main / Alibaba main / detail / partial / `carry_forward`
+  - `curl -H "X-App-Key: <app-key>" "http://127.0.0.1:8000/api/v2/sessions/<session_id>/detail-pages/results?version=<historical_version>"`
+- Historical validation dataset:
+  - at least 30 sessions spanning default main / Alibaba main / detail / partial / regenerate / restore / `carry_forward` / text-edit
 - Pass conditions:
   - full release-window gates pass
-  - historical sessions read through the new projection path with 100% field completeness
-  - no semantic drift in `asset_count`, `ready_count`, `available_versions`, `cover_asset_id`, `missing_*`
+  - historical sessions read with 100% required field completeness
+  - no version bleed in cover/stitch/missing/carry-forward outputs
 
 **Rollback posture**
-- Do not remove old path or compatibility adapters unless all H gates pass.
+- Do not remove residual compatibility adapters unless all H gates pass and the inventory has a clear deletion decision for each candidate.
