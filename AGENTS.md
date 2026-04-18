@@ -40,33 +40,52 @@
 - 文档总入口：`Readme.md`
 - 联调真相文档：`docs/API_联调指南.md`
 - 生图执行语义文档：`docs/生图Agent协作逻辑.md`
-- 运维与排障文档：`docs/运行与排障手册.md`
-- 生产上线真相文档：`docs/生产上线SOP.md`
+- 原生部署真相文档：`docs/原生部署指南.md`
+- 原生运维真相文档：`docs/原生运维指南.md`
+- 生产上线总册：`docs/生产上线SOP.md`
+- 运维与排障索引文档：`docs/运行与排障手册.md`
+- 生产维护文档优先级固定为：
+  1. `docs/原生部署指南.md`
+  2. `docs/原生运维指南.md`
+  3. `docs/生产上线SOP.md`
+  4. `docs/运行与排障手册.md`
 - 触发条件与责任：
   - 新增/修改路由、请求参数、响应结构：必须更新 `docs/API_联调指南.md`
   - 新增/修改 job_type、事件流、版本语义、锁策略：必须更新 `docs/生图Agent协作逻辑.md`
   - 新增/修改错误码、诊断路径、运行命令：必须更新 `docs/运行与排障手册.md`
-  - 新增/修改发布流程、发包命令、备份步骤、回滚步骤、固定运维约束：必须更新 `docs/生产上线SOP.md`
+  - 新增/修改首次部署、shared env、systemd、infra compose、原生目录约束：必须更新 `docs/原生部署指南.md`
+  - 新增/修改日常巡检、发版、迁移、备份、回滚、救火命令：必须更新 `docs/原生运维指南.md`
+  - 新增/修改标准上线流程总册、发包、预检、历史兼容或备用回滚路径：必须更新 `docs/生产上线SOP.md`
   - 若实现行为与 SPEC 不一致：必须更新 `docs/API_联调指南.md` 的“实现 vs SPEC 差距清单”
   - 完成上述更新后，再更新 `AGENTS.md` 里程碑日志
 
 ## 生产上线固定约束
 - 生产默认路径：`/opt/smartphoto_backend`
-- 生产 compose project 必须固定：`COMPOSE_PROJECT_NAME=smartphoto_backend`
-- 生产默认流程必须使用“新 release 目录解压 + 复制服务器 `.env.prod` + preflight + deploy/rollback”
-- 非必要不执行 `docker compose down`
-- 非必要不重建 `postgres` / `redis`
-- 改 `.env.prod` 后禁止只用 `docker compose restart`；必须 `up -d --force-recreate`
-- 有 Alembic migration 的发布必须先做 PostgreSQL 备份，再执行不带 `--skip-migrate` 的发布
-- 无 migration 的纯应用层发布必须优先使用 `./scripts/deploy-prod.sh --skip-migrate`
-- 但只要代码包包含新的 Alembic revision，或线上日志已出现 `UndefinedTable/UndefinedColumn`，就禁止继续使用 `--skip-migrate`
+- 生产默认形态固定为：
+  - `Postgres`：`docker-compose.infra.yml`
+  - `Redis`：`docker-compose.infra.yml`
+  - `API`：`systemd + .venv`
+  - `Worker`：`systemd + .venv`
+  - `Alembic`：`systemd + .venv`
+- 原生服务固定读取：`/opt/smartphoto_backend/shared/.env.prod.native`
+- 原生服务连接 DB/Redis 时，默认 host 必须是 `127.0.0.1`，禁止把 `postgres` / `redis` 当成原生默认 host
+- 原生默认发布命令是 `./scripts/native-deploy.sh`
+- 原生默认预检命令是 `./scripts/native-preflight.sh`
+- 有 Alembic migration 的发布必须先做 PostgreSQL 备份，再执行不带 `--skip-migrate` 的原生发布
+- 无 migration 的纯应用层发布才允许使用 `./scripts/native-deploy.sh --skip-migrate`
+- 但只要代码包包含新的 Alembic revision，或线上日志已出现 `UndefinedTable/UndefinedColumn/relation does not exist`，就禁止继续使用 `--skip-migrate`
+- Docker 全应用部署不再是默认建议，只保留为历史兼容、特殊环境或应急回滚备用路径
 - 运维/上线指导默认提供完整、可直接复制执行的命令块，不提供省略版片段
 - 发布后最少执行：
   - `curl http://127.0.0.1:8000/healthz`
   - `curl http://127.0.0.1:8000/api/admin/v1/auth/health`
   - CORS 预检
-  - `docker compose logs --tail=... api worker`
-- 具体命令真相源见：`docs/生产上线SOP.md`
+  - `journalctl -u smartphoto-api -n ...`
+  - `journalctl -u smartphoto-worker -n ...`
+- 具体命令真相源见：
+  - 首次部署：`docs/原生部署指南.md`
+  - 日常运维：`docs/原生运维指南.md`
+  - 标准发布总册：`docs/生产上线SOP.md`
 
 ## 测试门禁
 - 至少通过以下检查：
@@ -425,3 +444,15 @@
   - `scripts/dev-worker.ps1` 默认改为 `--pool=solo --concurrency=1` 启动 Celery，避免 Windows 下 `billiard` 默认多进程池触发 `WinError 5/6` 与 `SpawnPoolWorker` 崩溃
   - `scripts/dev-worker.ps1` 与 `scripts/dev-worker.sh` 统一支持 `CELERY_WORKER_POOL`、`CELERY_WORKER_CONCURRENCY`、`CELERY_QUEUES` 覆盖启动参数，并补齐 `q.quality` 队列
   - `Readme.md` 与 `docs/运行与排障手册.md` 补充 Windows 本地 Worker 启动约束、覆盖方式与排障路径
+- 2026-04-18 Stage H:
+  - Stage H 目标收口为“历史结果读兼容审计 + residual compat inventory + release-window observation”，不再假设仓库内仍存在 active dual-path/shadow worker serving
+  - 新增 `tests/test_stage_h_historical_read_compat.py`，覆盖 main/detail latest 与 historical 读取、partial-success、carry-forward、restore/regenerate、text-edit，以及 admin/public results 包装一致性
+  - 新增 `.sisyphus/plans/stage-h-compat-inventory.md`，按“保留 / 待删候选 / 待确认”整理 copy legacy sync、detail preview normalization、results read-side helpers、rule `compat_role` 等兼容残留点
+  - 更新 `.sisyphus/plans/pipeline-refactor-plan.md` 的 Stage H 条目，明确当前阶段以验证、inventory 与发布观察为主，而不是继续推进不存在的 worker 双路径切流
+  - 更新 `docs/运行与排障手册.md`、`docs/生产上线SOP.md`，补齐 Stage H smoke checklist、30-session historical audit checklist 与 canary observation checklist
+- 2026-04-19 Native Ops Consolidation:
+  - 原生生产路径收口为默认主路径：Docker 只跑 `Postgres/Redis`，`API/Worker/Alembic` 统一改为 `systemd + .venv`
+  - `scripts/native-preflight.sh` 增加阻塞式校验：明确拦截 `postgres/redis` Docker 主机名、相对 sqlite 路径、缺失 storage 目录、DB/Redis 连通性失败与 systemd/.venv 缺失
+  - `scripts/native-deploy.sh` 发布前强制执行原生预检，后台前端依赖安装优先使用 `npm ci`
+  - 重写 `docs/原生部署指南.md` 与 `docs/原生运维指南.md` 为主要生产维护文档
+  - `docs/生产上线SOP.md` 收口为标准发布总册，`docs/运行与排障手册.md` 收口为问题定位索引，`Readme.md` 与 `AGENTS.md` 同步明确文档优先级与原生优先原则

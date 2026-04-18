@@ -394,3 +394,16 @@ def test_baseline_main_gallery_partial_success_results_and_events_contract(
     assert "job_started" in event_types
     assert event_types.count("asset_ready") == 4
     assert "job_partial_succeeded" in event_types
+
+    latest_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
+    assert latest_results["requested_version"] == 1
+    assert latest_results["available_versions"] == [1]
+    assert latest_results["version_summaries"][0]["version_no"] == 1
+    assert latest_results["version_summaries"][0]["missing_slot_ids"] == ["scene"]
+    assert latest_results["version_summaries"][0]["cover_asset_id"] is not None
+
+    historical_results = client.get(f"/api/v2/sessions/{sid}/results?version=1").json()["data"]
+    assert historical_results["requested_version"] == 1
+    assert historical_results["missing_slot_ids"] == ["scene"]
+    assert historical_results["expected_slot_ids"] == latest_results["expected_slot_ids"]
+    assert historical_results["summary"]["expected_count"] == latest_results["summary"]["expected_count"]

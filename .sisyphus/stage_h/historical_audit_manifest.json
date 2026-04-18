@@ -1,0 +1,19 @@
+[
+  {
+    "session_id": "replace-with-session-id",
+    "session_type": "default_main",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [1],
+    "detail_versions": [],
+    "expectations": {
+      "has_main": true,
+      "has_detail": false,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": false,
+      "expected_available_main_versions": [1],
+      "expected_available_detail_versions": []
+    }
+  }
+]
