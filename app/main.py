@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
         ),
         openapi_tags=[
             {"name": "platforms", "description": "平台能力与默认配置。"},
+            {"name": "brands", "description": "当前 service 可用品牌列表与 session 品牌绑定前置数据源。"},
             {"name": "auth", "description": "已下线的用户鉴权接口，当前返回 410。"},
             {"name": "account", "description": "已下线的账户接口，当前返回 410。"},
             {"name": "uploads", "description": "图片 SaaS 上传握手接口，统一要求 `X-App-Key`。"},

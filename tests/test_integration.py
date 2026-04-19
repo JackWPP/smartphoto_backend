@@ -439,7 +439,7 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
     assert first.status_code == 200
     original = first.json()["data"]["detail_strategy_preview"]
     assert original["hash_policy_version"] == "preview_hash_layers_v1"
-    assert set(original["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash"}
+    assert set(original["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash", "memory_hash"}
 
     def _unexpected_rebuild(*args, **kwargs):
         raise AssertionError("detail strategy preview should have been served from cache")
@@ -545,7 +545,7 @@ def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, m
     sid = create_ready_session(client)
     original = client.get(f"/api/v2/sessions/{sid}").json()["data"]["strategy_preview"]
     assert original["hash_policy_version"] == "preview_hash_layers_v1"
-    assert set(original["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash"}
+    assert set(original["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash", "memory_hash"}
 
     def _unexpected_rebuild(*args, **kwargs):
         raise AssertionError("strategy preview should have been served from cache")
@@ -695,16 +695,21 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
         "benefit_scene_or_compare",
         "closing_selling_point",
     ]
-    assert prompt_preview["prompts"][0]["expression_mode"]
-    assert prompt_preview["prompts"][0]["platform_overlay"]["overlay_id"] == "1688"
-    assert prompt_preview["prompts"][0]["visual_structure"]
-    assert prompt_preview["prompts"][0]["copy_policy_applied"]["headline_max_chars"] == 16
-    assert prompt_preview["prompts"][0]["slot_guardrails"]
-    assert "slot_guardrails" in prompt_preview["prompts"][0]["prompt_sections_used"]
-    assert "\u540e\u52a0\u7684\u56fe\u4e0a\u6587\u6848\u5fc5\u987b\u4e3a\u7b80\u4f53\u4e2d\u6587\u77ed\u53e5" in prompt_preview["prompts"][0]["blocks"]["constraints"]
-    assert prompt_preview["prompts"][0]["blocks"]["constraints"]
-    assert "Visible copy must stay short" not in prompt_preview["prompts"][0]["blocks"]["constraints"]
-    assert "涓嶈鍫嗙爩铏氬亣璇佷功" in prompt_preview["prompts"][2]["blocks"]["constraints"]
+    primary_prompt = prompt_preview["prompts"][0]
+    proof_prompt = prompt_preview["prompts"][2]
+    assert primary_prompt["expression_mode"]
+    assert primary_prompt["platform_overlay"]["overlay_id"] == "1688"
+    assert primary_prompt["visual_structure"]
+    assert primary_prompt["copy_policy_applied"]["headline_max_chars"] == 16
+    assert primary_prompt["slot_guardrails"]
+    assert "slot_guardrails" in primary_prompt["prompt_sections_used"]
+    assert "\u540e\u52a0\u7684\u56fe\u4e0a\u6587\u6848\u5fc5\u987b\u4e3a\u7b80\u4f53\u4e2d\u6587\u77ed\u53e5" in primary_prompt["blocks"]["constraints"]
+    assert primary_prompt["blocks"]["constraints"]
+    assert "Visible copy must stay short" not in primary_prompt["blocks"]["constraints"]
+    assert proof_prompt["slot_id"] == "proof_authority"
+    assert proof_prompt["slot_guardrails"]
+    assert "slot_guardrails" in proof_prompt["prompt_sections_used"]
+    assert proof_prompt["blocks"]["constraints"]
 
 
 def test_alibaba_intl_generation_results_include_slot_metadata(client):
@@ -740,16 +745,16 @@ def test_alibaba_prompt_preview_filters_low_signal_copy_and_placeholder_paramete
     copy_payload = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     copy_payload.update(
         {
-            "product_name": "绌烘皵鍑€鍖栧櫒",
-            "category": "瀹剁數",
-            "hero_scene": "瑙嗚娓呯埥",
-            "core_selling_points": ["鏍稿績鍔熻兘绐佸嚭", "瑙嗚娓呯埥"],
-            "product_advantages": ["鏍稿績鍔熻兘绐佸嚭"],
-            "key_parameters": [{"key": "param_a", "label": "鍙傛暟A", "value": "100", "unit": "unit"}],
+            "product_name": "空气净化器",
+            "category": "家电",
+            "hero_scene": "视觉清爽",
+            "core_selling_points": ["核心功能突出", "视觉清爽"],
+            "product_advantages": ["核心功能突出"],
+            "key_parameters": [{"key": "param_a", "label": "参数A", "value": "100", "unit": "unit"}],
             "style_custom": "modern-minimal",
-            "headline": "杩欐鐜颁唬绠€绾﹂鏍肩殑鐧借壊绌烘皵鍑€鍖栧櫒",
+            "headline": "这款现代简约风格的白色空气净化器",
             "selling_points": "core-benefits-visible",
-            "specs": "鍙傛暟A 100unit",
+            "specs": "参数A 100unit",
         }
     )
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_payload)
@@ -763,13 +768,13 @@ def test_alibaba_prompt_preview_filters_low_signal_copy_and_placeholder_paramete
     primary = next(item for item in prompt_preview if item["slot_id"] == "primary_kv")
     closing = next(item for item in prompt_preview if item["slot_id"] == "closing_selling_point")
 
-    assert "鏍稿績鍔熻兘绐佸嚭" not in primary["final_prompt"]
-    assert "瑙嗚娓呯埥" not in primary["final_prompt"]
-    assert "杩欐鐜颁唬绠€绾﹂鏍肩殑鐧借壊绌烘皵鍑€鍖栧櫒" not in primary["final_prompt"]
-    assert primary["copy_blocks"]["headline"] == "绌烘皵鍑€鍖栧櫒"
+    assert "核心功能突出" not in primary["final_prompt"]
+    assert "视觉清爽" not in primary["final_prompt"]
+    assert "这款现代简约风格的白色空气净化器" not in primary["final_prompt"]
+    assert primary["copy_blocks"]["headline"] == "空气净化器"
     assert primary["copy_policy_applied"]["degraded_to_minimal_copy"] is True
-    assert "鍙傛暟A 100unit" not in closing["final_prompt"]
-    assert "鍙傛暟A 100 unit" not in closing["final_prompt"]
+    assert "参数A 100unit" not in closing["final_prompt"]
+    assert "参数A 100 unit" not in closing["final_prompt"]
     assert closing["copy_blocks"]["proof_lines"] == []
 
 
@@ -1409,25 +1414,25 @@ def test_copy_form_sanitizes_internal_prompt_terms(client):
         f"/api/v2/sessions/{sid}/copy",
         json={
             "product_name": "desktop-dehumidifier",
-            "category": "瀹剁數",
-            "hero_scene": "narrative_section 瀹㈠巺妗岄潰",
-            "core_selling_points": ["璁捐璇佹槑", "浣庡櫔杩愯"],
+            "category": "家电",
+            "hero_scene": "narrative_section 客厅桌面",
+            "core_selling_points": ["设计证明", "低噪运行"],
             "key_parameters": [{"key": "tank", "label": "panel_goal", "value": "500ml"}],
-            "product_advantages": ["copy_focus", "灏忓阀濂芥斁"],
+            "product_advantages": ["copy_focus", "小巧好放"],
             "style_preset_id": None,
             "style_custom": "planning context minimal-style",
             "style_choice": "",
-            "headline": "鎬濊€冭繃绋嬶細楂樻晥闄ゆ箍",
+            "headline": "思考过程：高效除湿",
             "selling_points": "panel_goal quiet-dehumidifying",
             "usage_scenes": "Proof bedroom",
-            "specs": "layout template锝?00ml",
+            "specs": "layout template 500ml",
         },
     )
 
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
-    assert copy_data["hero_scene"] == "瀹㈠巺妗岄潰"
-    assert copy_data["core_selling_points"] == ["浣庡櫔杩愯"]
-    assert copy_data["product_advantages"] == ["灏忓阀濂芥斁"]
+    assert copy_data["hero_scene"] == "客厅桌面"
+    assert copy_data["core_selling_points"] == ["低噪运行"]
+    assert copy_data["product_advantages"] == ["小巧好放"]
     assert copy_data["style_custom"] == "minimal-style"
 
 
@@ -1722,8 +1727,8 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
                     "slot_id": "hero",
                     "copy_blocks_override": {
                         "headline": "new-main-headline",
-                        "supporting": "璁捐璇佹槑 (Proof)",
-                        "proof_lines": ["panel_goal", "璇佹槑1"],
+                        "supporting": "设计证明 (Proof)",
+                        "proof_lines": ["panel_goal", "证明1"],
                         "matrix_lines": [],
                     },
                     "raw_prompt_override": "generate-a-hero-with-strong-click-headline",
@@ -1743,9 +1748,9 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
     hero_prompt = next(item for item in prompt_preview["prompts"] if (item["slot_id"] or item["role"]) == "hero")
     assert hero_prompt["copy_blocks"]["headline"] == "new-main-headline"
     assert hero_prompt["copy_blocks"]["supporting"] == ""
-    assert hero_prompt["copy_blocks"]["proof_lines"] == ["璇佹槑1"]
+    assert hero_prompt["copy_blocks"]["proof_lines"] == ["证明1"]
     assert hero_prompt["raw_prompt_override"] == "generate-a-hero-with-strong-click-headline"
-    assert "蹇呴』棰濆閬靛畧杩欎簺绾︽潫" in hero_prompt["final_prompt"]
+    assert "必须额外遵守这些约束" in hero_prompt["final_prompt"]
 
     created = client.post(
         "/api/v2/prompt-presets",
@@ -1759,7 +1764,7 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
             "locale": "zh-CN",
             "style_summary": None,
             "default_expression_mode": "clean_conversion_kv",
-            "copy_blocks_template": {"headline": "妯℃澘鏍囬"},
+            "copy_blocks_template": {"headline": "模板标题"},
             "raw_prompt_template": None,
             "tags": ["hero"],
         },
@@ -2143,6 +2148,74 @@ def test_bind_session_brand_and_snapshot_round_trip(client):
     snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     assert snapshot["brand_id"] == brand_id
     assert snapshot["brand_memory_enabled"] is True
+
+
+def test_list_brands_and_brand_memory_frontend_handoff_flow(client, monkeypatch):
+    monkeypatch.setattr("app.services.strategy.WhataiClient.plan_prompt_plan", lambda *args, **kwargs: {})
+    monkeypatch.setattr("app.services.strategy.WhataiClient.design_main_copy_blocks", lambda *args, **kwargs: {})
+    brand_id = create_test_brand()
+
+    brands_response = client.get("/api/v2/brands")
+    assert brands_response.status_code == 200, brands_response.text
+    brands = brands_response.json()["data"]["items"]
+    assert any(item["brand_id"] == brand_id for item in brands)
+
+    sid = create_ready_session(client, platform_id="1688")
+
+    initial_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert initial_snapshot["brand_id"] is None
+    assert initial_snapshot["brand_memory_enabled"] is False
+
+    bind = client.put(
+        f"/api/v2/sessions/{sid}/brand",
+        json={"brand_id": brand_id, "brand_memory_enabled": True},
+    )
+    assert bind.status_code == 200, bind.text
+    bind_data = bind.json()["data"]
+    assert bind_data["brand_id"] == brand_id
+    assert bind_data["brand_memory_enabled"] is True
+
+    rebound_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert rebound_snapshot["brand_id"] == brand_id
+    assert rebound_snapshot["brand_memory_enabled"] is True
+    assert rebound_snapshot["strategy_preview"] is None
+
+    disabled_preview = client.post(
+        f"/api/v2/sessions/{sid}/strategy/preview",
+        json={"brand_memory_enabled": False},
+    )
+    assert disabled_preview.status_code == 200, disabled_preview.text
+    disabled_preview_data = disabled_preview.json()["data"]["strategy_preview"]
+    assert disabled_preview_data["brand_id"] == brand_id
+    assert disabled_preview_data["brand_memory_enabled"] is False
+    assert disabled_preview_data["brand_memory_applied"] is False
+
+    after_disabled_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert after_disabled_snapshot["brand_id"] == brand_id
+    assert after_disabled_snapshot["brand_memory_enabled"] is False
+
+    reenable = client.post(
+        f"/api/v2/sessions/{sid}/strategy/preview",
+        json={"brand_memory_enabled": True},
+    )
+    assert reenable.status_code == 200, reenable.text
+    reenable_data = reenable.json()["data"]["strategy_preview"]
+    assert reenable_data["brand_id"] == brand_id
+    assert reenable_data["brand_memory_enabled"] is True
+
+    unbind = client.put(
+        f"/api/v2/sessions/{sid}/brand",
+        json={"brand_id": None, "brand_memory_enabled": False},
+    )
+    assert unbind.status_code == 200, unbind.text
+    unbind_data = unbind.json()["data"]
+    assert unbind_data["brand_id"] is None
+    assert unbind_data["brand_memory_enabled"] is False
+
+    unbound_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert unbound_snapshot["brand_id"] is None
+    assert unbound_snapshot["brand_memory_enabled"] is False
+    assert unbound_snapshot["strategy_preview"] is None
 
 
 def test_strategy_preview_and_generation_include_brand_memory_trace(client, monkeypatch):
