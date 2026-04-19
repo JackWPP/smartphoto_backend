@@ -32,6 +32,11 @@ os.environ["STORAGE_BACKEND"] = "local"
 os.environ["STORAGE_ROOT"] = str(TEST_STORAGE)
 os.environ["REDIS_URL"] = "redis://localhost:6379/15"
 os.environ["WHATAI_API_KEY"] = ""
+os.environ["OPENROUTER_API_KEY"] = ""
+os.environ["DOUBAO_API_KEY"] = ""
+os.environ["ARK_API_KEY"] = ""
+os.environ["OPENAI_COMPATIBLE_API_BASE"] = ""
+os.environ["OPENAI_COMPATIBLE_API_KEY"] = ""
 os.environ["IMAGE_SAAS_APP_KEYS"] = '["default:test-app-key","partner-b:test-partner-key"]'
 os.environ["IMAGE_SAAS_DEFAULT_APP_ID"] = "default"
 

@@ -118,6 +118,260 @@
         }
       }
     },
+    "/api/v2/platforms/{platform_id}/expression-modes": {
+      "get": {
+        "tags": [
+          "platforms"
+        ],
+        "summary": "获取平台各槽位的表达方式候选列表",
+        "description": "返回指定平台下每个主图槽位可用的表达方式及其元数据（标签、布局策略、文案策略、Prompt 模块）。",
+        "operationId": "listExpressionModes",
+        "parameters": [
+          {
+            "name": "platform_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Platform Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Listexpressionmodes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/brands": {
+      "get": {
+        "tags": [
+          "brands"
+        ],
+        "summary": "获取当前 service 可绑定的品牌列表",
+        "description": "返回当前 `X-App-Key` 作用域下可用于 session 绑定的启用品牌列表，供正式前台品牌选择器直接消费。",
+        "operationId": "listBrands",
+        "parameters": [
+          {
+            "name": "X-App-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-App-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_BrandListData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/auth/{path}": {
       "get": {
         "tags": [
@@ -2344,6 +2598,155 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/APIResponse_SessionSnapshotData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/sessions/{session_id}/brand": {
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Bind Session Brand",
+        "operationId": "bindSessionBrand",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "X-App-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-App-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionBrandBindRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Bindsessionbrand"
                 }
               }
             }
@@ -4779,7 +5182,6 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "additionalProperties": true,
                 "title": "Payload"
               }
             }
@@ -8705,6 +9107,451 @@
         }
       }
     },
+    "/api/v2/assets/{asset_id}/history": {
+      "get": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "获取资产版本历史",
+        "description": "返回指定 asset 所在 slot 的所有版本记录，按版本号降序排列。",
+        "operationId": "getAssetHistory",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          },
+          {
+            "name": "X-App-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-App-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_list_AssetHistoryItem__"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/assets/{asset_id}/restore": {
+      "post": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "回滚到历史版本",
+        "description": "将指定历史版本的 asset 物化为新的完整结果版本，不直接覆盖历史版本。",
+        "operationId": "restoreAsset",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          },
+          {
+            "name": "X-App-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-App-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_AssetRestoreResponse_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/assets/{asset_id}/edit-text": {
+      "post": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "文字编辑 - 保持构图不变，仅替换可见文案",
+        "description": "使用已生成的图片作为参考，仅替换图上可见文案。当前仅支持 main_gallery 类型资产。",
+        "operationId": "editAssetText",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "可选幂等键。",
+              "title": "Idempotency-Key"
+            },
+            "description": "可选幂等键。"
+          },
+          {
+            "name": "X-App-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-App-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetEditTextRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_GenericGenerationJobData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/prompt-presets": {
       "get": {
         "tags": [
@@ -9469,6 +10316,150 @@
         }
       }
     },
+    "/api/v2/assets/{asset_id}/feedback": {
+      "post": {
+        "tags": [
+          "feedback"
+        ],
+        "summary": "Submit Feedback",
+        "description": "Submit quality feedback for a generated asset.",
+        "operationId": "submit_feedback_api_v2_assets__asset_id__feedback_post",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          },
+          {
+            "name": "X-User-Id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-User-Id"
+            }
+          },
+          {
+            "name": "X-App-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-App-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Submit Feedback Api V2 Assets  Asset Id  Feedback Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "feedback"
+        ],
+        "summary": "Get Feedback",
+        "description": "Get all feedback for an asset.",
+        "operationId": "get_feedback_api_v2_assets__asset_id__feedback_get",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          },
+          {
+            "name": "X-App-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-App-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Get Feedback Api V2 Assets  Asset Id  Feedback Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/v1/auth/health": {
       "get": {
         "tags": [
@@ -9482,7 +10473,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Health Api Admin V1 Auth Health Get"
                 }
@@ -9806,7 +10796,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminlogout"
                 }
               }
@@ -10497,6 +11486,659 @@
         }
       }
     },
+    "/api/admin/v1/dashboard/quality": {
+      "get": {
+        "tags": [
+          "admin-dashboard"
+        ],
+        "summary": "Dashboard Quality",
+        "description": "Quality gate metrics and user feedback summary.",
+        "operationId": "adminDashboardQuality",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 30,
+              "minimum": 1,
+              "default": 7,
+              "title": "Days"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Admindashboardquality"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/dashboard/quality/breakdown": {
+      "get": {
+        "tags": [
+          "admin-dashboard"
+        ],
+        "summary": "Quality Breakdown",
+        "description": "Quality pass rates broken down by platform, category, or slot.",
+        "operationId": "adminQualityBreakdown",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 30,
+              "minimum": 1,
+              "default": 7,
+              "title": "Days"
+            }
+          },
+          {
+            "name": "dimension",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "platform",
+                "category",
+                "slot"
+              ],
+              "type": "string",
+              "description": "分组维度: platform, category, slot",
+              "default": "platform",
+              "title": "Dimension"
+            },
+            "description": "分组维度: platform, category, slot"
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminqualitybreakdown"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/dashboard/quality/issue-tags": {
+      "get": {
+        "tags": [
+          "admin-dashboard"
+        ],
+        "summary": "Quality Issue Tags",
+        "description": "Top issue tags from user feedback.",
+        "operationId": "adminQualityIssueTags",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 30,
+              "minimum": 1,
+              "default": 7,
+              "title": "Days"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminqualityissuetags"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/dashboard/quality/timing": {
+      "get": {
+        "tags": [
+          "admin-dashboard"
+        ],
+        "summary": "Quality Timing",
+        "description": "Generation and quality review timing statistics (P50/P95).",
+        "operationId": "adminQualityTiming",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 30,
+              "minimum": 1,
+              "default": 7,
+              "title": "Days"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminqualitytiming"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/v1/sessions": {
       "get": {
         "tags": [
@@ -10978,7 +12620,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminupdatesessioncopy"
                 }
               }
@@ -11144,7 +12785,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminupdatesessionparameters"
                 }
               }
@@ -11310,7 +12950,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminupdatesessionstrategyoverrides"
                 }
               }
@@ -11476,7 +13115,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminupdatedetailstrategyoverrides"
                 }
               }
@@ -13558,7 +15196,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Admingetjob"
                 }
               }
@@ -13724,7 +15361,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminretryjob"
                 }
               }
@@ -14480,7 +16116,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Admingetasset"
                 }
               }
@@ -14646,7 +16281,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminarchiveasset"
                 }
               }
@@ -14812,7 +16446,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminrestoreasset"
                 }
               }
@@ -14978,7 +16611,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminregenerateasset"
                 }
               }
@@ -15735,7 +17367,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Admincreatepromptpreset"
                 }
               }
@@ -16053,7 +17684,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminupdatepromptpreset"
                 }
               }
@@ -16219,7 +17849,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminarchivepromptpreset"
                 }
               }
@@ -16385,8 +18014,1736 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminclonepromptpreset"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/brands": {
+      "get": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "List Brands",
+        "operationId": "adminListBrands",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "name": "include_inactive",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Inactive"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "updated_at",
+              "title": "Sort By"
+            }
+          },
+          {
+            "name": "sort_order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(asc|desc)$",
+              "default": "desc",
+              "title": "Sort Order"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_AdminBrandListData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "Create Brand",
+        "operationId": "adminCreateBrand",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminBrandCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Admincreatebrand"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/brands/{brand_id}": {
+      "put": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "Update Brand",
+        "operationId": "adminUpdateBrand",
+        "parameters": [
+          {
+            "name": "brand_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Brand Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminBrandUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminupdatebrand"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/brands/{brand_id}/archive": {
+      "post": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "Archive Brand",
+        "operationId": "adminArchiveBrand",
+        "parameters": [
+          {
+            "name": "brand_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Brand Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminBrandMutationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminarchivebrand"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/brands/{brand_id}/restore": {
+      "post": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "Restore Brand",
+        "operationId": "adminRestoreBrand",
+        "parameters": [
+          {
+            "name": "brand_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Brand Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminBrandMutationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminrestorebrand"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/brands/{brand_id}/profile": {
+      "get": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "Get Brand Profile",
+        "operationId": "adminGetBrandProfile",
+        "parameters": [
+          {
+            "name": "brand_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Brand Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Admingetbrandprofile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "Upsert Brand Profile",
+        "operationId": "adminUpsertBrandProfile",
+        "parameters": [
+          {
+            "name": "brand_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Brand Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminBrandProfileUpsertRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminupsertbrandprofile"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/brands/{brand_id}/memory-items": {
+      "get": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "List Brand Memory Items",
+        "operationId": "adminListBrandMemoryItems",
+        "parameters": [
+          {
+            "name": "brand_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Brand Id"
+            }
+          },
+          {
+            "name": "include_disabled",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Disabled"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_AdminBrandMemoryListData_"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/brands/{brand_id}/memory-items/{memory_item_id}": {
+      "put": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "Update Brand Memory Item",
+        "operationId": "adminUpdateBrandMemoryItem",
+        "parameters": [
+          {
+            "name": "brand_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Brand Id"
+            }
+          },
+          {
+            "name": "memory_item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Memory Item Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminBrandMemoryUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminupdatebrandmemoryitem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/brands/{brand_id}/memory-items/{memory_item_id}/evidence": {
+      "get": {
+        "tags": [
+          "admin-brands"
+        ],
+        "summary": "List Brand Memory Evidence",
+        "operationId": "adminListBrandMemoryEvidence",
+        "parameters": [
+          {
+            "name": "brand_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Brand Id"
+            }
+          },
+          {
+            "name": "memory_item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Memory Item Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse_AdminBrandMemoryEvidenceListData_"
                 }
               }
             }
@@ -16762,7 +20119,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Admincreatecategorycatalog"
                 }
               }
@@ -17080,7 +20436,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminupdatecategorycatalog"
                 }
               }
@@ -17246,7 +20601,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminarchivecategorycatalog"
                 }
               }
@@ -17412,7 +20766,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminrestorecategorycatalog"
                 }
               }
@@ -17821,7 +21174,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Admincreaterulepack"
                 }
               }
@@ -18139,7 +21491,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminupdaterulepack"
                 }
               }
@@ -18305,7 +21656,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminpublishrulepack"
                 }
               }
@@ -18471,7 +21821,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminclonerulepack"
                 }
               }
@@ -18637,7 +21986,6 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": true,
                   "title": "Response Adminarchiverulepack"
                 }
               }
@@ -19173,6 +22521,787 @@
         }
       }
     },
+    "/api/admin/v1/platform-configs": {
+      "get": {
+        "tags": [
+          "admin-platform-configs"
+        ],
+        "summary": "List Platform Configs",
+        "operationId": "adminListPlatformConfigs",
+        "parameters": [
+          {
+            "name": "include_inactive",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Inactive"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminlistplatformconfigs"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin-platform-configs"
+        ],
+        "summary": "Create Platform Config",
+        "operationId": "adminCreatePlatformConfig",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePlatformConfigRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Admincreateplatformconfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/v1/platform-configs/{platform_id}": {
+      "get": {
+        "tags": [
+          "admin-platform-configs"
+        ],
+        "summary": "Get Platform Config",
+        "operationId": "adminGetPlatformConfig",
+        "parameters": [
+          {
+            "name": "platform_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Platform Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Admingetplatformconfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "admin-platform-configs"
+        ],
+        "summary": "Update Platform Config",
+        "operationId": "adminUpdatePlatformConfig",
+        "parameters": [
+          {
+            "name": "platform_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Platform Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePlatformConfigRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Adminupdateplatformconfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "admin-platform-configs"
+        ],
+        "summary": "Delete Platform Config",
+        "operationId": "adminDeletePlatformConfig",
+        "parameters": [
+          {
+            "name": "platform_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Platform Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "name": "admin_access_token",
+            "in": "cookie",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Admin Access Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Response Admindeleteplatformconfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "业务校验失败，例如状态不合法、参数缺失、平台无效。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未认证。当前开发态通常不会出现。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "无权限访问该资源。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "资源不存在，例如 session/job/asset 不存在。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "并发冲突或幂等冲突，例如 40901 / 40902。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "能力已下线，当前仓库不再提供该功能。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求体或表单参数未通过 FastAPI/Pydantic 校验。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部异常。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游 LLM 或生图服务异常，例如 50201 / 50202。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "summary": "Healthz",
@@ -19183,7 +23312,6 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
                   "type": "object",
                   "title": "Response Healthz Healthz Get"
                 }
@@ -19324,6 +23452,99 @@
           "data"
         ],
         "title": "APIResponse[AdminAuthMe]"
+      },
+      "APIResponse_AdminBrandListData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/AdminBrandListData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[AdminBrandListData]"
+      },
+      "APIResponse_AdminBrandMemoryEvidenceListData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/AdminBrandMemoryEvidenceListData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[AdminBrandMemoryEvidenceListData]"
+      },
+      "APIResponse_AdminBrandMemoryListData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/AdminBrandMemoryListData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[AdminBrandMemoryListData]"
       },
       "APIResponse_AdminCategoryCatalogItem_": {
         "properties": {
@@ -19882,6 +24103,68 @@
           "data"
         ],
         "title": "APIResponse[AnalysisTriggerData]"
+      },
+      "APIResponse_AssetRestoreResponse_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/AssetRestoreResponse",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[AssetRestoreResponse]"
+      },
+      "APIResponse_BrandListData_": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/BrandListData",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[BrandListData]"
       },
       "APIResponse_CopyData_": {
         "properties": {
@@ -21030,6 +25313,41 @@
         ],
         "title": "APIResponse[UploadStrategyReferenceImageData]"
       },
+      "APIResponse_list_AssetHistoryItem__": {
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "description": "业务状态码。成功固定为 0。",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "业务消息。成功固定为 success。",
+            "default": "success",
+            "examples": [
+              "success"
+            ]
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/AssetHistoryItem"
+            },
+            "type": "array",
+            "title": "Data",
+            "description": "接口返回的业务数据。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "title": "APIResponse[list[AssetHistoryItem]]"
+      },
       "AdminActionRequest": {
         "properties": {
           "operator_note": {
@@ -21288,7 +25606,6 @@
           "generation_snapshot": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -21456,7 +25773,6 @@
           "before_snapshot": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -21468,7 +25784,6 @@
           "after_snapshot": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -21580,6 +25895,702 @@
         ],
         "title": "AdminAuthMe"
       },
+      "AdminBrandCreateRequest": {
+        "properties": {
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note",
+            "description": "管理员操作备注。"
+          },
+          "service_id": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Service Id",
+            "default": "default"
+          },
+          "brand_name": {
+            "type": "string",
+            "title": "Brand Name"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aliases"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "status": {
+            "type": "string",
+            "maxLength": 32,
+            "title": "Status",
+            "default": "active"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "brand_name",
+          "slug"
+        ],
+        "title": "AdminBrandCreateRequest"
+      },
+      "AdminBrandItem": {
+        "properties": {
+          "brand_id": {
+            "type": "string",
+            "title": "Brand Id"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "brand_name": {
+            "type": "string",
+            "title": "Brand Name"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aliases"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "brand_id",
+          "service_id",
+          "brand_name",
+          "slug",
+          "status",
+          "is_active"
+        ],
+        "title": "AdminBrandItem"
+      },
+      "AdminBrandListData": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "sort_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort By"
+          },
+          "sort_order": {
+            "type": "string",
+            "title": "Sort Order",
+            "default": "desc"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminBrandItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "page_size",
+          "has_more",
+          "items"
+        ],
+        "title": "AdminBrandListData"
+      },
+      "AdminBrandMemoryEvidenceItem": {
+        "properties": {
+          "evidence_id": {
+            "type": "string",
+            "title": "Evidence Id"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "brand_id": {
+            "type": "string",
+            "title": "Brand Id"
+          },
+          "memory_item_id": {
+            "type": "string",
+            "title": "Memory Item Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "asset_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asset Id"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "evidence_type": {
+            "type": "string",
+            "title": "Evidence Type"
+          },
+          "evidence_payload": {
+            "type": "object",
+            "title": "Evidence Payload"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "evidence_id",
+          "service_id",
+          "brand_id",
+          "memory_item_id",
+          "evidence_type"
+        ],
+        "title": "AdminBrandMemoryEvidenceItem"
+      },
+      "AdminBrandMemoryEvidenceListData": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminBrandMemoryEvidenceItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "AdminBrandMemoryEvidenceListData"
+      },
+      "AdminBrandMemoryItem": {
+        "properties": {
+          "memory_item_id": {
+            "type": "string",
+            "title": "Memory Item Id"
+          },
+          "service_id": {
+            "type": "string",
+            "title": "Service Id"
+          },
+          "brand_id": {
+            "type": "string",
+            "title": "Brand Id"
+          },
+          "platform_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform Id"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id"
+          },
+          "memory_type": {
+            "type": "string",
+            "title": "Memory Type"
+          },
+          "source_kind": {
+            "type": "string",
+            "title": "Source Kind"
+          },
+          "payload": {
+            "type": "object",
+            "title": "Payload"
+          },
+          "quality_score": {
+            "type": "number",
+            "title": "Quality Score"
+          },
+          "confidence_score": {
+            "type": "number",
+            "title": "Confidence Score"
+          },
+          "usage_count": {
+            "type": "integer",
+            "title": "Usage Count"
+          },
+          "hit_count": {
+            "type": "integer",
+            "title": "Hit Count"
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "title": "Is Enabled"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "memory_item_id",
+          "service_id",
+          "brand_id",
+          "memory_type",
+          "source_kind",
+          "quality_score",
+          "confidence_score",
+          "usage_count",
+          "hit_count",
+          "is_enabled"
+        ],
+        "title": "AdminBrandMemoryItem"
+      },
+      "AdminBrandMemoryListData": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "sort_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort By"
+          },
+          "sort_order": {
+            "type": "string",
+            "title": "Sort Order",
+            "default": "desc"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AdminBrandMemoryItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "page_size",
+          "has_more",
+          "items"
+        ],
+        "title": "AdminBrandMemoryListData"
+      },
+      "AdminBrandMemoryUpdateRequest": {
+        "properties": {
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note",
+            "description": "管理员操作备注。"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payload"
+          },
+          "quality_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Score"
+          },
+          "confidence_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence Score"
+          },
+          "is_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Enabled"
+          }
+        },
+        "type": "object",
+        "title": "AdminBrandMemoryUpdateRequest"
+      },
+      "AdminBrandMutationRequest": {
+        "properties": {
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note",
+            "description": "管理员操作备注。"
+          }
+        },
+        "type": "object",
+        "title": "AdminBrandMutationRequest"
+      },
+      "AdminBrandProfileUpsertRequest": {
+        "properties": {
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note",
+            "description": "管理员操作备注。"
+          },
+          "identity_payload": {
+            "type": "object",
+            "title": "Identity Payload"
+          },
+          "visual_payload": {
+            "type": "object",
+            "title": "Visual Payload"
+          },
+          "copy_payload": {
+            "type": "object",
+            "title": "Copy Payload"
+          }
+        },
+        "type": "object",
+        "title": "AdminBrandProfileUpsertRequest"
+      },
+      "AdminBrandUpdateRequest": {
+        "properties": {
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note",
+            "description": "管理员操作备注。"
+          },
+          "brand_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Name"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "aliases": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aliases"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          }
+        },
+        "type": "object",
+        "title": "AdminBrandUpdateRequest"
+      },
       "AdminCategoryCatalogCreateRequest": {
         "properties": {
           "operator_note": {
@@ -21640,6 +26651,20 @@
             "type": "boolean",
             "title": "Is Featured",
             "default": false
+          },
+          "confusion_pairs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Confusion Pairs"
+          },
+          "expected_components": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Expected Components"
           }
         },
         "type": "object",
@@ -21703,6 +26728,20 @@
           "is_active": {
             "type": "boolean",
             "title": "Is Active"
+          },
+          "confusion_pairs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Confusion Pairs"
+          },
+          "expected_components": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Expected Components"
           },
           "created_by": {
             "anyOf": [
@@ -21932,6 +26971,34 @@
               }
             ],
             "title": "Is Active"
+          },
+          "confusion_pairs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confusion Pairs"
+          },
+          "expected_components": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Components"
           }
         },
         "type": "object",
@@ -22010,7 +27077,6 @@
           },
           "key_parameters": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -22077,7 +27143,6 @@
           },
           "recent_failed_jobs": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -22085,7 +27150,6 @@
           },
           "recent_high_risk_actions": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -22213,7 +27277,6 @@
             "title": "Event Type"
           },
           "payload": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Payload"
           },
@@ -22394,14 +27457,12 @@
             "title": "Finished At"
           },
           "timing_snapshot": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Timing Snapshot"
           },
           "input_payload": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -22413,7 +27474,6 @@
           "result_payload": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -22667,7 +27727,6 @@
           },
           "key_parameters": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -22704,7 +27763,6 @@
           },
           "evidence_summary": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -22820,7 +27878,6 @@
           "copy_blocks_template": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -22946,7 +28003,6 @@
           "copy_blocks_template": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -23204,7 +28260,6 @@
           "copy_blocks_template": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -23641,7 +28696,6 @@
           "config_snapshot": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -23704,7 +28758,6 @@
             "title": "Rule Pack Key"
           },
           "config_snapshot": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Config Snapshot"
           }
@@ -23748,7 +28801,6 @@
             "title": "Rule Pack Key"
           },
           "config_snapshot": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Config Snapshot"
           },
@@ -23804,13 +28856,11 @@
       "AdminSessionDetailData": {
         "properties": {
           "session": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Session"
           },
           "recent_jobs": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -23818,7 +28868,6 @@
           },
           "recent_assets": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -24108,7 +29157,6 @@
             "description": "当前 session 状态。"
           },
           "analysis_snapshot": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Analysis Snapshot",
             "description": "图片分析结果快照。"
@@ -24189,6 +29237,132 @@
           "status"
         ],
         "title": "AnalysisTriggerData"
+      },
+      "AssetEditTextRequest": {
+        "properties": {
+          "copy_blocks": {
+            "type": "object",
+            "title": "Copy Blocks",
+            "description": "要替换的文案块。key 与 generation_snapshot.copy_blocks 一致：headline/supporting/proof_lines/matrix_lines。"
+          },
+          "instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instruction",
+            "description": "可选附加指令，如'字体改大一点'、'标题换成红色'。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "copy_blocks"
+        ],
+        "title": "AssetEditTextRequest",
+        "description": "文字编辑请求 - 保持图片构图不变，仅替换可见文案。"
+      },
+      "AssetHistoryItem": {
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "title": "Asset Id",
+            "description": "资产 ID。"
+          },
+          "version_no": {
+            "type": "integer",
+            "title": "Version No",
+            "description": "版本号。"
+          },
+          "round_no": {
+            "type": "integer",
+            "title": "Round No",
+            "description": "生成轮次。"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url",
+            "description": "图片 URL。"
+          },
+          "thumbnail_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Url",
+            "description": "缩略图 URL。"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width",
+            "description": "图片宽度。"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height",
+            "description": "图片高度。"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "资产状态。"
+          },
+          "quality_status": {
+            "type": "string",
+            "title": "Quality Status",
+            "description": "质量状态。"
+          },
+          "visibility_status": {
+            "type": "string",
+            "title": "Visibility Status",
+            "description": "可见性状态。"
+          },
+          "edit_instruction": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edit Instruction",
+            "description": "生成时的修改指令。"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At",
+            "description": "创建时间。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "asset_id",
+          "version_no",
+          "round_no",
+          "image_url",
+          "width",
+          "height",
+          "status",
+          "quality_status",
+          "visibility_status"
+        ],
+        "title": "AssetHistoryItem"
       },
       "AssetItem": {
         "properties": {
@@ -24351,6 +29525,17 @@
             "title": "Keep Style Consistency",
             "description": "是否保持与当前版本风格一致。",
             "default": true
+          },
+          "edit_constraints": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EditConstraints"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "可选的结构化编辑约束，与 instruction 互补。"
           }
         },
         "type": "object",
@@ -24359,11 +29544,37 @@
         ],
         "title": "AssetRegenerateRequest"
       },
+      "AssetRestoreResponse": {
+        "properties": {
+          "restored_asset_id": {
+            "type": "string",
+            "title": "Restored Asset Id",
+            "description": "被恢复的资产 ID。"
+          },
+          "previous_asset_id": {
+            "type": "string",
+            "title": "Previous Asset Id",
+            "description": "之前的当前资产 ID（已被标记为 superseded）。"
+          },
+          "slot_id": {
+            "type": "string",
+            "title": "Slot Id",
+            "description": "槽位 ID。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "restored_asset_id",
+          "previous_asset_id",
+          "slot_id"
+        ],
+        "title": "AssetRestoreResponse"
+      },
       "Body_uploadDetailStyleImage": {
         "properties": {
           "file": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "File",
             "description": "要上传的风格参考图文件。"
           },
@@ -24384,7 +29595,7 @@
         "properties": {
           "file": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "File",
             "description": "参数图、说明书图片或 PDF。"
           },
@@ -24405,7 +29616,7 @@
         "properties": {
           "file": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "File",
             "description": "要上传的图片文件，支持 image/jpeg、image/png、image/webp。"
           },
@@ -24432,7 +29643,7 @@
         "properties": {
           "file": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "File",
             "description": "策略参考图。"
           },
@@ -24448,6 +29659,66 @@
           "display_order"
         ],
         "title": "Body_uploadStrategyReferenceImage"
+      },
+      "BrandListData": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BrandListItem"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "当前 service 可选品牌列表。"
+          }
+        },
+        "type": "object",
+        "title": "BrandListData"
+      },
+      "BrandListItem": {
+        "properties": {
+          "brand_id": {
+            "type": "string",
+            "title": "Brand Id",
+            "description": "品牌 ID。"
+          },
+          "brand_name": {
+            "type": "string",
+            "title": "Brand Name",
+            "description": "品牌名称。"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug",
+            "description": "品牌 slug。"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aliases",
+            "description": "品牌别名列表。"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "品牌状态。"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "description": "品牌是否启用。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "brand_id",
+          "brand_name",
+          "slug",
+          "status",
+          "is_active"
+        ],
+        "title": "BrandListItem"
       },
       "CopyData": {
         "properties": {
@@ -24476,7 +29747,6 @@
           },
           "key_parameters": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -24513,6 +29783,11 @@
             "title": "Style Choice",
             "description": "旧版风格选择字段，仅兼容读取。",
             "default": ""
+          },
+          "copy_attribution": {
+            "type": "object",
+            "title": "Copy Attribution",
+            "description": "褰撳墠 copy 瀛楁鐨勬潵婧愬綊鍥犱俊鎭€?"
           }
         },
         "type": "object",
@@ -24587,7 +29862,6 @@
           },
           "key_parameters": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -24742,6 +30016,128 @@
           "status"
         ],
         "title": "CopySaveData"
+      },
+      "CreatePlatformConfigRequest": {
+        "properties": {
+          "platform_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Platform Id"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Name",
+            "default": ""
+          },
+          "locale": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Locale",
+            "default": "zh-CN"
+          },
+          "copy_language": {
+            "type": "string",
+            "maxLength": 8,
+            "title": "Copy Language",
+            "default": "zh"
+          },
+          "allow_dense_copy": {
+            "type": "boolean",
+            "title": "Allow Dense Copy",
+            "default": false
+          },
+          "allow_certificate_elements": {
+            "type": "boolean",
+            "title": "Allow Certificate Elements",
+            "default": false
+          },
+          "allow_compare_overlay": {
+            "type": "boolean",
+            "title": "Allow Compare Overlay",
+            "default": false
+          },
+          "hero_text_overlay": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Hero Text Overlay",
+            "default": "minimal"
+          },
+          "white_bg_mandatory": {
+            "type": "boolean",
+            "title": "White Bg Mandatory",
+            "default": false
+          },
+          "default_image_count": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Default Image Count",
+            "default": 5
+          },
+          "default_aspect_ratio": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Default Aspect Ratio",
+            "default": "1:1"
+          },
+          "main_rule_pack_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Main Rule Pack Id",
+            "default": "default_main_gallery_v2"
+          },
+          "detail_rule_pack_id": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Detail Rule Pack Id",
+            "default": "ecommerce_detail_v2"
+          },
+          "prohibited_elements": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Prohibited Elements"
+          },
+          "negative_prompt_additions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Negative Prompt Additions"
+          },
+          "constraints": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Constraints"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "default": true
+          },
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "platform_id"
+        ],
+        "title": "CreatePlatformConfigRequest"
       },
       "CreateSessionData": {
         "properties": {
@@ -25202,7 +30598,6 @@
           },
           "key_parameters": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -25247,7 +30642,6 @@
           },
           "product_reference_manifest": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -25256,7 +30650,6 @@
           },
           "style_reference_manifest": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -25298,6 +30691,11 @@
             "type": "array",
             "title": "Latest Assets",
             "description": "最近一版详情页结果的执行快照。"
+          },
+          "copy_attribution": {
+            "type": "object",
+            "title": "Copy Attribution",
+            "description": "褰撳墠 session 绾?copy 鏉ユ簮褰掑洜銆?"
           }
         },
         "type": "object",
@@ -25440,13 +30838,11 @@
             "description": "最终提交给上游的 prompt。"
           },
           "blocks": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Blocks",
             "description": "结构化 prompt blocks。"
           },
           "copy_blocks": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Copy Blocks",
             "description": "结构化文案块。"
@@ -25537,7 +30933,6 @@
           },
           "product_reference_images_used": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -25546,7 +30941,6 @@
           },
           "style_reference_images_used": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -25588,7 +30982,6 @@
           "platform_overlay": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -25609,6 +31002,19 @@
             ],
             "title": "Copy Language",
             "description": "当前详情页 panel 的图上文案语言策略。"
+          },
+          "copy_blocks_attribution": {
+            "type": "object",
+            "title": "Copy Blocks Attribution",
+            "description": "褰撳墠 panel copy blocks 鐨勬潵婧愬綊鍥犱俊鎭€?"
+          },
+          "copy_lines_attribution": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Copy Lines Attribution",
+            "description": "褰撳墠 panel copy lines 鐨勬潵婧愬綊鍥犱俊鎭€?"
           }
         },
         "type": "object",
@@ -25690,7 +31096,6 @@
           "generation_snapshot": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -25948,7 +31353,6 @@
             "description": "会话 ID。"
           },
           "detail_strategy_preview": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Detail Strategy Preview",
             "description": "详情页策略预览对象，包含 use_case/aspect_ratio/panel_count/product_reference_manifest/style_reference_manifest/panel_plan。"
@@ -25977,7 +31381,6 @@
           },
           "panel_preferences": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -26081,6 +31484,82 @@
         ],
         "title": "DetailStyleImagesData"
       },
+      "EditConstraints": {
+        "properties": {
+          "keep": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Keep",
+            "description": "需要保留的属性，如 product_identity, composition, style。"
+          },
+          "change": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Change",
+            "description": "需要变更的属性及目标值，如 {\"background\": \"pure_white\"}。"
+          },
+          "remove": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Remove",
+            "description": "需要移除的元素，如 visible_text, watermark。"
+          }
+        },
+        "type": "object",
+        "title": "EditConstraints",
+        "description": "结构化编辑约束，用于定向控制重生成行为。"
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "rating": {
+            "type": "integer",
+            "maximum": 3.0,
+            "minimum": 1.0,
+            "title": "Rating",
+            "description": "1=bad, 2=ok, 3=good"
+          },
+          "issue_tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issue Tags",
+            "description": "Issue tags from allowed set"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rating"
+        ],
+        "title": "FeedbackRequest"
+      },
       "GalleryRegenerateRequest": {
         "properties": {
           "reason": {
@@ -26124,6 +31603,18 @@
             ],
             "title": "Instruction",
             "description": "本轮整组生图附加指令。"
+          },
+          "brand_memory_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Memory Enabled",
+            "description": "brand memory toggle for generation"
           },
           "slot_ids": {
             "items": {
@@ -26235,6 +31726,19 @@
           "scope"
         ],
         "title": "GlobalEditRequest"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
       },
       "JobStatusData": {
         "properties": {
@@ -26359,7 +31863,6 @@
           },
           "stage_timings": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -26393,7 +31896,6 @@
           "result_payload": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -26593,13 +32095,11 @@
             "description": "会话 ID。"
           },
           "parameter_snapshot": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Parameter Snapshot",
             "description": "参数提取结果快照。"
           },
           "applied_copy_fields": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Applied Copy Fields",
             "description": "当前参数结果映射到 copy 的正式字段。"
@@ -26609,6 +32109,11 @@
             "title": "Overwrite Mode",
             "description": "参数结果映射到 copy 的默认策略。",
             "default": "replace_all"
+          },
+          "applied_copy_attribution": {
+            "type": "object",
+            "title": "Applied Copy Attribution",
+            "description": "鍙傛暟缁撴灉鏄犲皠鍒?copy 鐨勬潵婧愬綊鍥犱俊鎭€?"
           }
         },
         "type": "object",
@@ -26830,7 +32335,6 @@
           "copy_blocks_template": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -26979,7 +32483,6 @@
           "copy_blocks_template": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -27155,7 +32658,6 @@
           "copy_blocks_template": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -27227,6 +32729,38 @@
             "title": "Active Platform Id",
             "description": "当前生效平台。"
           },
+          "brand_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Id",
+            "description": "bound brand id"
+          },
+          "brand_memory_enabled": {
+            "type": "boolean",
+            "title": "Brand Memory Enabled",
+            "description": "brand memory enabled",
+            "default": false
+          },
+          "brand_memory_applied": {
+            "type": "boolean",
+            "title": "Brand Memory Applied",
+            "description": "brand memory applied",
+            "default": false
+          },
+          "brand_memory_trace": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Brand Memory Trace",
+            "description": "brand memory trace"
+          },
           "hero_scene": {
             "type": "string",
             "title": "Hero Scene",
@@ -27243,7 +32777,6 @@
           },
           "key_parameters": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -27288,7 +32821,6 @@
           },
           "reference_manifest": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -27310,6 +32842,11 @@
             "type": "array",
             "title": "Latest Assets",
             "description": "最近一版结果的执行快照。"
+          },
+          "copy_attribution": {
+            "type": "object",
+            "title": "Copy Attribution",
+            "description": "褰撳墠 session 绾?copy 鏉ユ簮褰掑洜銆?"
           }
         },
         "type": "object",
@@ -27469,13 +33006,11 @@
             "description": "最终提交给上游的 prompt。"
           },
           "blocks": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Blocks",
             "description": "结构化 prompt blocks。"
           },
           "copy_blocks": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Copy Blocks",
             "description": "该槽位用于图上文字的 copy blocks。"
@@ -27521,7 +33056,6 @@
             "description": "本次 prompt 实际启用的结构段落。"
           },
           "copy_policy_applied": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Copy Policy Applied",
             "description": "本次槽位套用的图上 copy 政策。"
@@ -27536,7 +33070,6 @@
           },
           "reference_images_used": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -27623,6 +33156,14 @@
             "title": "Expression Label",
             "description": "表达方式名称。"
           },
+          "brand_memory_trace": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Brand Memory Trace",
+            "description": "brand memory trace for this prompt item"
+          },
           "rule_modules_used": {
             "items": {
               "type": "string"
@@ -27634,7 +33175,6 @@
           "platform_overlay": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -27651,6 +33191,11 @@
             "type": "array",
             "title": "Resolved Constraints",
             "description": "本次 prompt 的最终约束列表。"
+          },
+          "copy_blocks_attribution": {
+            "type": "object",
+            "title": "Copy Blocks Attribution",
+            "description": "褰撳墠妲戒綅 copy blocks 鐨勬潵婧愬綊鍥犱俊鎭€?"
           }
         },
         "type": "object",
@@ -27728,7 +33273,6 @@
           "generation_snapshot": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -27966,6 +33510,28 @@
         ],
         "title": "ResultsSummary"
       },
+      "SessionBrandBindRequest": {
+        "properties": {
+          "brand_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Id"
+          },
+          "brand_memory_enabled": {
+            "type": "boolean",
+            "title": "Brand Memory Enabled",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "SessionBrandBindRequest"
+      },
       "SessionImageItem": {
         "properties": {
           "image_id": {
@@ -28088,6 +33654,24 @@
             "title": "Current Step",
             "description": "当前步骤号。"
           },
+          "brand_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Id",
+            "description": "bound brand id"
+          },
+          "brand_memory_enabled": {
+            "type": "boolean",
+            "title": "Brand Memory Enabled",
+            "description": "brand memory enabled",
+            "default": false
+          },
           "selected_platform_ids": {
             "items": {
               "type": "string"
@@ -28111,7 +33695,6 @@
           "analysis_snapshot": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -28142,7 +33725,6 @@
           "parameter_snapshot": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -28155,7 +33737,6 @@
           "confirmed_copy": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -28168,7 +33749,6 @@
           "strategy_preview": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -28181,7 +33761,6 @@
           "detail_strategy_preview": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -28282,7 +33861,6 @@
             "description": "主图槽位 ID。"
           },
           "copy_blocks_override": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Copy Blocks Override",
             "description": "文案块 override。"
@@ -28386,7 +33964,6 @@
             "description": "保存策略预览后的 session 状态。"
           },
           "strategy_preview": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Strategy Preview",
             "description": "完整策略预览对象，包含 asset_plan/reference_manifest/prompt_plan。"
@@ -28414,9 +33991,20 @@
             "title": "Planner Instruction",
             "description": "Step 5 额外策略指令，例如“白底图更标准，主图更像参考图”。"
           },
+          "brand_memory_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Memory Enabled",
+            "description": "brand memory toggle for current strategy preview"
+          },
           "slot_preferences": {
             "items": {
-              "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
@@ -28520,6 +34108,218 @@
         ],
         "title": "StrategyReferenceImagesData"
       },
+      "UpdatePlatformConfigRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "locale": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
+          },
+          "copy_language": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 8
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Language"
+          },
+          "allow_dense_copy": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Dense Copy"
+          },
+          "allow_certificate_elements": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Certificate Elements"
+          },
+          "allow_compare_overlay": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Compare Overlay"
+          },
+          "hero_text_overlay": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hero Text Overlay"
+          },
+          "white_bg_mandatory": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "White Bg Mandatory"
+          },
+          "default_image_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 20.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Image Count"
+          },
+          "default_aspect_ratio": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 16
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Aspect Ratio"
+          },
+          "main_rule_pack_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Main Rule Pack Id"
+          },
+          "detail_rule_pack_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Rule Pack Id"
+          },
+          "prohibited_elements": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prohibited Elements"
+          },
+          "negative_prompt_additions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Negative Prompt Additions"
+          },
+          "constraints": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Constraints"
+          },
+          "is_active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Active"
+          },
+          "operator_note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator Note"
+          }
+        },
+        "type": "object",
+        "title": "UpdatePlatformConfigRequest"
+      },
       "UploadCompleteData": {
         "properties": {
           "upload_id": {
@@ -28553,7 +34353,6 @@
             "description": "落库后的业务资源 ID。"
           },
           "resource": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Resource",
             "description": "落库后的业务资源摘要。"
@@ -28824,6 +34623,39 @@
         ],
         "title": "UploadStrategyReferenceImageData"
       },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
       "VersionSummary": {
         "properties": {
           "version_no": {
@@ -28926,6 +34758,10 @@
     {
       "name": "platforms",
       "description": "平台能力与默认配置。"
+    },
+    {
+      "name": "brands",
+      "description": "当前 service 可用品牌列表与 session 品牌绑定前置数据源。"
     },
     {
       "name": "auth",

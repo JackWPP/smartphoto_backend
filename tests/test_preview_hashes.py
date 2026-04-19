@@ -129,7 +129,7 @@ def test_main_hash_bundle_exposes_layer_metadata():
     result = _main_hash_bundle()
 
     assert result["hash_policy_version"] == PREVIEW_HASH_POLICY_VERSION
-    assert set(result["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash"}
+    assert set(result["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash", "memory_hash"}
     assert result["input_hash"]
 
 

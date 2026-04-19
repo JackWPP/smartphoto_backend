@@ -204,6 +204,7 @@ Docker 全应用部署仍保留在仓库里，但现在只作为历史兼容或�
   3. `docs/生产上线SOP.md`
   4. `docs/运行与排障手册.md`
 - 🚀 [API 接口字段字典、错误码与联调指南](./docs/API_联调指南.md)
+- 🏷️ [品牌记忆前端对接说明](./docs/品牌记忆前端对接说明_20260419.md)
 - 🧾 [品牌记忆 Phase 1 交接文档](./docs/brand-memory-phase1-handoff.md)
 - 🧭 `docs/Guest_First_前端联调说明.md` 已归档，仅供回看用户版历史方案
 - ☁️ [OSS 对接与上线指南](./docs/OSS_对接与上线指南.md)

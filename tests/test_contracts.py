@@ -99,7 +99,7 @@ def test_strategy_preview_contract_round_trip() -> None:
         "strategy_overrides": [],
         "resolved_copy_attribution": {"hero_scene": {"source": "explicit_input"}},
         "hash_policy_version": "preview_hash_layers_v1",
-        "hash_layers": {"config_hash": "cfg", "content_hash": "content", "reference_hash": "ref"},
+        "hash_layers": {"config_hash": "cfg", "content_hash": "content", "reference_hash": "ref", "memory_hash": "mem"},
         "input_hash": "hash-1",
         "provider_debug": "keep",
     }
@@ -153,7 +153,7 @@ def test_detail_strategy_preview_contract_round_trip() -> None:
         "strategy_overrides": [],
         "resolved_copy_attribution": {"hero_scene": {"source": "explicit_input"}},
         "hash_policy_version": "preview_hash_layers_v1",
-        "hash_layers": {"config_hash": "cfg", "content_hash": "content", "reference_hash": "ref"},
+        "hash_layers": {"config_hash": "cfg", "content_hash": "content", "reference_hash": "ref", "memory_hash": "mem"},
         "input_hash": "detail-hash",
         "debug_flag": True,
     }
