@@ -1,0 +1,206 @@
+[
+  {
+    "session_id": "replace-with-default-main-session-id",
+    "session_type": "default_main",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [1, 2],
+    "detail_versions": [],
+    "expectations": {
+      "has_main": true,
+      "has_detail": false,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [2, 1],
+      "expected_available_detail_versions": []
+    }
+  },
+  {
+    "session_id": "replace-with-alibaba-main-session-id",
+    "session_type": "alibaba_main",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [1, 2],
+    "detail_versions": [],
+    "expectations": {
+      "has_main": true,
+      "has_detail": false,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [2, 1],
+      "expected_available_detail_versions": []
+    }
+  },
+  {
+    "session_id": "replace-with-detail-session-id",
+    "session_type": "detail",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [],
+    "detail_versions": [1, 2],
+    "expectations": {
+      "has_main": false,
+      "has_detail": true,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [],
+      "expected_available_detail_versions": [2, 1]
+    }
+  },
+  {
+    "session_id": "replace-with-partial-main-session-id",
+    "session_type": "partial_main",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [1],
+    "detail_versions": [],
+    "expectations": {
+      "has_main": true,
+      "has_detail": false,
+      "expect_partial_main": true,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": false,
+      "expected_available_main_versions": [1],
+      "expected_available_detail_versions": []
+    }
+  },
+  {
+    "session_id": "replace-with-partial-detail-session-id",
+    "session_type": "partial_detail",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [],
+    "detail_versions": [1],
+    "expectations": {
+      "has_main": false,
+      "has_detail": true,
+      "expect_partial_main": false,
+      "expect_partial_detail": true,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": false,
+      "expected_available_main_versions": [],
+      "expected_available_detail_versions": [1]
+    }
+  },
+  {
+    "session_id": "replace-with-regenerate-main-session-id",
+    "session_type": "regenerate_main",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [1, 2],
+    "detail_versions": [],
+    "expectations": {
+      "has_main": true,
+      "has_detail": false,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [2, 1],
+      "expected_available_detail_versions": []
+    }
+  },
+  {
+    "session_id": "replace-with-regenerate-detail-session-id",
+    "session_type": "regenerate_detail",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [],
+    "detail_versions": [1, 2],
+    "expectations": {
+      "has_main": false,
+      "has_detail": true,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [],
+      "expected_available_detail_versions": [2, 1]
+    }
+  },
+  {
+    "session_id": "replace-with-restore-main-session-id",
+    "session_type": "restore_main",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [1, 2, 3],
+    "detail_versions": [],
+    "expectations": {
+      "has_main": true,
+      "has_detail": false,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [3, 2, 1],
+      "expected_available_detail_versions": []
+    }
+  },
+  {
+    "session_id": "replace-with-restore-detail-session-id",
+    "session_type": "restore_detail",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [],
+    "detail_versions": [1, 2, 3],
+    "expectations": {
+      "has_main": false,
+      "has_detail": true,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [],
+      "expected_available_detail_versions": [3, 2, 1]
+    }
+  },
+  {
+    "session_id": "replace-with-carry-forward-main-session-id",
+    "session_type": "carry_forward_main",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [1, 2],
+    "detail_versions": [],
+    "expectations": {
+      "has_main": true,
+      "has_detail": false,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [2, 1],
+      "expected_available_detail_versions": []
+    }
+  },
+  {
+    "session_id": "replace-with-carry-forward-detail-session-id",
+    "session_type": "carry_forward_detail",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [],
+    "detail_versions": [1, 2, 3],
+    "expectations": {
+      "has_main": false,
+      "has_detail": true,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": false,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [],
+      "expected_available_detail_versions": [3, 2, 1]
+    }
+  },
+  {
+    "session_id": "replace-with-text-edit-main-session-id",
+    "session_type": "text_edit_main",
+    "service_app_key": "replace-with-x-app-key",
+    "main_versions": [1, 2, 3, 4],
+    "detail_versions": [],
+    "expectations": {
+      "has_main": true,
+      "has_detail": false,
+      "expect_partial_main": false,
+      "expect_partial_detail": false,
+      "expect_text_edit_version": true,
+      "expect_carry_forward": true,
+      "expected_available_main_versions": [4, 3, 2, 1],
+      "expected_available_detail_versions": []
+    }
+  }
+]

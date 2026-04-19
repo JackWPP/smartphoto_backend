@@ -1,0 +1,4 @@
+session_id,session_type,service_app_key,main_versions,detail_versions,has_main,has_detail,expect_partial_main,expect_partial_detail,expect_text_edit_version,expect_carry_forward,expected_available_main_versions,expected_available_detail_versions
+replace-with-default-main-session-id,default_main,replace-with-x-app-key,"1,2",,true,false,false,false,false,true,"2,1",
+replace-with-alibaba-main-session-id,alibaba_main,replace-with-x-app-key,"1,2",,true,false,false,false,false,true,"2,1",
+replace-with-detail-session-id,detail,replace-with-x-app-key,,"1,2",false,true,false,false,false,true,,"2,1"

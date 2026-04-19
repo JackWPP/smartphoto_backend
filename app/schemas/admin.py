@@ -298,6 +298,79 @@ class AdminCategoryCatalogListData(AdminPaginationData):
     items: list[AdminCategoryCatalogItem]
 
 
+class AdminBrandItem(BaseModel):
+    brand_id: str
+    service_id: str
+    brand_name: str
+    slug: str
+    aliases: list[str] = Field(default_factory=list)
+    notes: str | None = None
+    status: str
+    is_active: bool
+    created_by: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class AdminBrandListData(AdminPaginationData):
+    items: list[AdminBrandItem]
+
+
+class AdminBrandProfileItem(BaseModel):
+    profile_id: str
+    brand_id: str
+    identity_payload: dict[str, Any] = Field(default_factory=dict)
+    visual_payload: dict[str, Any] = Field(default_factory=dict)
+    copy_payload: dict[str, Any] = Field(default_factory=dict)
+    version_no: int
+    is_active: bool
+    created_by: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class AdminBrandMemoryItem(BaseModel):
+    memory_item_id: str
+    service_id: str
+    brand_id: str
+    platform_id: str | None = None
+    category: str | None = None
+    slot_id: str | None = None
+    memory_type: str
+    source_kind: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    quality_score: float
+    confidence_score: float
+    usage_count: int
+    hit_count: int
+    is_enabled: bool
+    created_by: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class AdminBrandMemoryListData(AdminPaginationData):
+    items: list[AdminBrandMemoryItem]
+
+
+class AdminBrandMemoryEvidenceItem(BaseModel):
+    evidence_id: str
+    service_id: str
+    brand_id: str
+    memory_item_id: str
+    session_id: str | None = None
+    asset_id: str | None = None
+    job_id: str | None = None
+    evidence_type: str
+    evidence_payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class AdminBrandMemoryEvidenceListData(BaseModel):
+    items: list[AdminBrandMemoryEvidenceItem] = Field(default_factory=list)
+
+
 class AdminSystemQueueStat(BaseModel):
     queue_name: str
     depth: int
@@ -414,6 +487,42 @@ class AdminCategoryCatalogUpdateRequest(AdminOperatorNoteMixin):
 
 class AdminCategoryCatalogMutationRequest(AdminOperatorNoteMixin):
     pass
+
+
+class AdminBrandCreateRequest(AdminOperatorNoteMixin):
+    service_id: str = Field(default="default", max_length=64)
+    brand_name: str
+    slug: str
+    aliases: list[str] = Field(default_factory=list)
+    notes: str | None = Field(default=None, max_length=1000)
+    status: str = Field(default="active", max_length=32)
+    is_active: bool = True
+
+
+class AdminBrandUpdateRequest(AdminOperatorNoteMixin):
+    brand_name: str | None = None
+    slug: str | None = None
+    aliases: list[str] | None = None
+    notes: str | None = Field(default=None, max_length=1000)
+    status: str | None = Field(default=None, max_length=32)
+    is_active: bool | None = None
+
+
+class AdminBrandMutationRequest(AdminOperatorNoteMixin):
+    pass
+
+
+class AdminBrandProfileUpsertRequest(AdminOperatorNoteMixin):
+    identity_payload: dict[str, Any] = Field(default_factory=dict)
+    visual_payload: dict[str, Any] = Field(default_factory=dict)
+    copy_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminBrandMemoryUpdateRequest(AdminOperatorNoteMixin):
+    payload: dict[str, Any] | None = None
+    quality_score: float | None = None
+    confidence_score: float | None = None
+    is_enabled: bool | None = None
 
 
 class AdminCreateOrderRequest(AdminOperatorNoteMixin):

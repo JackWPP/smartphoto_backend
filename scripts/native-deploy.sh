@@ -83,10 +83,16 @@ fi
 if [[ "$SKIP_ADMINFRONT_BUILD" != true && -f adminfront/package.json ]]; then
   (
     cd adminfront
-    npm install
+    if [[ -f package-lock.json ]]; then
+      npm ci
+    else
+      npm install
+    fi
     npm run build
   )
 fi
+
+bash ./scripts/native-preflight.sh
 
 $SYSTEMCTL stop smartphoto-api.service smartphoto-worker.service || true
 

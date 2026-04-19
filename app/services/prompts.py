@@ -1,11 +1,15 @@
 import re
 from typing import Any
 
+from app.contracts.copy import MainCopyBlocks
+from app.contracts.strategy import AssetPlanItem, PromptPlanItem, StrategyPreviewPayload
+from app.contracts.validation import validate_contract_warn
 from app.services.copy_normalization import (
     is_low_information_copy_text,
     is_placeholder_copy_text,
     repair_broken_text,
 )
+from app.services.prompt_pipeline import build_main_prompt_pipeline, normalize_main_prompt_stage
 from app.services.prompt_safety import prompt_matrix_guardrails, sanitize_main_copy_blocks
 from app.services.prompt_specs import get_prompt_role_spec
 from app.services.strategy import find_prompt_plan_item
@@ -92,10 +96,25 @@ def compose_prompt(
     instruction: str | None = None,
     plan_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    plan = plan_item or _find_plan_item(strategy_preview, asset_role)
+    strategy_preview = validate_contract_warn(
+        StrategyPreviewPayload,
+        strategy_preview,
+        context={"asset_role": asset_role, "stage": "compose_prompt_strategy_preview"},
+    )
+    raw_plan = plan_item or _find_plan_item(strategy_preview, asset_role)
+    plan = validate_contract_warn(
+        AssetPlanItem,
+        raw_plan,
+        context={"asset_role": asset_role, "slot_id": raw_plan.get("slot_id"), "stage": "compose_prompt_plan_item"},
+    )
     prompt_plan = find_prompt_plan_item(strategy_preview, plan.get("slot_id") or asset_role)
     if not prompt_plan:
         prompt_plan = find_prompt_plan_item(strategy_preview, asset_role)
+    prompt_plan = validate_contract_warn(
+        PromptPlanItem,
+        prompt_plan,
+        context={"asset_role": asset_role, "slot_id": plan.get("slot_id"), "stage": "compose_prompt_prompt_plan"},
+    )
     slot_id = str(plan.get("slot_id") or prompt_plan.get("slot_id") or asset_role)
     role_spec = get_prompt_role_spec(str(plan.get("role") or asset_role))
 
@@ -113,6 +132,7 @@ def compose_prompt(
         raw_copy_blocks = {**dict(prompt_plan.get("copy_blocks") or {}), **dict(plan_item["copy_blocks"])}
     else:
         raw_copy_blocks = dict(prompt_plan.get("copy_blocks") or plan.get("copy_blocks") or {})
+    raw_copy_blocks = MainCopyBlocks.from_dict(raw_copy_blocks).to_dict()
     copy_blocks, sanitized_fields, copy_safety_notes = sanitize_main_copy_blocks(
         raw_copy_blocks,
         product_name=confirmed_copy.get("product_name", ""),
@@ -193,6 +213,11 @@ def compose_prompt(
         "planner_base": _clean_text(prompt_plan.get("final_prompt_base")),
         "expression_mode": str(prompt_plan.get("expression_mode") or plan.get("expression_mode") or ""),
         "expression_label": str(prompt_plan.get("expression_label") or plan.get("expression_label") or ""),
+        "brand_memory_trace": [
+            item
+            for item in strategy_preview.get("brand_memory_trace", [])
+            if isinstance(item, dict) and str(item.get("slot_id") or "").strip() == str(plan.get("slot_id") or prompt_plan.get("slot_id") or "")
+        ],
         "rule_modules_used": [str(item) for item in prompt_plan.get("rule_modules_used", []) if str(item).strip()],
         "platform_overlay": prompt_plan.get("platform_overlay"),
         "risk_flags": [str(item) for item in prompt_plan.get("risk_flags", []) if str(item).strip()],
@@ -943,4 +968,163 @@ def _has_pure_white_requirement(text: str) -> bool:
 def _looks_like_matrix_background_rule(text: str) -> bool:
     if not text:
         return False
-    return "参数" in text or "矩阵" in text
+    return "鍙傛暟" in text or "鐭╅樀" in text
+
+
+def _stage_d_build_main_prompt_pipeline(
+    *,
+    confirmed_copy: dict[str, Any],
+    strategy_preview: dict[str, Any],
+    asset_role: str,
+    instruction: str | None,
+    plan: dict[str, Any],
+    prompt_plan: dict[str, Any],
+):
+    slot_id = str(plan.get("slot_id") or prompt_plan.get("slot_id") or asset_role)
+    role_spec = get_prompt_role_spec(str(plan.get("role") or asset_role))
+    style = _fallback_text(
+        strategy_preview.get("style_summary")
+        or ((confirmed_copy.get("resolved_style_preset") or {}).get("style_summary") if isinstance(confirmed_copy.get("resolved_style_preset"), dict) else "")
+        or confirmed_copy.get("style_custom")
+        or confirmed_copy.get("style_choice"),
+        "简洁高级的电商摄影风格",
+    )
+    if plan.get("copy_blocks"):
+        raw_copy_blocks = {**dict(prompt_plan.get("copy_blocks") or {}), **dict(plan.get("copy_blocks") or {})}
+    else:
+        raw_copy_blocks = dict(prompt_plan.get("copy_blocks") or {})
+    raw_copy_blocks = MainCopyBlocks.from_dict(raw_copy_blocks).to_dict()
+    normalized = normalize_main_prompt_stage(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        asset_role=asset_role,
+        plan=plan,
+        prompt_plan=prompt_plan,
+        role_spec=role_spec,
+        slot_id=slot_id,
+        style=style,
+        raw_copy_blocks=raw_copy_blocks,
+        text_policy=str(plan.get("text_policy") or role_spec["text_policy"]),
+        raw_prompt_override=_clean_text(prompt_plan.get("raw_prompt_override") or plan.get("raw_prompt_override")),
+        instruction=instruction,
+    )
+    return build_main_prompt_pipeline(
+        normalized=normalized,
+        product_name=str(confirmed_copy.get("product_name") or ""),
+        sanitize_copy_blocks=lambda raw: sanitize_main_copy_blocks(
+            raw,
+            product_name=confirmed_copy.get("product_name", ""),
+        ),
+        resolve_copy_policy=_copy_policy_for_slot,
+        build_blocks=lambda stage, copy_blocks, text_policy: {
+            "goal": _compose_goal_block(stage.plan, stage.role_spec, stage.prompt_plan),
+            "subject": _compose_subject_block(confirmed_copy, stage.slot_id, str(stage.plan.get("role") or asset_role), stage.prompt_plan),
+            "composition": _compose_composition_block(stage.slot_id, stage.plan, stage.prompt_plan),
+            "background": _compose_background_block(stage.slot_id, str(stage.plan.get("role") or asset_role), stage.plan, stage.prompt_plan),
+            "style": _compose_style_block(stage.style, stage.plan, stage.prompt_plan),
+            "selling_points": _compose_selling_points_block(stage.slot_id, stage.prompt_plan, copy_blocks, text_policy),
+            "constraints": _compose_constraints_block(stage.slot_id, str(stage.plan.get("role") or asset_role), stage.prompt_plan, text_policy),
+            "instruction": _compose_instruction_block(stage.instruction),
+        },
+        parse_instruction_intents=_parse_instruction_intents,
+        apply_instruction_overrides=_apply_instruction_overrides,
+        normalized_text_entries=_normalized_text_entries,
+        block_order=PROMPT_BLOCK_ORDER,
+        format_prompt_blocks=format_prompt_blocks,
+        compose_raw_override_prompt=_compose_raw_override_prompt,
+    )
+
+
+def compose_prompt(
+    confirmed_copy: dict,
+    strategy_preview: dict,
+    asset_role: str,
+    instruction: str | None = None,
+    plan_item: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    strategy_preview = validate_contract_warn(
+        StrategyPreviewPayload,
+        strategy_preview,
+        context={"asset_role": asset_role, "stage": "compose_prompt_strategy_preview"},
+    )
+    raw_plan = plan_item or _find_plan_item(strategy_preview, asset_role)
+    plan = validate_contract_warn(
+        AssetPlanItem,
+        raw_plan,
+        context={"asset_role": asset_role, "slot_id": raw_plan.get("slot_id"), "stage": "compose_prompt_plan_item"},
+    )
+    prompt_plan = find_prompt_plan_item(strategy_preview, plan.get("slot_id") or asset_role)
+    if not prompt_plan:
+        prompt_plan = find_prompt_plan_item(strategy_preview, asset_role)
+    prompt_plan = validate_contract_warn(
+        PromptPlanItem,
+        prompt_plan,
+        context={"asset_role": asset_role, "slot_id": plan.get("slot_id"), "stage": "compose_prompt_prompt_plan"},
+    )
+    pipeline = _stage_d_build_main_prompt_pipeline(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        asset_role=asset_role,
+        instruction=instruction,
+        plan=plan,
+        prompt_plan=prompt_plan,
+    )
+    role_spec = pipeline.normalized.role_spec
+    text_policy = pipeline.normalized.text_policy
+    strategy_fields_used = _collect_strategy_fields_used(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        plan=plan,
+        prompt_plan=prompt_plan,
+        instruction=instruction,
+    )
+
+    return {
+        "role": str(plan.get("role") or asset_role),
+        "slot_id": str(plan.get("slot_id") or prompt_plan.get("slot_id") or ""),
+        "slot_label": str(plan.get("slot_label") or ""),
+        "slot_family": str(plan.get("slot_family") or ""),
+        "role_label": str(plan.get("role_label") or role_spec["role_label"]),
+        "display_order": int(plan.get("display_order") or 0),
+        "aspect_ratio": str(plan.get("aspect_ratio") or "1:1"),
+        "background_mode": str(plan.get("background_mode") or role_spec["background_mode"]),
+        "text_policy": text_policy,
+        "composition_hint": str(plan.get("composition_hint") or role_spec["composition_hint"]),
+        "visual_structure": str(plan.get("visual_structure") or prompt_plan.get("visual_structure") or ""),
+        "copy_density": str(plan.get("copy_density") or prompt_plan.get("copy_density") or ""),
+        "proof_mode": str(plan.get("proof_mode") or prompt_plan.get("proof_mode") or ""),
+        "scene_mode": str(plan.get("scene_mode") or prompt_plan.get("scene_mode") or ""),
+        "emphasis_style": str(plan.get("emphasis_style") or prompt_plan.get("emphasis_style") or ""),
+        "blocks": pipeline.composed.blocks,
+        "copy_blocks": pipeline.sanitized.copy_blocks,
+        "copy_blocks_attribution": prompt_plan.get("copy_blocks_attribution") or plan.get("copy_blocks_attribution") or {},
+        "raw_prompt_override": pipeline.normalized.raw_prompt_override or None,
+        "applied_preset_id": prompt_plan.get("applied_preset_id") or plan.get("applied_preset_id"),
+        "strategy_fields_used": strategy_fields_used,
+        "prompt_sections_used": pipeline.composed.prompt_sections_used,
+        "copy_policy_applied": pipeline.visible_copy.copy_policy_applied,
+        "slot_guardrails": _normalized_text_entries(prompt_plan.get("slot_guardrails")),
+        "reference_image_ids": [str(value) for value in prompt_plan.get("reference_image_ids", []) if str(value)],
+        "reference_slots": [str(value) for value in prompt_plan.get("reference_slots", []) if str(value)],
+        "must_keep": _normalized_text_entries(prompt_plan.get("must_keep")),
+        "must_avoid": _normalized_text_entries(prompt_plan.get("must_avoid")),
+        "planner_source": str(prompt_plan.get("planner_source") or "rule_based"),
+        "planner_base": _clean_text(prompt_plan.get("final_prompt_base")),
+        "expression_mode": str(prompt_plan.get("expression_mode") or plan.get("expression_mode") or ""),
+        "expression_label": str(prompt_plan.get("expression_label") or plan.get("expression_label") or ""),
+        "brand_memory_trace": [
+            item
+            for item in strategy_preview.get("brand_memory_trace", [])
+            if isinstance(item, dict) and str(item.get("slot_id") or "").strip() == str(plan.get("slot_id") or prompt_plan.get("slot_id") or "")
+        ],
+        "rule_modules_used": [str(item) for item in prompt_plan.get("rule_modules_used", []) if str(item).strip()],
+        "platform_overlay": prompt_plan.get("platform_overlay"),
+        "risk_flags": [str(item) for item in prompt_plan.get("risk_flags", []) if str(item).strip()],
+        "selling_point_binding": prompt_plan.get("selling_point_binding") or {},
+        "truth_contract": prompt_plan.get("truth_contract") or {},
+        "resolved_constraints": _normalized_text_entries(prompt_plan.get("resolved_constraints")),
+        "copy_safety_notes": pipeline.sanitized.copy_safety_notes,
+        "instruction_intents": [k for k, _ in pipeline.composed.instruction_intents] if pipeline.composed.instruction_intents else [],
+        "sanitized_fields": pipeline.sanitized.sanitized_fields,
+        "final_prompt": pipeline.final_prompt,
+    }

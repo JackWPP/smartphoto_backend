@@ -1,56 +1,93 @@
+from app.services.copy_resolution import COPY_META_KEY, parameter_snapshot_to_copy_attribution
 from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy
 
 
 def test_apply_parameter_snapshot_to_copy_overwrite_syncs_legacy_fields():
     confirmed_copy = {
-        "product_name": "空气净化器",
-        "hero_scene": "卧室床头",
-        "usage_scenes": "旧卧室场景",
-        "core_selling_points": ["旧卖点"],
-        "selling_points": "旧卖点",
-        "key_parameters": [{"key": "old", "label": "旧参数", "value": "1", "unit": "项"}],
-        "specs": "旧参数 1项",
-        "product_advantages": ["旧优势"],
+        "product_name": "Air purifier",
+        "hero_scene": "bedroom setup",
+        "usage_scenes": "old usage scene",
+        "core_selling_points": ["old point"],
+        "selling_points": "old point",
+        "key_parameters": [{"key": "old", "label": "Old Param", "value": "1", "unit": "pc"}],
+        "specs": "Old Param 1pc",
+        "product_advantages": ["old advantage"],
     }
     parameter_snapshot = {
-        "hero_scene": "宠物家庭沙发旁净化",
-        "core_selling_points": ["宠物浮毛过滤", "过敏防护"],
+        "hero_scene": "family sofa corner",
+        "core_selling_points": ["pet hair filtration", "allergy protection"],
         "key_parameters": [{"key": "cadr", "label": "CADR", "value": "500", "unit": "m3/h"}],
-        "product_advantages": ["低噪陪伴"],
+        "product_advantages": ["quiet companionship"],
+        "feature_highlights": ["premium look", "clean composition"],
     }
 
     updated = apply_parameter_snapshot_to_copy(confirmed_copy, parameter_snapshot, overwrite=True)
 
-    assert updated["hero_scene"] == "宠物家庭沙发旁净化"
-    assert updated["usage_scenes"] == "宠物家庭沙发旁净化"
-    assert updated["core_selling_points"] == ["宠物浮毛过滤", "过敏防护"]
-    assert updated["selling_points"] == "宠物浮毛过滤\n过敏防护"
+    assert updated["hero_scene"] == "family sofa corner"
+    assert updated["usage_scenes"] == "family sofa corner"
+    assert updated["core_selling_points"] == ["pet hair filtration", "allergy protection"]
+    assert updated["selling_points"] == "pet hair filtration\nallergy protection"
     assert updated["key_parameters"][0]["label"] == "CADR"
     assert updated["specs"] == "CADR 500m3/h"
+    assert updated["style_custom"] == "premium look，clean composition"
+    assert updated[COPY_META_KEY]["hero_scene"]["source"] == "parameter_primary"
+    assert updated[COPY_META_KEY]["style_custom"]["source"] == "parameter_highlight_style_fallback"
 
 
 def test_apply_parameter_snapshot_to_copy_non_overwrite_only_backfills_empty_legacy_fields():
     confirmed_copy = {
-        "product_name": "空气净化器",
-        "hero_scene": "客厅角落净化",
-        "usage_scenes": "已有 legacy 场景",
-        "core_selling_points": ["静音净化"],
-        "selling_points": "已有 legacy 卖点",
+        "product_name": "Air purifier",
+        "hero_scene": "living room purifier",
+        "usage_scenes": "existing legacy scene",
+        "core_selling_points": ["quiet purification"],
+        "selling_points": "existing legacy points",
         "key_parameters": [{"key": "cadr", "label": "CADR", "value": "300", "unit": "m3/h"}],
-        "specs": "已有 legacy 参数",
+        "specs": "existing legacy specs",
         "product_advantages": [],
     }
     parameter_snapshot = {
-        "hero_scene": "宠物家庭沙发旁净化",
-        "core_selling_points": ["宠物浮毛过滤"],
+        "hero_scene": "family sofa corner",
+        "core_selling_points": ["pet hair filtration"],
         "key_parameters": [{"key": "cadr", "label": "CADR", "value": "500", "unit": "m3/h"}],
-        "product_advantages": ["低噪陪伴"],
+        "product_advantages": ["quiet companionship"],
     }
 
     updated = apply_parameter_snapshot_to_copy(confirmed_copy, parameter_snapshot, overwrite=False)
 
-    assert updated["hero_scene"] == "客厅角落净化"
-    assert updated["usage_scenes"] == "已有 legacy 场景"
-    assert updated["core_selling_points"] == ["静音净化"]
-    assert updated["selling_points"] == "已有 legacy 卖点"
-    assert updated["specs"] == "已有 legacy 参数"
+    assert updated["hero_scene"] == "living room purifier"
+    assert updated["usage_scenes"] == "existing legacy scene"
+    assert updated["core_selling_points"] == ["quiet purification"]
+    assert updated["selling_points"] == "existing legacy points"
+    assert updated["specs"] == "existing legacy specs"
+    assert updated["product_advantages"] == ["quiet companionship"]
+    assert updated[COPY_META_KEY]["product_advantages"][0]["source"] == "parameter_primary"
+
+
+def test_parameter_snapshot_to_copy_attribution_marks_primary_and_inferred_sources():
+    attribution = parameter_snapshot_to_copy_attribution(
+        {
+            "hero_scene": "desk setup",
+            "core_selling_points": ["fast cooling"],
+            "inferred_core_selling_points": ["energy saving"],
+            "key_parameters": [{"key": "power", "label": "Power", "value": "20", "unit": "W"}],
+            "inferred_key_parameters": [{"key": "noise", "label": "Noise", "value": "30", "unit": "dB"}],
+            "product_advantages": ["compact body"],
+            "inferred_advantages": ["easy storage"],
+            "feature_highlights": ["minimal style"],
+        }
+    )
+
+    assert attribution["hero_scene"]["source"] == "parameter_primary"
+    assert [item["source"] for item in attribution["core_selling_points"]] == [
+        "parameter_primary",
+        "parameter_inferred",
+    ]
+    assert [item["source"] for item in attribution["key_parameters"]] == [
+        "parameter_primary",
+        "parameter_inferred",
+    ]
+    assert [item["source"] for item in attribution["product_advantages"]] == [
+        "parameter_primary",
+        "parameter_inferred",
+    ]
+    assert attribution["style_custom"]["source"] == "parameter_highlight_style_fallback"

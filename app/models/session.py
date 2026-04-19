@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -11,6 +11,8 @@ class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "sessions"
 
     service_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
+    brand_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("brands.id"), nullable=True, index=True)
+    brand_memory_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     guest_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="created", index=True)

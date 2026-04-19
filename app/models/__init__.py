@@ -1,5 +1,9 @@
 from app.models.asset import AssetModel
 from app.models.asset_feedback import AssetFeedbackModel
+from app.models.brand import BrandModel
+from app.models.brand_memory_evidence import BrandMemoryEvidenceModel
+from app.models.brand_memory_item import BrandMemoryItemModel
+from app.models.brand_profile import BrandProfileModel
 from app.models.category_catalog import CategoryCatalogModel
 from app.models.credit_transaction import CreditTransactionModel
 from app.models.credit_wallet import CreditWalletModel
@@ -32,6 +36,10 @@ __all__ = [
     "JobEventModel",
     "AssetModel",
     "CategoryCatalogModel",
+    "BrandModel",
+    "BrandProfileModel",
+    "BrandMemoryItemModel",
+    "BrandMemoryEvidenceModel",
     "PromptPresetModel",
     "SessionPromptOverrideModel",
     "IdempotencyRecordModel",

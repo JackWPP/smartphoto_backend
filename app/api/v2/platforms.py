@@ -5,11 +5,8 @@ from app.core.response import success_response
 from app.db.session import get_db
 from app.schemas.common import APIResponse, OPENAPI_ERROR_RESPONSES
 from app.schemas.platforms import PlatformListData
-from app.services.main_gallery_rules import (
-    expression_metadata,
-    get_main_gallery_slot_blueprints,
-)
 from app.services.platforms import list_platforms
+from app.services.rule_resolution import resolve_main_expression_metadata, resolve_main_slot_rules
 
 router = APIRouter(prefix="/platforms", tags=["platforms"])
 
@@ -37,7 +34,7 @@ def list_expression_modes(
     platform_id: str,
     db: Session = Depends(get_db),
 ) -> dict:
-    slot_blueprints = get_main_gallery_slot_blueprints(platform_id, db=db)
+    slot_blueprints = [dict(rule.slot_blueprint) for rule in resolve_main_slot_rules(platform_id, db=db)]
     result = []
     for slot in slot_blueprints:
         slot_id = str(slot.get("slot_id") or slot.get("compat_role") or "")
@@ -46,7 +43,7 @@ def list_expression_modes(
             "slot_id": slot_id,
             "slot_label": str(slot.get("slot_label") or slot.get("role_label") or slot_id),
             "candidates": [
-                expression_metadata(mode, db=db, platform_id=platform_id)
+                resolve_main_expression_metadata(mode, db=db, platform_id=platform_id)
                 for mode in candidates
             ],
         })
