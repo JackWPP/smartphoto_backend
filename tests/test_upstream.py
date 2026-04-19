@@ -667,6 +667,87 @@ def test_llm_router_request_json_retries_rate_limit(monkeypatch):
     assert router._consume_retry_meta()["rate_limit_retry_count"] == 2
 
 
+def test_llm_router_posts_doubao_text_route(monkeypatch):
+    router = LLMRouter(
+        Settings(
+            doubao_api_base="https://ark.example.com/api/v3",
+            doubao_api_key="doubao-key",
+            doubao_planner_model="doubao-fast",
+            llm_route_main_planner="doubao_text",
+        )
+    )
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": "{\"prompt_plan\": []}"}}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, method, url, headers=None, json=None):
+            captured["method"] = method
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.llm_router.httpx.Client", FakeClient)
+
+    result = router.complete_json_with_meta(
+        task="main_planner",
+        messages=[{"role": "user", "content": "return json"}],
+        error_key="upstream_llm_error",
+    )
+
+    assert captured["headers"]["Authorization"] == "Bearer doubao-key"
+    assert captured["json"]["model"] == "doubao-fast"
+    assert captured["url"] == "https://ark.example.com/api/v3/responses"
+    assert captured["json"]["text"] == {"format": {"type": "json_object"}}
+    assert captured["json"]["input"][0]["content"][0] == {"type": "input_text", "text": "return json"}
+    assert result["meta"]["provider"] == "doubao"
+    assert result["meta"]["route"] == "doubao_text"
+    assert result["meta"]["planner_ms"] >= 0
+
+
+def test_llm_router_doubao_planner_falls_back_when_unconfigured(monkeypatch):
+    router = LLMRouter(
+        Settings(
+            whatai_api_key="whatai-key",
+            whatai_planner_light_model="gemini-3-flash-preview",
+            llm_route_main_planner="doubao_text",
+            planner_fallback_route="whatai_gemini",
+        )
+    )
+
+    def fake_post(payload, error_key, *, route):
+        assert route == "whatai_gemini"
+        return {"choices": [{"message": {"content": "{\"prompt_plan\": []}"}}]}
+
+    monkeypatch.setattr(router, "_post_chat_json", fake_post)
+
+    result = router.complete_json_with_meta(
+        task="main_planner",
+        messages=[{"role": "user", "content": "return json"}],
+        error_key="upstream_llm_error",
+    )
+
+    assert result["meta"]["provider"] == "whatai"
+    assert result["meta"]["planner_primary_provider"] == "doubao"
+    assert result["meta"]["planner_final_source"] == "fallback"
+    assert result["meta"]["planner_fallback_reason"] == "primary_unavailable"
+
+
 def test_extract_image_result_supports_nested_async_payload():
     client = WhataiClient()
 
@@ -1047,6 +1128,116 @@ def test_analyze_images_builds_inline_image_payload(monkeypatch):
     message_content = captured["messages"][0]["content"]
     assert any(part.get("type") == "image_url" for part in message_content)
     assert any("data:image/jpeg;base64," in part.get("image_url", {}).get("url", "") for part in message_content)
+
+
+def test_analyze_images_with_parameters_splits_combined_output(monkeypatch):
+    client = WhataiClient()
+    monkeypatch.setattr(client.settings, "whatai_api_key", "test-key")
+    monkeypatch.setattr(client.settings, "whatai_analysis_model", "analysis-fast-model")
+    monkeypatch.setattr(client.settings, "llm_route_analysis", "whatai_gemini")
+    monkeypatch.setattr(
+        "app.services.upstream.list_active_category_catalog",
+        lambda db=None: [
+            {"name": "appliance", "aliases": [], "sample_keywords": [], "notes": "", "is_featured": True},
+            {"name": "dehumidifier", "aliases": [], "sample_keywords": [], "notes": "", "is_featured": True},
+            {"name": "air_purifier", "aliases": [], "sample_keywords": [], "notes": "", "is_featured": True},
+        ],
+    )
+    calls = {"count": 0}
+
+    def fake_complete_json_with_meta(*, task, messages, error_key, temperature=0.2, model=None, **_kwargs):
+        calls["count"] += 1
+        return {
+            "result": {
+                "analysis_snapshot": {
+                    "recognized_product": {"product_name": "dehumidifier", "category": "appliance", "image_type": "product", "confidence": 92},
+                    "image_assessment": {"summary": "clear", "quality_score": 90},
+                    "missing_views": ["side"],
+                    "suggestions": [],
+                    "copy_draft": {"headline": "dehumidifier", "usage_scenes": "wardrobe"},
+                    "key_parameters": [{"key": "tank", "label": "tank", "value": "1.2", "unit": "L"}],
+                    "suggested_styles": ["clean"],
+                    "reference_summary": {
+                        "shape": "box",
+                        "colors": "white",
+                        "materials": "plastic",
+                        "structures": "water tank",
+                        "must_keep": "tank window",
+                        "proportion_note": "compact",
+                        "control_panel_note": "top button",
+                        "transparent_parts_note": "tank window",
+                        "structure_anchor_points": "front tank",
+                        "do_not_move_features": "top button",
+                        "scene_fit_notes": "wardrobe",
+                    },
+                    "category_candidates": [
+                        {"category": "appliance", "confidence": 92, "reason": "visible product"},
+                        {"category": "dehumidifier", "confidence": 80, "reason": "tank window"},
+                        {"category": "air_purifier", "confidence": 15, "reason": "similar body"},
+                    ],
+                    "scene_tags": ["wardrobe"],
+                    "supplement_image_recommendations": [
+                        {
+                            "slot_type": "side",
+                            "label": "side",
+                            "reason": "show depth",
+                            "priority": 1,
+                            "upload_goal": "show side structure",
+                            "must_show": "body depth",
+                            "framing_hint": "side angle",
+                            "example_caption": "side view",
+                        }
+                    ],
+                    "detected_view_slots": ["front"],
+                    "evidence_scores": {"structure": 80, "proportion": 80, "scene": 80, "text": 80},
+                    "risk_flags": ["transparent_part"],
+                    "selling_point_entities": ["tank window"],
+                },
+                "parameter_snapshot": {
+                    "relevance_status": "valid",
+                    "hero_scene": "wardrobe",
+                    "core_selling_points": ["visible tank"],
+                    "key_parameters": [{"key": "tank", "label": "tank", "value": "1.2", "unit": "L"}],
+                    "product_advantages": ["compact"],
+                    "feature_highlights": ["water window"],
+                    "source_mode": "analysis_only",
+                    "evidence_priority": "analysis_then_copy",
+                    "evidence_summary": [{"source_type": "analysis", "summary": "from images", "priority": 1}],
+                },
+            },
+            "meta": {
+                "provider": "whatai",
+                "model": "analysis-fast-model",
+                "prompt_version": "combined-test",
+                "repair_round": 0,
+                "source": "primary",
+            },
+        }
+
+    monkeypatch.setattr(client.llm_router, "complete_json_with_meta", fake_complete_json_with_meta)
+    monkeypatch.setattr(client.llm_router, "is_available", lambda task: True)
+    image = LoadedReferenceImage(
+        "img-front",
+        "front",
+        1,
+        "/storage/front.jpg",
+        100,
+        100,
+        "image/jpeg",
+        100,
+        "front.jpg",
+        Path("front.jpg"),
+        b"front-image",
+    )
+
+    result = client.analyze_images_with_parameters([image], "temu", confirmed_copy={"product_name": "dehumidifier"})
+
+    assert calls["count"] == 1
+    assert result["analysis_snapshot"]["recognized_product"]["product_name"] == "dehumidifier"
+    assert result["analysis_snapshot"]["analysis_source"] == "llm"
+    assert result["parameter_snapshot"]["hero_scene"] == "wardrobe"
+    assert result["parameter_snapshot"]["provider"] == "whatai"
+    assert result["parameter_snapshot"]["model"] == "analysis-fast-model"
 
 
 def test_optimized_data_uri_downsizes_large_reference_images():

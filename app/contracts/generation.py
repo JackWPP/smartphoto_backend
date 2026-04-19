@@ -39,6 +39,10 @@ class MainGenerationSnapshot(ContractModel):
     rule_modules_used: list[str] = Field(default_factory=list)
     resolved_constraints: list[str] = Field(default_factory=list)
     platform_overlay: PlatformOverlay | dict[str, Any] | None = None
+    brand_memory_enabled: bool | None = None
+    brand_memory_applied: bool | None = None
+    brand_memory_item_ids: list[str] = Field(default_factory=list)
+    brand_memory_trace: list[dict[str, Any]] = Field(default_factory=list)
     timing: dict[str, Any] = Field(default_factory=dict)
     download_retry_count: int | None = None
     download_rescued: bool | None = None

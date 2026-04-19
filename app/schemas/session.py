@@ -286,6 +286,10 @@ class StrategyPreviewRequest(BaseModel):
         default=None,
         description="Step 5 额外策略指令，例如“白底图更标准，主图更像参考图”。",
     )
+    brand_memory_enabled: bool | None = Field(
+        default=None,
+        description="brand memory toggle for current strategy preview",
+    )
     slot_preferences: list[dict[str, Any]] = Field(
         default_factory=list,
         description="可选的主图槽位偏好。每项包含 slot_id/expression_mode/locked。",
@@ -373,6 +377,7 @@ class PromptPreviewItem(BaseModel):
     planner_base: str | None = Field(default=None, description="当前槽位的基础生成目标。")
     expression_mode: str | None = Field(default=None, description="当前槽位的表达方式。")
     expression_label: str | None = Field(default=None, description="表达方式名称。")
+    brand_memory_trace: list[dict[str, Any]] = Field(default_factory=list, description="brand memory trace for this prompt item")
     rule_modules_used: list[str] = Field(default_factory=list, description="本次 prompt 组合到的规则模块列表。")
     platform_overlay: dict[str, Any] | None = Field(default=None, description="平台 overlay 元数据。")
     resolved_constraints: list[str] = Field(default_factory=list, description="本次 prompt 的最终约束列表。")
@@ -402,6 +407,10 @@ class PromptPreviewLatestAsset(BaseModel):
 class PromptPreviewData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     active_platform_id: str | None = Field(default=None, description="当前生效平台。")
+    brand_id: str | None = Field(default=None, description="bound brand id")
+    brand_memory_enabled: bool = Field(default=False, description="brand memory enabled")
+    brand_memory_applied: bool = Field(default=False, description="brand memory applied")
+    brand_memory_trace: list[dict[str, Any]] = Field(default_factory=list, description="brand memory trace")
     hero_scene: str = Field(default="", description="当前策略使用的首图场景。")
     core_selling_points: list[str] = Field(default_factory=list, description="当前策略使用的核心卖点列表。")
     key_parameters: list[dict[str, Any]] = Field(default_factory=list, description="当前策略使用的核心参数列表。")
@@ -496,6 +505,7 @@ class DetailPromptPreviewData(BaseModel):
 
 class GenerateGalleryRequest(BaseModel):
     instruction: str | None = Field(default=None, description="本轮整组生图附加指令。")
+    brand_memory_enabled: bool | None = Field(default=None, description="brand memory toggle for generation")
     slot_ids: list[str] = Field(
         default_factory=list,
         description="可选的主图槽位列表。为空时生成整组；传值时只生成指定槽位。",
@@ -650,6 +660,8 @@ class SessionSnapshotData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     status: str = Field(description="当前 session 状态。")
     current_step: int = Field(description="当前步骤号。")
+    brand_id: str | None = Field(default=None, description="bound brand id")
+    brand_memory_enabled: bool = Field(default=False, description="brand memory enabled")
     selected_platform_ids: list[str] = Field(description="当前选中的平台列表。")
     active_platform_id: str | None = Field(default=None, description="当前生效平台。")
     analysis_snapshot: dict[str, Any] | None = Field(default=None, description="分析结果快照。")

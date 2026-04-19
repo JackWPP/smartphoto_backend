@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
+import hashlib
 import tempfile
 import time
 from collections.abc import Iterable
@@ -159,6 +161,70 @@ def _parameter_attachments(db: Session, session_id: str) -> list[ParameterAttach
         .order_by(ParameterAttachmentModel.display_order.asc())
         .all()
     )
+
+
+def _parameter_input_image_ids(images: list[SessionImageModel]) -> list[str]:
+    return [str(image.id) for image in images]
+
+
+def _parameter_input_hash(images: list[SessionImageModel]) -> str:
+    payload = [
+        {
+            "id": image.id,
+            "slot_type": image.slot_type,
+            "display_order": image.display_order,
+            "source_url": image.source_url,
+            "width": image.width,
+            "height": image.height,
+            "mime_type": image.mime_type,
+            "file_size": image.file_size,
+        }
+        for image in images
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _mark_parameter_snapshot_fresh(
+    snapshot: dict[str, Any],
+    *,
+    session: SessionModel,
+    images: list[SessionImageModel],
+    source_stage: str,
+    source_job_id: str,
+) -> dict[str, Any]:
+    marked = dict(snapshot or {})
+    marked.update(
+        {
+            "source_stage": source_stage,
+            "analysis_version": session.analysis_version,
+            "input_image_ids": _parameter_input_image_ids(images),
+            "input_hash": _parameter_input_hash(images),
+            "parameter_source_job_id": source_job_id,
+        }
+    )
+    return marked
+
+
+def _parameter_snapshot_is_fresh(session: SessionModel, images: list[SessionImageModel]) -> bool:
+    snapshot = session.parameter_snapshot
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
+    if snapshot.get("source_stage") != "analysis_combined":
+        return False
+    if int(snapshot.get("analysis_version") or -1) != int(session.analysis_version or 0):
+        return False
+    return str(snapshot.get("input_hash") or "") == _parameter_input_hash(images)
+
+
+def _parameter_applied_copy_fields(confirmed_copy: dict[str, Any] | None) -> dict[str, Any]:
+    copy_data = confirmed_copy or {}
+    return {
+        "hero_scene": copy_data.get("hero_scene", ""),
+        "core_selling_points": copy_data.get("core_selling_points", []),
+        "key_parameters": copy_data.get("key_parameters", []),
+        "product_advantages": copy_data.get("product_advantages", []),
+    }
 
 
 def _copy_regenerate_source_text(current_copy: dict[str, Any], target: str) -> str:
@@ -378,8 +444,22 @@ def run_analysis_job(db: Session, job_id: str) -> None:
         load_ms,
     )
 
+    settings = get_settings()
     analyze_started_at = time.perf_counter()
-    snapshot = client.analyze_images(loaded_images, session.active_platform_id, db=db)
+    combined_result: dict[str, Any] | None = None
+    if settings.parameter_extraction_mode == "combined" and hasattr(client, "analyze_images_with_parameters"):
+        combined_result = client.analyze_images_with_parameters(
+            loaded_images,
+            session.active_platform_id,
+            confirmed_copy=_resolved_copy_for_session(db, session, include_parameter_snapshot=False),
+            db=db,
+        )
+        snapshot = combined_result.get("analysis_snapshot") if isinstance(combined_result, dict) else None
+        if not isinstance(snapshot, dict):
+            snapshot = client.analyze_images(loaded_images, session.active_platform_id, db=db)
+            combined_result = None
+    else:
+        snapshot = client.analyze_images(loaded_images, session.active_platform_id, db=db)
     analyze_ms = int((time.perf_counter() - analyze_started_at) * 1000)
     logger.info(
         "analysis_job upstream analysis completed: job_id=%s session_id=%s analyze_ms=%s",
@@ -392,11 +472,25 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     update_job_status(db, job, status="running", progress=80, stage="finalizing")
     append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 80, "stage": "finalizing"})
 
-    session.analysis_snapshot = snapshot
-    session.confirmed_copy = _apply_analysis_defaults_to_copy(session.confirmed_copy, snapshot)
-    refresh_session_search_cache(session)
     session.analysis_version = (session.analysis_version or 0) + 1
     session.analysis_updated_at = now_utc()
+    session.analysis_snapshot = snapshot
+    session.confirmed_copy = _apply_analysis_defaults_to_copy(session.confirmed_copy, snapshot)
+    parameter_snapshot = None
+    if isinstance(combined_result, dict) and isinstance(combined_result.get("parameter_snapshot"), dict):
+        parameter_snapshot = _mark_parameter_snapshot_fresh(
+            combined_result["parameter_snapshot"],
+            session=session,
+            images=images,
+            source_stage="analysis_combined",
+            source_job_id=job.id,
+        )
+        session.parameter_snapshot = parameter_snapshot
+        session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, parameter_snapshot, overwrite=True)
+        session.latest_parameter_job_id = job.id
+        session.strategy_preview = None
+        session.detail_strategy_preview = None
+    refresh_session_search_cache(session)
 
     ensure_session_transition(session.status, "analyzed")
     session.status = "analyzed"
@@ -409,6 +503,15 @@ def run_analysis_job(db: Session, job_id: str) -> None:
         "analysis_updated_at": session.analysis_updated_at.isoformat() if session.analysis_updated_at else None,
         "latest_analysis_job_id": session.latest_analysis_job_id,
     }
+    if parameter_snapshot is not None:
+        result_payload.update(
+            {
+                "parameter_snapshot": parameter_snapshot,
+                "parameter_source_job_id": job.id,
+                "latest_parameter_job_id": session.latest_parameter_job_id,
+                "applied_copy_fields": _parameter_applied_copy_fields(session.confirmed_copy),
+            }
+        )
     update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
     logger.info(
@@ -434,6 +537,27 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
     image_attachments = [attachment for attachment in attachments if attachment.mime_type.startswith("image/")]
+    if get_settings().parameter_extraction_mode == "combined" and not attachments and _parameter_snapshot_is_fresh(session, session_images):
+        snapshot = session.parameter_snapshot or {}
+        session.latest_parameter_job_id = job.id
+        session.current_step = max(session.current_step, 3)
+        update_job_status(
+            db,
+            job,
+            status="succeeded",
+            progress=100,
+            stage="done",
+            result_payload={
+                "parameter_snapshot": snapshot,
+                "reused_parameter_snapshot": True,
+                "parameter_source_job_id": snapshot.get("parameter_source_job_id"),
+                "applied_copy_fields": _parameter_applied_copy_fields(session.confirmed_copy),
+                "overwrite_mode": "replace_all",
+            },
+        )
+        append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+        return
+
     loaded_product_images = load_reference_images(session_images, storage=storage, max_edge=1280) if session_images else []
     loaded_images = load_reference_images(image_attachments, storage=storage, max_edge=1280) if image_attachments else []
     file_attachments = []
@@ -460,8 +584,14 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
         file_attachments=file_attachments,
     )
 
-    session.parameter_snapshot = snapshot
-    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, snapshot, overwrite=True)
+    session.parameter_snapshot = _mark_parameter_snapshot_fresh(
+        snapshot,
+        session=session,
+        images=session_images,
+        source_stage="parameter_extract",
+        source_job_id=job.id,
+    )
+    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
     session.latest_parameter_job_id = job.id
     session.current_step = max(session.current_step, 3)
     session.strategy_preview = None
@@ -475,13 +605,10 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
         progress=100,
         stage="done",
         result_payload={
-            "parameter_snapshot": snapshot,
-            "applied_copy_fields": {
-                "hero_scene": session.confirmed_copy.get("hero_scene", ""),
-                "core_selling_points": session.confirmed_copy.get("core_selling_points", []),
-                "key_parameters": session.confirmed_copy.get("key_parameters", []),
-                "product_advantages": session.confirmed_copy.get("product_advantages", []),
-            },
+            "parameter_snapshot": session.parameter_snapshot,
+            "reused_parameter_snapshot": False,
+            "parameter_source_job_id": job.id,
+            "applied_copy_fields": _parameter_applied_copy_fields(session.confirmed_copy),
             "overwrite_mode": "replace_all",
         },
     )
@@ -672,6 +799,7 @@ def _dispatch_quality_review(
         assets=assets,
         create_job_fn=create_job,
         append_job_event_fn=append_job_event,
+        settings=get_settings(),
     )
 
 

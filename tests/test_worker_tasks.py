@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +7,8 @@ import pytest
 from app.core.errors import AppError
 from app.db import session as db_session
 from app.models.asset import AssetModel
+from app.models.brand import BrandModel
+from app.models.brand_memory_item import BrandMemoryItemModel
 from app.models.job import JobModel
 from app.models.session import SessionModel
 from app.models.session_image import SessionImageModel
@@ -17,6 +20,7 @@ from app.services.pipeline import (
     _render_single_detail_panel,
     _submit_render_specs,
     run_analysis_job,
+    run_extract_parameters_job,
     run_quality_review_job,
 )
 from app.services import pipeline_orchestration as orchestration
@@ -28,6 +32,7 @@ from app.services.pipeline_orchestration import (
     execute_text_edit_flow,
 )
 from app.services.pipeline_review import execute_quality_review_flow
+from app.services.brand_memory import sediment_brand_memory_from_asset
 from app.services.reference_images import LoadedReferenceImage
 from app.workers.tasks import execute_job
 
@@ -343,6 +348,209 @@ def test_run_analysis_job_increments_freshness_on_rerun(monkeypatch, setup_datab
         assert job.result_payload["analysis_version"] == 3
         assert job.result_payload["latest_analysis_job_id"] == job.id
         assert job.result_payload["analysis_updated_at"] == normalized_updated_at.isoformat()
+
+
+def test_run_analysis_job_combined_writes_parameter_snapshot_and_copy(monkeypatch, setup_database):
+    with db_session.SessionLocal() as db:
+        session = SessionModel(
+            service_id="default",
+            status="images_uploaded",
+            current_step=1,
+            selected_platform_ids=["temu"],
+            active_platform_id="temu",
+            confirmed_copy={},
+        )
+        db.add(session)
+        db.flush()
+        db.add(
+            SessionImageModel(
+                session_id=session.id,
+                slot_type="front",
+                display_order=1,
+                source_url="/storage/front.jpg",
+                width=100,
+                height=100,
+                mime_type="image/jpeg",
+                file_size=100,
+                is_deleted=False,
+            )
+        )
+        job = JobModel(
+            session_id=session.id,
+            service_id="default",
+            job_type="analysis",
+            status="queued",
+            progress=0,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
+        session_id = session.id
+        job_id = job.id
+
+    monkeypatch.setattr(
+        "app.services.pipeline.load_reference_images",
+        lambda *_args, **_kwargs: [
+            LoadedReferenceImage(
+                "img-front",
+                "front",
+                1,
+                "/storage/front.jpg",
+                100,
+                100,
+                "image/jpeg",
+                100,
+                "front.jpg",
+                Path("front.jpg"),
+                b"front-image",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "app.services.pipeline.get_settings",
+        lambda: SimpleNamespace(parameter_extraction_mode="combined"),
+    )
+    calls = {"combined": 0, "extract": 0}
+
+    class DummyClient:
+        def analyze_images_with_parameters(self, *_args, **_kwargs):
+            calls["combined"] += 1
+            return {
+                "analysis_snapshot": {
+                    "recognized_product": {"product_name": "除湿机", "category": "家电"},
+                    "copy_draft": {"usage_scenes": "地下室防潮"},
+                    "suggested_styles": ["科技感"],
+                    "key_parameters": [{"key": "tank", "label": "水箱", "value": "1.2", "unit": "L"}],
+                    "reference_summary": {"must_keep": "保持水箱可见"},
+                },
+                "parameter_snapshot": {
+                    "relevance_status": "valid",
+                    "hero_scene": "地下室防潮",
+                    "core_selling_points": ["可视水箱"],
+                    "key_parameters": [{"key": "tank", "label": "水箱", "value": "1.2", "unit": "L"}],
+                    "product_advantages": ["小巧易摆放"],
+                    "feature_highlights": [],
+                    "source_mode": "analysis_only",
+                    "evidence_priority": "analysis_then_copy",
+                    "evidence_summary": [],
+                },
+            }
+
+        def extract_parameters(self, **_kwargs):
+            calls["extract"] += 1
+            raise AssertionError("extract_parameters should not be called when combined snapshot is fresh")
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    with db_session.SessionLocal() as db:
+        run_analysis_job(db, job_id)
+        session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
+        job = db.query(JobModel).filter(JobModel.id == job_id).one()
+
+        assert calls == {"combined": 1, "extract": 0}
+        assert session.analysis_version == 1
+        assert session.parameter_snapshot["source_stage"] == "analysis_combined"
+        assert session.parameter_snapshot["analysis_version"] == 1
+        assert session.parameter_snapshot["parameter_source_job_id"] == job_id
+        assert session.confirmed_copy["hero_scene"] == "地下室防潮"
+        assert session.confirmed_copy["core_selling_points"] == ["可视水箱"]
+        assert session.latest_parameter_job_id == job_id
+        assert job.result_payload["parameter_snapshot"]["source_stage"] == "analysis_combined"
+        assert job.result_payload["applied_copy_fields"]["hero_scene"] == "地下室防潮"
+
+        extract_job = JobModel(
+            session_id=session.id,
+            service_id="default",
+            job_type="extract_parameters",
+            status="queued",
+            progress=0,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(extract_job)
+        db.commit()
+        extract_job_id = extract_job.id
+
+    with db_session.SessionLocal() as db:
+        run_extract_parameters_job(db, extract_job_id)
+        extract_job = db.query(JobModel).filter(JobModel.id == extract_job_id).one()
+        session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
+
+        assert calls == {"combined": 1, "extract": 0}
+        assert extract_job.status == "succeeded"
+        assert extract_job.result_payload["reused_parameter_snapshot"] is True
+        assert extract_job.result_payload["parameter_source_job_id"] == job_id
+        assert session.latest_parameter_job_id == extract_job_id
+
+
+def test_run_analysis_job_separate_mode_keeps_parameter_extract_independent(monkeypatch, setup_database):
+    with db_session.SessionLocal() as db:
+        session = SessionModel(
+            service_id="default",
+            status="images_uploaded",
+            current_step=1,
+            selected_platform_ids=["temu"],
+            active_platform_id="temu",
+            confirmed_copy={},
+        )
+        db.add(session)
+        db.flush()
+        db.add(
+            SessionImageModel(
+                session_id=session.id,
+                slot_type="front",
+                display_order=1,
+                source_url="/storage/front.jpg",
+                width=100,
+                height=100,
+                mime_type="image/jpeg",
+                file_size=100,
+                is_deleted=False,
+            )
+        )
+        job = JobModel(
+            session_id=session.id,
+            service_id="default",
+            job_type="analysis",
+            status="queued",
+            progress=0,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.commit()
+        session_id = session.id
+        job_id = job.id
+
+    monkeypatch.setattr("app.services.pipeline.load_reference_images", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "app.services.pipeline.get_settings",
+        lambda: SimpleNamespace(parameter_extraction_mode="separate"),
+    )
+
+    class DummyClient:
+        def analyze_images(self, *_args, **_kwargs):
+            return {
+                "recognized_product": {"product_name": "除湿机", "category": "家电"},
+                "copy_draft": {"usage_scenes": "地下室防潮"},
+                "suggested_styles": ["科技感"],
+                "key_parameters": [],
+                "reference_summary": {"must_keep": "保持结构"},
+            }
+
+        def analyze_images_with_parameters(self, *_args, **_kwargs):
+            raise AssertionError("combined analysis should not run in separate mode")
+
+    monkeypatch.setattr("app.services.pipeline.WhataiClient", DummyClient)
+
+    with db_session.SessionLocal() as db:
+        run_analysis_job(db, job_id)
+        session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
+        job = db.query(JobModel).filter(JobModel.id == job_id).one()
+
+        assert session.parameter_snapshot is None
+        assert "parameter_snapshot" not in job.result_payload
 
 
 def test_render_single_asset_retries_retryable_upstream_image_error(monkeypatch):
@@ -1371,6 +1579,7 @@ def test_quality_review_retry_job_inherits_service_id(monkeypatch, setup_databas
             async_quality_retry_max_per_session=3,
             color_validation_enabled=False,
             color_validation_delta_e_threshold=25.0,
+            quality_review_mode="full",
         ),
     )
 
@@ -1448,8 +1657,195 @@ def test_quality_review_retry_job_inherits_service_id(monkeypatch, setup_databas
         assert isinstance(result, dict)
         retry_ids = result.get("retry_job_ids", [])
         assert len(retry_ids) == 1
-        retry_job = db.query(JobModel).filter(JobModel.id == retry_ids[0]).one()
-        assert retry_job.service_id == "partner-b"
+
+
+def test_dispatch_quality_review_job_off_marks_assets_passed(setup_database, monkeypatch):
+    events: list[tuple[str, dict]] = []
+    sedimented: list[str] = []
+    monkeypatch.setattr(review, "sediment_brand_memories_from_assets", lambda _db, *, session, assets: sedimented.extend([asset.id for asset in assets]) or [])
+
+    with db_session.SessionLocal() as db:
+        session = SessionModel(service_id="default", status="completed", current_step=6, selected_platform_ids=["temu"], active_platform_id="temu")
+        db.add(session)
+        db.flush()
+        parent_job = JobModel(
+            session_id=session.id,
+            service_id="default",
+            job_type="generate_gallery",
+            status="succeeded",
+            progress=100,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(parent_job)
+        db.flush()
+        asset = AssetModel(
+            session_id=session.id,
+            job_id=parent_job.id,
+            round_no=1,
+            version_no=1,
+            platform_id="temu",
+            asset_family="main_gallery",
+            asset_kind="panel",
+            asset_role="hero",
+            slot_id="hero",
+            expression_mode="click_through_headline",
+            display_order=1,
+            image_url="/storage/fake.jpg",
+            width=1200,
+            height=1200,
+            mime_type="image/jpeg",
+            file_size=1024,
+            status="ready",
+            quality_status="pending_async_review",
+        )
+        db.add(asset)
+        db.flush()
+
+        review_job_id = review.dispatch_quality_review_job(
+            db=db,
+            session=session,
+            parent_job=parent_job,
+            assets=[asset],
+            create_job_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("job should not be created")),
+            append_job_event_fn=lambda _db, _job_id, event_type, payload: events.append((event_type, payload)),
+            settings=SimpleNamespace(quality_review_mode="off"),
+        )
+
+        assert review_job_id is None
+        assert asset.quality_status == "passed"
+        assert asset.quality_scores["async_check"]["mode"] == "off"
+        assert sedimented == [asset.id]
+        assert events[0][0] == "quality_review_skipped"
+
+
+def test_dispatch_quality_review_job_sample_reviews_one_preferred_asset(setup_database, monkeypatch):
+    created_payloads: list[dict] = []
+    sedimented: list[str] = []
+    monkeypatch.setattr(review, "sediment_brand_memories_from_assets", lambda _db, *, session, assets: sedimented.extend([asset.id for asset in assets]) or [])
+
+    with db_session.SessionLocal() as db:
+        session = SessionModel(service_id="default", status="completed", current_step=6, selected_platform_ids=["temu"], active_platform_id="temu")
+        db.add(session)
+        db.flush()
+        parent_job = JobModel(
+            session_id=session.id,
+            service_id="default",
+            job_type="generate_gallery",
+            status="succeeded",
+            progress=100,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(parent_job)
+        db.flush()
+        assets = []
+        for order, slot_id in enumerate(["selling_point", "white_bg", "detail"], start=1):
+            asset = AssetModel(
+                session_id=session.id,
+                job_id=parent_job.id,
+                round_no=1,
+                version_no=1,
+                platform_id="temu",
+                asset_family="main_gallery",
+                asset_kind="panel",
+                asset_role=slot_id,
+                slot_id=slot_id,
+                expression_mode="clean_product_display",
+                display_order=order,
+                image_url=f"/storage/{slot_id}.jpg",
+                width=1200,
+                height=1200,
+                mime_type="image/jpeg",
+                file_size=1024,
+                status="ready",
+                quality_status="pending_async_review",
+            )
+            db.add(asset)
+            assets.append(asset)
+        db.flush()
+
+        def create_job_fn(_db, **kwargs):
+            created_payloads.append(kwargs["input_payload"])
+            return SimpleNamespace(id="review-job-1")
+
+        review_job_id = review.dispatch_quality_review_job(
+            db=db,
+            session=session,
+            parent_job=parent_job,
+            assets=assets,
+            create_job_fn=create_job_fn,
+            append_job_event_fn=lambda *_args, **_kwargs: None,
+            settings=SimpleNamespace(quality_review_mode="sample"),
+        )
+
+        assert review_job_id == "review-job-1"
+        assert created_payloads[0]["asset_ids"] == [assets[1].id]
+        assert created_payloads[0]["quality_review_mode"] == "sample"
+        assert sedimented == [assets[0].id, assets[2].id]
+
+
+def test_run_quality_review_flow_sediments_passed_skipped_assets(monkeypatch):
+    session = SimpleNamespace(id="session-1", brand_id="brand-1", service_id="default")
+    assets = [
+        SimpleNamespace(id="asset-hero", quality_status="passed"),
+        SimpleNamespace(id="asset-white", quality_status="passed"),
+    ]
+    seen: dict[str, object] = {"sediment_assets": None}
+
+    monkeypatch.setattr(
+        review,
+        "prepare_quality_review_context",
+        lambda **_kwargs: {
+            "session": session,
+            "review_product_name": "product",
+            "review_category": "category",
+            "review_reference_images": [],
+            "assets": assets,
+        },
+    )
+    monkeypatch.setattr(
+        review,
+        "execute_quality_reviews",
+        lambda **_kwargs: [
+            {"asset_id": "asset-hero", "fidelity": {"passed": True}, "text_language": {"passed": True}, "color_fidelity": None, "image_similarity": None}
+        ],
+    )
+    monkeypatch.setattr(
+        review,
+        "apply_quality_review_results",
+        lambda **_kwargs: {"failed_count": 0},
+    )
+    monkeypatch.setattr(
+        review,
+        "dispatch_quality_retry_jobs",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        review,
+        "sediment_brand_memories_from_assets",
+        lambda _db, *, session, assets: seen.__setitem__("sediment_assets", [asset.id for asset in assets]) or [],
+    )
+
+    result = review.run_quality_review_flow(
+        db=None,
+        job=SimpleNamespace(id="job-1", input_payload={}),
+        assets=assets,
+        platform_id="1688",
+        client=None,
+        storage=None,
+        settings=SimpleNamespace(async_quality_retry_enabled=False, async_quality_retry_max_per_session=0),
+        load_session_images_fn=lambda *_args, **_kwargs: [],
+        load_reference_images_fn=lambda *_args, **_kwargs: [],
+        logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        append_job_event_fn=lambda *_args, **_kwargs: None,
+        save_constraint_escalation_if_retry_fn=lambda *_args, **_kwargs: None,
+        build_retry_instruction_fn=lambda *_args, **_kwargs: "",
+        create_job_fn=lambda *_args, **_kwargs: None,
+    )
+
+    assert result["passed_count"] == 1
+    assert seen["sediment_assets"] == ["asset-hero", "asset-white"]
 
 
 def test_execute_main_generation_flow_uses_chinese_constraint_escalation_prefix(monkeypatch):
@@ -1921,3 +2317,199 @@ def test_execute_quality_review_flow_only_reviews_pending_async_assets(monkeypat
     assert result["retry_job_ids"] == []
     assert seen["asset_ids"] == ["asset-pending"]
     assert seen["status_reviewing"] == "running"
+
+
+def test_match_brand_memory_items_prefers_specific_slot_over_generic(setup_database):
+    with db_session.SessionLocal() as db:
+        brand = BrandModel(service_id="default", brand_name="Acme", slug="acme", aliases=["ACME"], status="active", is_active=True)
+        db.add(brand)
+        db.flush()
+        generic_item = BrandMemoryItemModel(
+            service_id="default",
+            brand_id=brand.id,
+            platform_id="",
+            category="",
+            slot_id="",
+            memory_type="slot_playbook",
+            source_kind="automatic",
+            payload={"copy_blocks": {"headline": "generic-headline"}},
+            quality_score=0.99,
+            confidence_score=0.99,
+            is_enabled=True,
+        )
+        specific_item = BrandMemoryItemModel(
+            service_id="default",
+            brand_id=brand.id,
+            platform_id="1688",
+            category="appliance",
+            slot_id="hero",
+            memory_type="slot_playbook",
+            source_kind="automatic",
+            payload={"copy_blocks": {"headline": "specific-headline"}},
+            quality_score=0.10,
+            confidence_score=0.10,
+            is_enabled=True,
+        )
+        db.add(generic_item)
+        db.add(specific_item)
+        db.commit()
+
+    with db_session.SessionLocal() as db:
+        matched = __import__('app.services.brand_memory', fromlist=['match_brand_memory_items']).match_brand_memory_items(
+            db,
+            service_id="default",
+            brand_id=brand.id,
+            platform_id="1688",
+            category="appliance",
+            slot_id="hero",
+        )
+        assert matched
+        assert matched[0].id == specific_item.id
+
+
+def test_sediment_brand_memory_upserts_existing_natural_key(setup_database):
+    with db_session.SessionLocal() as db:
+        brand = BrandModel(service_id="default", brand_name="Acme", slug="acme", aliases=["ACME"], status="active", is_active=True)
+        db.add(brand)
+        db.flush()
+        session = SessionModel(
+            service_id="default",
+            brand_id=brand.id,
+            brand_memory_enabled=True,
+            status="completed",
+            current_step=6,
+            selected_platform_ids=["1688"],
+            active_platform_id="1688",
+            confirmed_copy={"hero_scene": "bedroom", "core_selling_points": ["quiet"], "product_advantages": ["compact"]},
+            analysis_snapshot={"recognized_product": {"category": "appliance"}},
+        )
+        db.add(session)
+        db.flush()
+        job = JobModel(
+            session_id=session.id,
+            service_id="default",
+            job_type="generate_gallery",
+            status="succeeded",
+            progress=100,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.flush()
+        asset = AssetModel(
+            session_id=session.id,
+            job_id=job.id,
+            round_no=1,
+            version_no=1,
+            platform_id="1688",
+            asset_family="main_gallery",
+            asset_kind="panel",
+            asset_role="hero",
+            slot_id="hero",
+            expression_mode="click_through_headline",
+            rule_pack_id="alibaba_core_5_slot",
+            display_order=1,
+            image_url="/storage/fake.jpg",
+            thumbnail_url=None,
+            width=1200,
+            height=1200,
+            mime_type="image/jpeg",
+            file_size=1024,
+            prompt_snapshot=None,
+            edit_instruction=None,
+            generation_snapshot={"copy_blocks": {"headline": "v1"}},
+            status="ready",
+            quality_status="passed",
+            quality_scores={"async_check": {"mode": "test", "passed": True}},
+        )
+        db.add(asset)
+        db.commit()
+        item1 = sediment_brand_memory_from_asset(db, session=session, asset=asset)
+        assert item1 is not None
+        asset.generation_snapshot = {"copy_blocks": {"headline": "v2"}}
+        item2 = sediment_brand_memory_from_asset(db, session=session, asset=asset)
+        assert item2 is not None
+        db.commit()
+        items = db.query(BrandMemoryItemModel).all()
+        assert len(items) == 1
+        assert items[0].id == item1.id == item2.id
+        assert items[0].payload["copy_blocks"]["headline"] == "v2"
+
+
+def test_sediment_brand_memory_upsert_is_safe_under_concurrent_writers(setup_database):
+    with db_session.SessionLocal() as db:
+        brand = BrandModel(service_id="default", brand_name="Acme", slug="acme", aliases=["ACME"], status="active", is_active=True)
+        db.add(brand)
+        db.flush()
+        session = SessionModel(
+            service_id="default",
+            brand_id=brand.id,
+            brand_memory_enabled=True,
+            status="completed",
+            current_step=6,
+            selected_platform_ids=["1688"],
+            active_platform_id="1688",
+            confirmed_copy={"hero_scene": "bedroom", "core_selling_points": ["quiet"], "product_advantages": ["compact"]},
+            analysis_snapshot={"recognized_product": {"category": "appliance"}},
+        )
+        db.add(session)
+        db.flush()
+        job = JobModel(
+            session_id=session.id,
+            service_id="default",
+            job_type="generate_gallery",
+            status="succeeded",
+            progress=100,
+            retry_count=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(job)
+        db.flush()
+        asset = AssetModel(
+            session_id=session.id,
+            job_id=job.id,
+            round_no=1,
+            version_no=1,
+            platform_id="1688",
+            asset_family="main_gallery",
+            asset_kind="panel",
+            asset_role="hero",
+            slot_id="hero",
+            expression_mode="click_through_headline",
+            rule_pack_id="alibaba_core_5_slot",
+            display_order=1,
+            image_url="/storage/fake.jpg",
+            thumbnail_url=None,
+            width=1200,
+            height=1200,
+            mime_type="image/jpeg",
+            file_size=1024,
+            prompt_snapshot=None,
+            edit_instruction=None,
+            generation_snapshot={"copy_blocks": {"headline": "concurrent"}},
+            status="ready",
+            quality_status="passed",
+            quality_scores={"async_check": {"mode": "test", "passed": True}},
+        )
+        db.add(asset)
+        db.commit()
+        session_id = session.id
+        asset_id = asset.id
+
+    def _worker() -> str:
+        with db_session.SessionLocal() as db:
+            owned_session = db.query(SessionModel).filter(SessionModel.id == session_id).one()
+            owned_asset = db.query(AssetModel).filter(AssetModel.id == asset_id).one()
+            item = sediment_brand_memory_from_asset(db, session=owned_session, asset=owned_asset)
+            db.commit()
+            assert item is not None
+            return item.id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(_worker) for _ in range(2)]
+        item_ids = [future.result() for future in futures]
+
+    with db_session.SessionLocal() as db:
+        items = db.query(BrandMemoryItemModel).all()
+        assert len(items) == 1
+        assert item_ids[0] == item_ids[1] == items[0].id

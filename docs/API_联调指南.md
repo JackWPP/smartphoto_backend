@@ -156,7 +156,8 @@
   - `analysis_version` 只在 analysis job 成功落库新结果时递增
   - `analysis_updated_at` 只在 analysis job 成功落库新结果时更新
   - 当前实现会把 session 上传图片以内联图像内容的方式发给上游分析模型，不再只传文本
-  - 当前默认路由为：`analysis / 主图 planner / 详情页 planner / 参数提取 = WhatAI + Gemini`；OpenRouter 只保留给文本辅助任务或显式试模型
+  - 当前默认路由为：`analysis / 参数视觉提取 = WhatAI + Gemini`；`主图 planner / 详情页 planner / 参数补全 / 文本审查 = doubao_text`，planner 命中 `429/502/503/504/timeout` 或豆包未配置时会按 `PLANNER_FALLBACK_ROUTE=whatai_gemini` 降级。
+  - 豆包接入使用火山 Ark Responses API：`DOUBAO_API_BASE=https://ark.cn-beijing.volces.com/api/v3`，`DOUBAO_API_KEY` 或 `ARK_API_KEY`，默认模型示例为 `doubao-seed-2-0-pro-260215`。
   - `analysis_snapshot` 额外包含：
     - `analysis_source`
     - `category_candidates[{category,confidence,reason}]`
@@ -265,6 +266,12 @@
   - `GET /sessions/{session_id}/parameters`
   - `PUT /sessions/{session_id}/parameters`
   - `POST /sessions/{session_id}/parameters/complete` 仅保留兼容，不再是默认前端流程
+- Step2/Step3 LLM call compression:
+  - Default PARAMETER_EXTRACTION_MODE=combined: POST /sessions/{session_id}/analysis runs one visual LLM call and writes both analysis_snapshot and parameter_snapshot.
+  - Normal Step2+Step3 path is 1 LLM call; schema repair still allows one same-model retry, so the worst case is 2 calls.
+  - Combined parameters are marked with source_stage=analysis_combined, analysis_version, input_image_ids, input_hash, and parameter_source_job_id.
+  - A later POST /sessions/{session_id}/parameters/extract creates a compatible extract_parameters job, but if the combined snapshot is fresh it reuses it without calling upstream LLM and returns reused_parameter_snapshot=true in job.result_payload.
+  - If parameter attachments exist, or PARAMETER_EXTRACTION_MODE=separate, the old standalone parameter extraction LLM path is used.
 - 当前实现行为：
   - 提取 job_type 为 `extract_parameters`
   - Step 3 已收口为“单次调用的小型文案策划 Agent”，默认一次 `extract` 直接产出用户可编辑整页结果
@@ -337,6 +344,8 @@
   - `strategy_preview.input_hash` 与正式构建共享同一批已加载 reference images，避免重复读图
   - `POST /sessions/{session_id}/generations` 现在会优先复用已持久化且 `input_hash` 未变化的 `strategy_preview`，不会在 worker 里再次补跑 planner
   - planner 当前允许由 LLM 主导输出 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包只负责 guardrail 和 fallback
+  - 主图 planner 现在允许在同一次调用中返回 `copy_blocks/text_density/visual_emphasis/global_consistency_note`，后端会优先写入 `asset_plan/prompt_plan`；`LLM_ROUTE_MAIN_COPY_DESIGN` 默认继续 `disabled`，避免额外一轮文案设计调用。
+  - `strategy_preview` 会返回 `planner_ms/planner_fallback_reason`，用于对比豆包与 fallback 的实际耗时和失败原因。
   - `main copy design agent` 当前默认关闭，不再作为主图预览默认时延来源
   - `strategy_preview.prompt_plan[*]` 现在还会补充：
     - `risk_flags`
@@ -1027,3 +1036,62 @@ data: {"event":"job_succeeded","job_id":"..."}
 5. `GET /jobs/{job_id}` 或 `GET /jobs/{job_id}/events`
 6. `GET /sessions/{id}/detail-pages/results`
 7. `GET /sessions/{id}/detail-pages/download`
+
+## 2026-04-19 ???? Phase 1????
+
+### ??
+- ??????? `main_gallery`????????
+- ????? session ??????????????
+- ????????????????????????
+
+### ????
+- `PUT /sessions/{session_id}/brand`
+  - ????`brand_id: string | null`?`brand_memory_enabled: boolean`
+  - ????/???? session ????????? session ?????????
+  - ????????????? `strategy_preview`?
+
+### Session ????
+- `GET /sessions/{session_id}` ???
+  - `brand_id`
+  - `brand_memory_enabled`
+
+### Strategy Preview ??
+- `POST /sessions/{session_id}/strategy/preview` ??????`brand_memory_enabled: boolean | null`?
+- `strategy_preview` ???
+  - `brand_id`
+  - `brand_memory_enabled`
+  - `brand_memory_applied`
+  - `brand_memory_item_ids`
+  - `brand_memory_trace`
+- ????????? `strategy_preview`???????????? preview?
+- `input_hash` ??????????????????/?????????? preview?
+
+### Prompt Debug / Results ??
+- `POST /sessions/{session_id}/prompts/preview` ?????
+  - `brand_id`
+  - `brand_memory_enabled`
+  - `brand_memory_applied`
+  - `brand_memory_trace`
+- `prompts[*]` ???`brand_memory_trace`?
+- ?? `generation_snapshot` ???
+  - `brand_memory_enabled`
+  - `brand_memory_applied`
+  - `brand_memory_item_ids`
+  - `brand_memory_trace`
+- `GET /sessions/{session_id}/results.assets[*]` ???`brand_memory_trace`?
+
+### ??????
+- ?? `/api/admin/v1/brands*`?
+  - `GET /brands`
+  - `POST /brands`
+  - `PUT /brands/{brand_id}`
+  - `POST /brands/{brand_id}/archive|restore`
+  - `GET|PUT /brands/{brand_id}/profile`
+  - `GET /brands/{brand_id}/memory-items`
+  - `PUT /brands/{brand_id}/memory-items/{memory_item_id}`
+  - `GET /brands/{brand_id}/memory-items/{memory_item_id}/evidence`
+
+### ????
+- ????????????????? `quality_status=passed` ??????????????
+- `pending_async_review` ??????????
+- `brand_memory_items` ?? `(service_id, brand_id, platform_id, category, slot_id, memory_type, source_kind)` natural key ???

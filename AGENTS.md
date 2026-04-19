@@ -456,3 +456,23 @@
   - `scripts/native-deploy.sh` å‘å¸ƒå‰å¼ºåˆ¶æ‰§è¡ŒåŸç”Ÿé¢„æ£€ï¼Œåå°å‰ç«¯ä¾èµ–å®‰è£…ä¼˜å…ˆä½¿ç”¨ `npm ci`
   - é‡å†™ `docs/åŸç”Ÿéƒ¨ç½²æŒ‡å—.md` ä¸ `docs/åŸç”Ÿè¿ç»´æŒ‡å—.md` ä¸ºä¸»è¦ç”Ÿäº§ç»´æŠ¤æ–‡æ¡£
   - `docs/ç”Ÿäº§ä¸Šçº¿SOP.md` æ”¶å£ä¸ºæ ‡å‡†å‘å¸ƒæ€»å†Œï¼Œ`docs/è¿è¡Œä¸æ’éšœæ‰‹å†Œ.md` æ”¶å£ä¸ºé—®é¢˜å®šä½ç´¢å¼•ï¼Œ`Readme.md` ä¸ `AGENTS.md` åŒæ­¥æ˜ç¡®æ–‡æ¡£ä¼˜å…ˆçº§ä¸åŸç”Ÿä¼˜å…ˆåŸåˆ™
+- 2026-04-19 LLM Latency:
+  - ĞÂÔö `doubao_text` Â·ÓÉ£¬°´»ğÉ½ Ark Responses API `/responses` ½ÓÈë£¬Ö§³Ö `DOUBAO_API_KEY` Óë `ARK_API_KEY`£¬²¢±£Áô `openai_compatible_text` Í¨ÓÃÂ·ÓÉ
+  - ÊÓ¾õÖ÷Á´¼ÌĞø±£³Ö `analysis/parameter visual = WhatAI + Gemini`£»Ö÷Í¼ planner¡¢ÏêÇéÒ³ planner¡¢²ÎÊı²¹È«ÓëÎÄ±¾Éó²éÄ¬ÈÏ¿É×ß¶¹°ü£¬planner Ê§°Ü°´ `PLANNER_FALLBACK_ROUTE=whatai_gemini` ½µ¼¶
+  - Ö÷Í¼ planner Ö§³ÖÒ»´ÎĞÔ·µ»Ø `copy_blocks/text_density/visual_emphasis/global_consistency_note`£¬Ä¬ÈÏ²»ÔÙĞèÒªµ¥¶ÀÆôÓÃ `main_copy_design`
+  - `strategy_preview/detail_strategy_preview` Ôö¼Ó `planner_ms/planner_fallback_reason` ¹Û²â×Ö¶Î£¬±ãÓÚ¶Ô±È¶¹°üÓë fallback ºÄÊ±
+  - ĞÂÔö `QUALITY_REVIEW_MODE=off|sample|full`£¬Ä¬ÈÏ `sample`£¬Òì²½ÖÊ¼ì¿É³é¼ì»ò¹Ø±ÕÒÔ½µµÍºóÌ¨ LLM µ÷ÓÃÁ¿
+  - Í¬²½¸üĞÂ `.env.example`¡¢`.env.prod.example`¡¢API Áªµ÷Ö¸ÄÏ¡¢Agent Ğ­×÷Âß¼­¡¢ÔËĞĞÅÅÕÏÊÖ²áÓëÏà¹Ø»Ø¹é²âÊÔ
+- 2026-04-19 LLM Compression:
+  - Step2/Step3 Ä¬ÈÏÁ´Â·ĞÂÔö `PARAMETER_EXTRACTION_MODE=combined`£»`POST /api/v2/sessions/{session_id}/analysis` ÏÖ¿ÉÒ»´ÎĞ´Èë `analysis_snapshot + parameter_snapshot`
+  - `parameter_snapshot` ĞÂÔö `source_stage/analysis_version/input_image_ids/input_hash/parameter_source_job_id`£¬ÓÃÓÚ¸´ÓÃ freshness ÅĞ¶¨
+  - `POST /api/v2/sessions/{session_id}/parameters/extract` ÃüÖĞĞÂÏÊ combined ¿ìÕÕÊ±²»ÔÙµ÷ÓÃÉÏÓÎ LLM£¬¼æÈİ·µ»Ø³É¹¦ job Óë¸´ÓÃ±ê¼Ç
+  - ±£Áô `PARAMETER_EXTRACTION_MODE=separate` »ØÍË¿ª¹Ø£»ÓĞ¸½¼şÊ±¼ÌĞø×ß¶ÀÁ¢²ÎÊıÌáÈ¡Á´Â·
+
+- 2026-04-19 Brand Memory Phase 1:
+  - Added Phase 1 brand-memory core models and migration: brands / brand_profiles / brand_memory_items / brand_memory_evidence, plus sessions.brand_id / sessions.brand_memory_enabled
+  - Added session-level brand binding endpoint `PUT /api/v2/sessions/{session_id}/brand`
+  - Main-gallery strategy preview now accepts `brand_memory_enabled` and returns `brand_memory_applied / brand_memory_item_ids / brand_memory_trace`
+  - Prompt preview and main-gallery generation snapshot now expose brand-memory trace fields for debugging and result tracing
+  - Added admin brand management surface `/api/admin/v1/brands*` for brand CRUD, profile upsert, memory item enable/disable, and evidence inspection
+  - Brand memory now sediments only after assets reach `quality_status=passed`, including sample/off review paths, and uses a natural-key upsert to avoid duplicate rows under concurrency

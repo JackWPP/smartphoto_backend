@@ -60,6 +60,7 @@ DETAIL_STORY_BRIEF_KEYS = (
     "closing_cta",
 )
 ANALYSIS_PROMPT_VERSION = "analysis_v3_prompt_first"
+ANALYSIS_PARAMETER_COMBINED_PROMPT_VERSION = "analysis_parameter_combined_v1"
 MAIN_PLANNER_PROMPT_VERSION = "main_planner_v3_prompt_first"
 DETAIL_PLANNER_PROMPT_VERSION = "detail_planner_v4_prompt_first"
 PARAMETER_PROMPT_VERSION = "parameter_v2_prompt_first"
@@ -224,6 +225,9 @@ class WhataiClient:
                         "如果某个候选品类置信度低，请在 reason 中明确指出不确定原因。"
                         "不要输出思考过程、推理过程、内部规划标签或流程说明。"
                         "copy_draft 和 example_caption 必须像可直接交给用户编辑或继续生成的最终候选，不要输出中间想法。"
+                        "You may also return copy_blocks,text_density,visual_emphasis,global_consistency_note for each prompt_plan item. "
+                        "copy_blocks may contain headline,supporting,proof_lines,matrix_lines. "
+                        "These fields are final visible copy for the image, not internal reasoning or layout instructions. "
                         f"{_prompt_matrix_guardrail_text()}"
                         f"当前平台：{active_platform_id or 'temu'}。"
                         f"当前全局品类库：{json.dumps(catalog_prompt, ensure_ascii=False)}。"
@@ -250,6 +254,136 @@ class WhataiClient:
         merged["analysis_source"] = "fallback" if meta["source"] == "fallback" else "llm"
         merged.update(meta)
         return merged
+
+    def analyze_images_with_parameters(
+        self,
+        reference_images: list[LoadedReferenceImage] | list[str],
+        active_platform_id: str | None,
+        *,
+        confirmed_copy: dict[str, Any] | None = None,
+        db: Session | None = None,
+    ) -> dict[str, Any]:
+        normalized_images = [item for item in reference_images if isinstance(item, LoadedReferenceImage)]
+        category_catalog = list_active_category_catalog(db=db)
+        analysis_fallback = self._fake_analysis(active_platform_id, normalized_images, category_catalog=category_catalog)
+        parameter_fallback = self._fake_parameter_snapshot(
+            confirmed_copy or {},
+            analysis_fallback,
+            active_platform_id,
+            normalized_images,
+            [],
+            [],
+        )
+        fallback = {
+            "analysis_snapshot": analysis_fallback,
+            "parameter_snapshot": parameter_fallback,
+        }
+        if not normalized_images or not self.llm_router.is_available("analysis"):
+            meta = {
+                "provider": self.llm_router.provider_for_task("analysis"),
+                "model": self.llm_router.model_for_task("analysis"),
+                "prompt_version": ANALYSIS_PARAMETER_COMBINED_PROMPT_VERSION,
+                "repair_round": 0,
+                "source": "fallback",
+            }
+            analysis_fallback["analysis_source"] = "fallback"
+            analysis_fallback.update(meta)
+            parameter_fallback = sanitize_parameter_snapshot(parameter_fallback)
+            parameter_fallback.update(meta)
+            return {
+                "analysis_snapshot": analysis_fallback,
+                "parameter_snapshot": parameter_fallback,
+            }
+
+        catalog_prompt = [
+            {
+                "name": item["name"],
+                "aliases": item["aliases"],
+                "sample_keywords": item["sample_keywords"],
+                "is_featured": item["is_featured"],
+                "notes": item["notes"],
+                "confusion_pairs": item.get("confusion_pairs", []),
+            }
+            for item in category_catalog
+        ]
+        product_manifest = [image.to_manifest_item() for image in normalized_images]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "You are SmartPhoto's combined Step2/Step3 visual analysis agent. "
+                    "Return only one JSON object with exactly two top-level objects: analysis_snapshot and parameter_snapshot. "
+                    "Do not output markdown, explanations, reasoning steps, or internal planning notes. "
+                    "analysis_snapshot must satisfy the existing Step2 contract and include: recognized_product,image_assessment,"
+                    "missing_views,suggestions,copy_draft,key_parameters,suggested_styles,reference_summary,"
+                    "category_candidates,scene_tags,supplement_image_recommendations,detected_view_slots,"
+                    "evidence_scores,risk_flags,selling_point_entities,fidelity_tier,product_identity_anchor,"
+                    "component_registry,image_semantic_tags. "
+                    "recognized_product must include product_name,category,image_type,confidence. "
+                    "category_candidates must contain at least 3 items with category,confidence,reason, ordered by confidence. "
+                    "Choose categories from the provided global category catalog whenever possible; use 其他 only when no catalog item fits. "
+                    "missing_views and detected_view_slots may only use front,angle45,side,extra. "
+                    "supplement_image_recommendations items must include slot_type,label,reason,priority,upload_goal,"
+                    "must_show,framing_hint,example_caption; priority must be integer 1-10. "
+                    "If slot_type is extra, image_kind may only be detail_closeup,water_tank,filter_structure,size_in_hand,use_scene_real. "
+                    "reference_summary must include shape,colors,materials,structures,must_keep,proportion_note,"
+                    "control_panel_note,transparent_parts_note,structure_anchor_points,do_not_move_features,scene_fit_notes. "
+                    "evidence_scores must include structure,proportion,scene,text as 0-100 integers. "
+                    "parameter_snapshot must satisfy the existing Step3 extract contract and include: relevance_status,"
+                    "rejection_reason,hero_scene,core_selling_points,key_parameters,product_advantages,"
+                    "feature_highlights,source_mode,evidence_priority,evidence_summary. "
+                    "For this combined run source_mode must be analysis_only and evidence_priority must be analysis_then_copy. "
+                    "key_parameters in parameter_snapshot must be an array of objects split as key,label,value,unit; "
+                    "do not put a full 'label:value' pair into both label and value. "
+                    "Step3 fields must be final user-editable copy candidates grounded in analysis_snapshot and the images, "
+                    "not free marketing invention. Do not invent unobserved functions, certifications, materials, dimensions, or risks. "
+                    f"{_prompt_matrix_guardrail_text()}"
+                    f"Current platform: {active_platform_id or 'temu'}. "
+                    f"Current confirmed_copy: {json.dumps(confirmed_copy or {}, ensure_ascii=False)}. "
+                    f"Product image manifest: {json.dumps(product_manifest, ensure_ascii=False)}. "
+                    f"Global category catalog: {json.dumps(catalog_prompt, ensure_ascii=False)}."
+                ),
+            },
+            *self._build_chat_image_parts(normalized_images),
+        ]
+        outcome = self._run_structured_task(
+            task="analysis",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.2,
+            error_key="upstream_llm_error",
+            prompt_version=ANALYSIS_PARAMETER_COMBINED_PROMPT_VERSION,
+            validator=lambda parsed: self._validate_analysis_parameter_combined_result(parsed, category_catalog),
+            fallback_result=fallback,
+        )
+        parsed = outcome["result"] if isinstance(outcome["result"], dict) else fallback
+        raw_analysis = parsed.get("analysis_snapshot") if isinstance(parsed.get("analysis_snapshot"), dict) else parsed
+        raw_parameter = parsed.get("parameter_snapshot") if isinstance(parsed.get("parameter_snapshot"), dict) else {}
+        analysis_snapshot = self._merge_analysis_result(
+            analysis_fallback,
+            raw_analysis if isinstance(raw_analysis, dict) else {},
+            category_catalog=category_catalog,
+        )
+        parameter_base = self._fake_parameter_snapshot(
+            confirmed_copy or {},
+            analysis_snapshot,
+            active_platform_id,
+            normalized_images,
+            [],
+            [],
+        )
+        parameter_snapshot = self._merge_parameter_snapshot(
+            parameter_base,
+            raw_parameter if isinstance(raw_parameter, dict) else {},
+        )
+        parameter_snapshot = sanitize_parameter_snapshot(parameter_snapshot)
+        meta = outcome["meta"]
+        analysis_snapshot["analysis_source"] = "fallback" if meta["source"] == "fallback" else "llm"
+        analysis_snapshot.update(meta)
+        parameter_snapshot.update(meta)
+        return {
+            "analysis_snapshot": analysis_snapshot,
+            "parameter_snapshot": parameter_snapshot,
+        }
 
     def plan_prompt_plan(
         self,
@@ -360,10 +494,32 @@ class WhataiClient:
                 "fidelity_rule": _sanitize_planner_freeform_text(item.get("fidelity_rule")),
                 "final_prompt_base": _sanitize_planner_freeform_text(item.get("final_prompt_base")),
                 "reference_slots": normalize_phrase_list(item.get("reference_slots")),
+                "copy_blocks": self._normalize_main_planner_copy_blocks(item.get("copy_blocks")),
+                "text_density": repair_broken_text(item.get("text_density")),
+                "visual_emphasis": repair_broken_text(item.get("visual_emphasis")),
+                "global_consistency_note": repair_broken_text(item.get("global_consistency_note")),
             }
         if by_role:
             by_role["_planner_meta"] = outcome["meta"]
         return by_role
+
+    def _normalize_main_planner_copy_blocks(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, Any] = {}
+        for key in ("headline", "supporting"):
+            text = sanitize_surface_text(value.get(key))
+            if text:
+                normalized[key] = text
+        for key in ("proof_lines", "matrix_lines"):
+            lines = [
+                item
+                for item in [sanitize_surface_text(entry) for entry in self._normalize_string_list(value.get(key), [])]
+                if item
+            ]
+            if lines:
+                normalized[key] = lines
+        return normalized
 
     def plan_detail_page_narrative(
         self,
@@ -1795,6 +1951,28 @@ class WhataiClient:
                 errors.append(self._validation_error(key, "list", f"{key} 必须是数组", value))
         return errors
 
+    def _validate_analysis_parameter_combined_result(
+        self,
+        parsed: Any,
+        category_catalog: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return [self._validation_error("$", "json_object", "combined analysis must return a JSON object", parsed)]
+        errors: list[dict[str, Any]] = []
+        analysis_snapshot = parsed.get("analysis_snapshot")
+        parameter_snapshot = parsed.get("parameter_snapshot")
+        if not isinstance(analysis_snapshot, dict):
+            errors.append(self._validation_error("analysis_snapshot", "required_object", "analysis_snapshot is required", analysis_snapshot))
+        else:
+            for error in self._validate_analysis_result(analysis_snapshot, category_catalog):
+                errors.append({**error, "field": f"analysis_snapshot.{error.get('field')}"})
+        if not isinstance(parameter_snapshot, dict):
+            errors.append(self._validation_error("parameter_snapshot", "required_object", "parameter_snapshot is required", parameter_snapshot))
+        else:
+            for error in self._validate_parameter_result(parameter_snapshot):
+                errors.append({**error, "field": f"parameter_snapshot.{error.get('field')}"})
+        return errors
+
     def _validate_main_planner_result(
         self,
         parsed: Any,
@@ -1824,6 +2002,33 @@ class WhataiClient:
             seen_roles.add(role)
             if not repair_broken_text(item.get("expression_mode")):
                 errors.append(self._validation_error(f"prompt_plan[{index}].expression_mode", "required", "expression_mode 不能为空", item.get("expression_mode")))
+            copy_blocks = item.get("copy_blocks")
+            if copy_blocks is not None:
+                if not isinstance(copy_blocks, dict):
+                    errors.append(self._validation_error(f"prompt_plan[{index}].copy_blocks", "object", "copy_blocks must be an object", copy_blocks))
+                else:
+                    for text_key in ("headline", "supporting"):
+                        text_value = copy_blocks.get(text_key)
+                        if isinstance(text_value, str) and has_planning_annotation(text_value):
+                            errors.append(self._validation_error(
+                                f"prompt_plan[{index}].copy_blocks.{text_key}",
+                                "planning_annotation",
+                                f"{text_key} must not contain planning annotations",
+                                text_value,
+                            ))
+                    for list_key in ("proof_lines", "matrix_lines"):
+                        list_value = copy_blocks.get(list_key)
+                        if list_value is not None and not isinstance(list_value, list):
+                            errors.append(self._validation_error(f"prompt_plan[{index}].copy_blocks.{list_key}", "list", f"{list_key} must be a list", list_value))
+                        elif isinstance(list_value, list):
+                            contaminated = [line for line in list_value if isinstance(line, str) and has_planning_annotation(line)]
+                            if contaminated:
+                                errors.append(self._validation_error(
+                                    f"prompt_plan[{index}].copy_blocks.{list_key}",
+                                    "planning_annotation",
+                                    f"{list_key} must not contain planning annotations",
+                                    contaminated,
+                                ))
             copy_focus = repair_broken_text(item.get("copy_focus"))
             if not copy_focus:
                 errors.append(self._validation_error(f"prompt_plan[{index}].copy_focus", "required", "copy_focus 不能为空", item.get("copy_focus")))
