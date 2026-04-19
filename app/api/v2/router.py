@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v2.account import router as account_router
 from app.api.v2.auth import router as auth_router
 from app.api.v2.assets import router as assets_router
+from app.api.v2.brands import router as brands_router
 from app.api.v2.guest import router as guest_router
 from app.api.v2.jobs import router as jobs_router
 from app.api.v2.platforms import router as platforms_router
@@ -13,6 +14,7 @@ from app.api.v2.feedback import router as feedback_router
 
 router = APIRouter()
 router.include_router(platforms_router)
+router.include_router(brands_router)
 router.include_router(auth_router)
 router.include_router(guest_router)
 router.include_router(account_router)

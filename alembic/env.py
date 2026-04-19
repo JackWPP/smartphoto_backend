@@ -7,6 +7,10 @@ from app.core.config import get_settings, resolve_database_url
 from app.db.base import Base
 from app.models import (  # noqa: F401
     asset,
+    brand,
+    brand_memory_evidence,
+    brand_memory_item,
+    brand_profile,
     credit_transaction,
     credit_wallet,
     detail_style_image,

@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.asset import AssetModel
+from app.models.brand import BrandModel
+from app.models.brand_memory_evidence import BrandMemoryEvidenceModel
+from app.models.brand_memory_item import BrandMemoryItemModel
+from app.models.brand_profile import BrandProfileModel
 from app.models.category_catalog import CategoryCatalogModel
 from app.models.job import JobModel
 from app.models.prompt_preset import PromptPresetModel
@@ -97,6 +101,8 @@ def serialize_session(session: SessionModel) -> dict[str, Any]:
         "service_id": session.service_id,
         "status": session.status,
         "current_step": session.current_step,
+        "brand_id": session.brand_id,
+        "brand_memory_enabled": bool(session.brand_memory_enabled),
         "selected_platform_ids": session.selected_platform_ids,
         "active_platform_id": session.active_platform_id,
         "analysis_snapshot": session.analysis_snapshot,
@@ -110,6 +116,77 @@ def serialize_session(session: SessionModel) -> dict[str, Any]:
         "detail_latest_result_version": session.detail_latest_result_version,
         "created_at": session.created_at.isoformat() if session.created_at else None,
         "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+    }
+
+
+def serialize_brand(brand: BrandModel) -> dict[str, Any]:
+    return {
+        "brand_id": brand.id,
+        "service_id": brand.service_id,
+        "brand_name": brand.brand_name,
+        "slug": brand.slug,
+        "aliases": [str(alias).strip() for alias in (brand.aliases or []) if str(alias).strip()],
+        "notes": brand.notes,
+        "status": brand.status,
+        "is_active": bool(brand.is_active),
+        "created_by": brand.created_by,
+        "created_at": brand.created_at.isoformat() if brand.created_at else None,
+        "updated_at": brand.updated_at.isoformat() if brand.updated_at else None,
+    }
+
+
+def serialize_brand_profile(profile: BrandProfileModel | None) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    return {
+        "profile_id": profile.id,
+        "brand_id": profile.brand_id,
+        "identity_payload": profile.identity_payload or {},
+        "visual_payload": profile.visual_payload or {},
+        "copy_payload": profile.copy_payload or {},
+        "version_no": int(profile.version_no or 0),
+        "is_active": bool(profile.is_active),
+        "created_by": profile.created_by,
+        "created_at": profile.created_at.isoformat() if profile.created_at else None,
+        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+    }
+
+
+def serialize_brand_memory_item(item: BrandMemoryItemModel) -> dict[str, Any]:
+    return {
+        "memory_item_id": item.id,
+        "service_id": item.service_id,
+        "brand_id": item.brand_id,
+        "platform_id": item.platform_id,
+        "category": item.category,
+        "slot_id": item.slot_id,
+        "memory_type": item.memory_type,
+        "source_kind": item.source_kind,
+        "payload": item.payload or {},
+        "quality_score": float(item.quality_score or 0.0),
+        "confidence_score": float(item.confidence_score or 0.0),
+        "usage_count": int(item.usage_count or 0),
+        "hit_count": int(item.hit_count or 0),
+        "is_enabled": bool(item.is_enabled),
+        "created_by": item.created_by,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+    }
+
+
+def serialize_brand_memory_evidence(item: BrandMemoryEvidenceModel) -> dict[str, Any]:
+    return {
+        "evidence_id": item.id,
+        "service_id": item.service_id,
+        "brand_id": item.brand_id,
+        "memory_item_id": item.memory_item_id,
+        "session_id": item.session_id,
+        "asset_id": item.asset_id,
+        "job_id": item.job_id,
+        "evidence_type": item.evidence_type,
+        "evidence_payload": item.evidence_payload or {},
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "updated_at": item.updated_at.isoformat() if item.updated_at else None,
     }
 
 
