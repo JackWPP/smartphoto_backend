@@ -59,7 +59,8 @@
   - 上游异常转 `50201`
 - 重试策略：上游网络级异常会先做单请求重试；若仍失败，Celery 任务最多再重试 3 次（`max_retries=3`）
 - 当前实现补充：
-  - LLM Router 已改为按任务显式路由：`analysis / main planner / detail planner / visual parameter extraction` 默认保持 `WhatAI + Gemini`，OpenRouter 只保留给文本辅助任务
+- LLM Router 已改为按任务显式路由：`analysis / visual parameter extraction` 默认保持 `WhatAI + Gemini`；`main planner / detail planner / parameter completion / text review` 默认走 `doubao_text`，未配置或上游失败时 planner 按 `PLANNER_FALLBACK_ROUTE=whatai_gemini` 降级。
+- `doubao_text` 通过火山 Ark Responses API 调用 `/responses`，读取 `DOUBAO_API_KEY` 或 `ARK_API_KEY`，业务层不得硬编码豆包 endpoint。
   - 上传商品图会以内联图像内容的方式发给上游，不再依赖 `localhost` URL
   - 分析输入当前会优先走受控尺寸图片（`max_edge` 缩边），避免大图全量进内存
   - analysis / planner / parameter extraction 现在统一走 `validator -> 同模型 repair 1 次 -> fallback`，worker 不再因为轻微格式漂移直接崩溃
@@ -107,6 +108,11 @@
 - 状态变更：session 进入或保持 `copy_ready`
 - 失败处理：非法字段 `40004`
 - 重试策略：上游网络级异常可进入 Celery 任务重试，最多 3 次
+- Step2/Step3 combined mode:
+  - Default PARAMETER_EXTRACTION_MODE=combined makes Analysis Agent write analysis_snapshot and parameter_snapshot in the same visual LLM call.
+  - The combined parameter snapshot uses source_stage=analysis_combined and records analysis_version/input_image_ids/input_hash/parameter_source_job_id for freshness checks.
+  - Parameter Extract Agent first checks freshness; without attachments, a fresh combined snapshot is reused and no upstream LLM call is made.
+  - Attachments or PARAMETER_EXTRACTION_MODE=separate keep the old standalone extract_parameters LLM behavior.
 
 ### 3.3.1 Parameter Extract Agent
 - 输入：`analysis_snapshot + 当前 session 商品图 + confirmed_copy + 可选参数附件`
@@ -159,6 +165,8 @@
   - 每个 `asset_plan` 项都带 `slot_id/slot_family/expression_mode/copy_blocks/layout_policy/proof_policy/requires_white_bg_validation/platform_rule_pack`
   - 每个 `prompt_plan` 项都带 `reference_image_ids/must_keep/must_avoid/background_rule/composition_rule/lighting_rule/fidelity_rule/final_prompt_base/rule_modules_used/resolved_constraints`
   - 当前支持在 Step 5 通过 `planner_instruction` 对整组策略做一轮额外优化
+  - 主图 planner 现在一次性产出策略与可见文案增强：除 `prompt_plan` 原字段外，可返回 `copy_blocks/text_density/visual_emphasis/global_consistency_note`；默认不再额外调用 `main_copy_design`。
+  - 主图/详情页策略预览会记录 `planner_ms/planner_fallback_reason`，用于定位豆包耗时、fallback 与 repair 情况。
   - 当前优先让 planner 决定 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包退化为 guardrail + fallback
   - `prompt_plan` / `asset_plan` 现在还会带 `global_consistency_note`：
     - 用于约束局部图和结构图必须与参考图整体结构一致
@@ -477,3 +485,19 @@ sequenceDiagram
 - success validator、平台合规检测、自动纠偏链路尚未接入。
 - `scope=selected` 的局部全局修改尚未在执行层生效（当前按整组处理）。
 - 规则包运行时现在支持“DB 发布优先 + 代码 seed 兜底”；后台改规则只影响后续策略和新生成结果，不回写历史资产。
+
+## 6.2 ???? Phase 1????
+
+- ??????????? `main_gallery` ???????
+- ?????? `strategy_preview`?
+  1. `PUT /sessions/{id}/brand` ???????/?? session ??????
+  2. `POST /sessions/{id}/strategy/preview` ?????????????????
+  3. ?????? `brand_memory_trace / brand_memory_item_ids / brand_memory_applied`?
+  4. `prompts/preview` ??? `generations` ??????? `session.strategy_preview`?
+- ?????????? > ????/????? > ???? > ?? session ?????
+- ?????????????????????? prompt ?????
+- ????????????????????`quality_status=passed`??
+- `quality_review_mode=sample/off` ?????? passed ????????????????????????
+- `brand_memory_items` ?? natural key ???????? platform/category/slot ??????????
+- Phase 1 ????????????????????/??????????????
+

@@ -46,6 +46,7 @@ def build_hash_layers(
     config_payload: dict[str, Any],
     content_payload: dict[str, Any],
     reference_payload: dict[str, Any],
+    memory_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     versioned_config = {
         "hash_policy_version": PREVIEW_HASH_POLICY_VERSION,
@@ -65,6 +66,12 @@ def build_hash_layers(
     config_hash = stable_hash(versioned_config)
     content_hash = stable_hash(versioned_content)
     reference_hash = stable_hash(versioned_reference)
+    versioned_memory = {
+        "hash_policy_version": PREVIEW_HASH_POLICY_VERSION,
+        "stage": stage,
+        **(memory_payload or {}),
+    }
+    memory_hash = stable_hash(versioned_memory)
     aggregate_hash = stable_hash(
         {
             "hash_policy_version": PREVIEW_HASH_POLICY_VERSION,
@@ -72,6 +79,7 @@ def build_hash_layers(
             "config_hash": config_hash,
             "content_hash": content_hash,
             "reference_hash": reference_hash,
+            "memory_hash": memory_hash,
         }
     )
     return {
@@ -80,6 +88,7 @@ def build_hash_layers(
             "config_hash": config_hash,
             "content_hash": content_hash,
             "reference_hash": reference_hash,
+            "memory_hash": memory_hash,
         },
         "input_hash": aggregate_hash,
     }

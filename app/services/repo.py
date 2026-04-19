@@ -124,6 +124,7 @@ def list_session_prompt_overrides(db: Session, session_id: str, *, asset_family:
     )
 
 
+
 def get_prompt_preset_or_404(db: Session, preset_id: str, user_id: str | None = None) -> PromptPresetModel:
     query = db.query(PromptPresetModel).filter(PromptPresetModel.id == preset_id)
     if user_id is not None:

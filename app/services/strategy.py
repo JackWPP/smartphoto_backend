@@ -21,6 +21,7 @@ from app.services.copy_normalization import (
     sync_legacy_copy_fields,
 )
 from app.services.copy_resolution import resolve_session_copy
+from app.services.brand_memory import apply_brand_memory_to_strategy_preview, match_brand_memory_items
 from app.services.main_gallery_rules import (
     build_copy_blocks,
     expression_metadata,
@@ -66,6 +67,57 @@ def _resolved_style_preset_hash_payload(value: Any) -> dict[str, Any]:
     }
 
 
+
+def _normalized_brand_memory_trace(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        memory_item_id = str(item.get("memory_item_id") or "").strip()
+        if not memory_item_id:
+            continue
+        normalized.append(
+            {
+                "memory_item_id": memory_item_id,
+                "slot_id": str(item.get("slot_id") or "").strip(),
+                "memory_type": str(item.get("memory_type") or "").strip(),
+                "quality_score": float(item.get("quality_score") or 0.0),
+                "confidence_score": float(item.get("confidence_score") or 0.0),
+            }
+        )
+    return normalized
+
+
+def _match_unique_brand_memory_items(
+    *,
+    db: Session | None,
+    service_id: str | None,
+    brand_id: str | None,
+    active_platform_id: str,
+    category: str | None,
+    slot_ids: list[str],
+    brand_memory_enabled: bool,
+) -> list[Any]:
+    if not brand_memory_enabled or not brand_id or db is None or not service_id:
+        return []
+    matched_items: list[Any] = []
+    for slot_id in slot_ids:
+        normalized_slot = str(slot_id or "").strip()
+        for matched in match_brand_memory_items(
+            db,
+            service_id=service_id,
+            brand_id=brand_id,
+            platform_id=active_platform_id,
+            category=category or None,
+            slot_id=normalized_slot or None,
+        ):
+            if all(existing.id != matched.id for existing in matched_items):
+                matched_items.append(matched)
+    return matched_items
+
+
 def _main_preview_hash_bundle(
     *,
     normalized_copy: dict[str, Any],
@@ -82,6 +134,9 @@ def _main_preview_hash_bundle(
     planner_profile: str,
     planner_provider: str,
     planner_model: str,
+    brand_id: str | None = None,
+    brand_memory_enabled: bool = False,
+    brand_memory_trace: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     recognized_product = analysis_snapshot.get("recognized_product") if isinstance(analysis_snapshot.get("recognized_product"), dict) else {}
     config_slot_blueprints = [
@@ -117,6 +172,8 @@ def _main_preview_hash_bundle(
         "planner_profile": planner_profile,
         "planner_provider": planner_provider,
         "planner_model": planner_model,
+        "brand_id": str(brand_id or ""),
+        "brand_memory_enabled": bool(brand_memory_enabled),
         "platform_overlay": overlay,
         "slot_blueprints": sort_dicts(config_slot_blueprints, "slot_id"),
     }
@@ -157,11 +214,15 @@ def _main_preview_hash_bundle(
             "image_id",
         ),
     }
+    memory_payload = {
+        "brand_memory_trace": _normalized_brand_memory_trace(brand_memory_trace or []),
+    }
     return build_hash_layers(
         stage="main_strategy_preview",
         config_payload=config_payload,
         content_payload=content_payload,
         reference_payload=reference_payload,
+        memory_payload=memory_payload,
     )
 
 
@@ -189,6 +250,9 @@ def strategy_preview_input_hash(
     loaded_strategy_reference_images: list[LoadedReferenceImage] | None = None,
     reference_manifest: list[dict[str, Any]] | None = None,
     strategy_reference_manifest: list[dict[str, Any]] | None = None,
+    brand_id: str | None = None,
+    brand_memory_enabled: bool = False,
+    service_id: str | None = None,
 ) -> str:
     settings = get_settings()
     client = WhataiClient()
@@ -224,6 +288,31 @@ def strategy_preview_input_hash(
     payload["planner_profile"] = settings.planner_profile
     payload["planner_provider"] = client.llm_router.provider_for_task("main_planner")
     payload["planner_model"] = client.llm_router.model_for_task("main_planner")
+    recognized = analysis_snapshot.get("recognized_product") if isinstance(analysis_snapshot, dict) else {}
+    category = str(recognized.get("category") or "").strip() if isinstance(recognized, dict) else ""
+    matched_items = _match_unique_brand_memory_items(
+        db=db,
+        service_id=service_id,
+        brand_id=brand_id,
+        active_platform_id=active_platform_id,
+        category=category,
+        slot_ids=[
+            str(item.get("slot_id") or item.get("compat_role") or "").strip()
+            for item in slot_blueprints
+        ],
+        brand_memory_enabled=brand_memory_enabled,
+    )
+    brand_memory_hash_trace: list[dict[str, Any]] = [
+        {
+            "memory_item_id": item.id,
+            "slot_id": str(item.slot_id or ""),
+            "memory_type": str(item.memory_type or ""),
+            "quality_score": float(item.quality_score or 0.0),
+            "confidence_score": float(item.confidence_score or 0.0),
+        }
+        for item in matched_items
+    ]
+
     hash_bundle = _main_preview_hash_bundle(
         normalized_copy=normalized_copy,
         active_platform_id=active_platform_id,
@@ -239,6 +328,9 @@ def strategy_preview_input_hash(
         planner_profile=settings.planner_profile,
         planner_provider=payload["planner_provider"],
         planner_model=payload["planner_model"],
+        brand_id=brand_id,
+        brand_memory_enabled=brand_memory_enabled,
+        brand_memory_trace=brand_memory_hash_trace,
     )
     return str(hash_bundle["input_hash"])
 
@@ -259,6 +351,9 @@ def build_strategy_preview(
     loaded_strategy_reference_images: list[LoadedReferenceImage] | None = None,
     reference_manifest: list[dict[str, Any]] | None = None,
     strategy_reference_manifest: list[dict[str, Any]] | None = None,
+    brand_id: str | None = None,
+    brand_memory_enabled: bool = False,
+    service_id: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     client = WhataiClient()
@@ -322,6 +417,31 @@ def build_strategy_preview(
         platform_overlay=overlay,
         llm_plan=llm_slot_plan,
     )
+    brand_memory_trace: list[dict[str, Any]] = []
+    brand_memory_item_ids: list[str] = []
+    brand_memory_applied = False
+    recognized = analysis_snapshot.get("recognized_product") if isinstance(analysis_snapshot, dict) else {}
+    category = str(recognized.get("category") or "").strip() if isinstance(recognized, dict) else ""
+    matched_items = _match_unique_brand_memory_items(
+        db=db,
+        service_id=service_id,
+        brand_id=brand_id,
+        active_platform_id=active_platform_id,
+        category=category,
+        slot_ids=[str(item.get("slot_id") or item.get("role") or "").strip() for item in asset_plan],
+        brand_memory_enabled=brand_memory_enabled,
+    )
+    if matched_items:
+        memory_preview = apply_brand_memory_to_strategy_preview(
+            {"asset_plan": asset_plan, "prompt_plan": prompt_plan},
+            matched_items=matched_items,
+        )
+        asset_plan = memory_preview.get("asset_plan", asset_plan)
+        prompt_plan = memory_preview.get("prompt_plan", prompt_plan)
+        brand_memory_trace = memory_preview.get("brand_memory_trace", [])
+        brand_memory_item_ids = memory_preview.get("brand_memory_item_ids", [])
+        brand_memory_applied = bool(memory_preview.get("brand_memory_applied"))
+
     copy_design_plan = _design_main_gallery_copy(
         confirmed_copy=normalized_copy,
         analysis_snapshot=analysis_snapshot or {},
@@ -330,6 +450,9 @@ def build_strategy_preview(
     )
     if copy_design_plan:
         asset_plan, prompt_plan = _apply_main_copy_design(asset_plan, prompt_plan, copy_design_plan)
+    text_design_source = _copy_design_source(copy_design_plan)
+    if text_design_source == "rule_based":
+        text_design_source = _copy_design_source_from_llm_plan(llm_slot_plan if isinstance(llm_slot_plan, dict) else None)
     asset_plan = _sync_asset_plan_quality_metadata(asset_plan, prompt_plan)
 
     # Category-aware supplementary view suggestions
@@ -362,6 +485,11 @@ def build_strategy_preview(
         "planner_instruction": planner_instruction,
         "platform_rule_pack": profile.main_rule_pack_id if profile else "default_main_gallery_v2",
         "platform_overlay": overlay,
+        "brand_id": brand_id,
+        "brand_memory_enabled": bool(brand_memory_enabled),
+        "brand_memory_applied": brand_memory_applied,
+        "brand_memory_item_ids": brand_memory_item_ids,
+        "brand_memory_trace": brand_memory_trace,
         "provider": (planner_meta or {}).get("provider", "whatai"),
         "model": (planner_meta or {}).get("model", ""),
         "planner_profile": settings.planner_profile,
@@ -371,10 +499,12 @@ def build_strategy_preview(
         "planner_fallback_model": (planner_meta or {}).get("planner_fallback_model"),
         "planner_attempt_count": int((planner_meta or {}).get("planner_attempt_count") or 0),
         "planner_final_source": (planner_meta or {}).get("planner_final_source"),
+        "planner_ms": int((planner_meta or {}).get("planner_ms") or 0),
+        "planner_fallback_reason": (planner_meta or {}).get("planner_fallback_reason"),
         "prompt_version": (planner_meta or {}).get("prompt_version", ""),
         "repair_round": int((planner_meta or {}).get("repair_round") or 0),
         "source": (planner_meta or {}).get("source", "rule_based"),
-        "text_design_source": _copy_design_source(copy_design_plan),
+        "text_design_source": text_design_source,
         "slot_preferences": list(resolved_slot_preferences.values()),
         "strategy_overrides": list(resolved_prompt_overrides.values()),
         "reference_manifest": reference_manifest,
@@ -400,6 +530,9 @@ def build_strategy_preview(
             planner_profile=settings.planner_profile,
             planner_provider=client.llm_router.provider_for_task("main_planner"),
             planner_model=client.llm_router.model_for_task("main_planner"),
+            brand_id=brand_id,
+            brand_memory_enabled=bool(brand_memory_enabled),
+            brand_memory_trace=brand_memory_trace,
         )
     )
     return validate_contract_warn(
@@ -417,6 +550,9 @@ def normalize_strategy_preview(
     db: Session | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
     parameter_snapshot: dict[str, Any] | None = None,
+    brand_id: str | None = None,
+    brand_memory_enabled: bool = False,
+    service_id: str | None = None,
 ) -> dict:
     confirmed_copy = sync_legacy_copy_fields(
         merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot),
@@ -433,6 +569,9 @@ def normalize_strategy_preview(
         slot_preferences=existing_preferences if isinstance(existing_preferences, list) else [],
         prompt_overrides=prompt_overrides,
         parameter_snapshot=parameter_snapshot,
+        brand_id=brand_id,
+        brand_memory_enabled=brand_memory_enabled,
+        service_id=service_id,
     )
     if not isinstance(strategy_preview, dict):
         return normalized
@@ -714,18 +853,32 @@ def _apply_main_copy_design(
             planner_value = design.get(key)
             override_value = copy_blocks.get(key)
             has_override = key in copy_blocks and override_value is not None
-            merged_blocks[key] = override_value if has_override else planner_value
-            copy_blocks_attribution[key] = {
-                "source": "session_override" if has_override else ("planner_enriched" if planner_value else "rule_based"),
-                "source_path": (
-                    f"strategy_overrides.{slot_id}.copy_blocks_override.{key}"
-                    if has_override
-                    else f"copy_design_plan.{slot_id}.{key}" if planner_value else f"asset_plan.{slot_id}.copy_blocks.{key}"
-                ),
-                "source_stage": "strategy_preview",
-                "fallback_used": not bool(merged_blocks[key]),
-                "sanitized": False,
-            }
+            if has_override:
+                merged_blocks[key] = override_value
+                copy_blocks_attribution[key] = {
+                    "source": "session_override",
+                    "source_path": f"strategy_overrides.{slot_id}.copy_blocks_override.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(override_value),
+                    "sanitized": False,
+                }
+            elif planner_value:
+                merged_blocks[key] = planner_value
+                copy_blocks_attribution[key] = {
+                    "source": "planner_enriched",
+                    "source_path": f"copy_design_plan.{slot_id}.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(planner_value),
+                    "sanitized": False,
+                }
+            elif key not in copy_blocks_attribution:
+                copy_blocks_attribution[key] = {
+                    "source": "rule_based",
+                    "source_path": f"asset_plan.{slot_id}.copy_blocks.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(merged_blocks.get(key)),
+                    "sanitized": False,
+                }
         next_asset_plan.append(
             {
                 **item,
@@ -747,18 +900,32 @@ def _apply_main_copy_design(
             planner_value = design.get(key)
             override_value = copy_blocks.get(key)
             has_override = key in copy_blocks and override_value is not None
-            merged_prompt_blocks[key] = override_value if has_override else planner_value
-            copy_blocks_attribution[key] = {
-                "source": "session_override" if has_override else ("planner_enriched" if planner_value else "rule_based"),
-                "source_path": (
-                    f"strategy_overrides.{slot_id}.copy_blocks_override.{key}"
-                    if has_override
-                    else f"copy_design_plan.{slot_id}.{key}" if planner_value else f"prompt_plan.{slot_id}.copy_blocks.{key}"
-                ),
-                "source_stage": "strategy_preview",
-                "fallback_used": not bool(merged_prompt_blocks[key]),
-                "sanitized": False,
-            }
+            if has_override:
+                merged_prompt_blocks[key] = override_value
+                copy_blocks_attribution[key] = {
+                    "source": "session_override",
+                    "source_path": f"strategy_overrides.{slot_id}.copy_blocks_override.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(override_value),
+                    "sanitized": False,
+                }
+            elif planner_value:
+                merged_prompt_blocks[key] = planner_value
+                copy_blocks_attribution[key] = {
+                    "source": "planner_enriched",
+                    "source_path": f"copy_design_plan.{slot_id}.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(planner_value),
+                    "sanitized": False,
+                }
+            elif key not in copy_blocks_attribution:
+                copy_blocks_attribution[key] = {
+                    "source": "rule_based",
+                    "source_path": f"prompt_plan.{slot_id}.copy_blocks.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(merged_prompt_blocks.get(key)),
+                    "sanitized": False,
+                }
         next_prompt_plan.append(
             {
                 **item,
@@ -778,6 +945,17 @@ def _copy_design_source(copy_design_plan: dict[str, dict[str, Any]]) -> str:
         meta = value.get("_meta") if isinstance(value, dict) else None
         if isinstance(meta, dict):
             return str(meta.get("source") or "rule_based")
+    return "rule_based"
+
+
+def _copy_design_source_from_llm_plan(llm_plan: dict[str, dict[str, Any]] | None) -> str:
+    if not isinstance(llm_plan, dict):
+        return "rule_based"
+    for key, value in llm_plan.items():
+        if str(key).startswith("_") or not isinstance(value, dict):
+            continue
+        if value.get("copy_blocks") or value.get("text_density") or value.get("visual_emphasis") or value.get("global_consistency_note"):
+            return "planner_enriched"
     return "rule_based"
 
 
@@ -802,6 +980,26 @@ def _merge_asset_plan_item(
     focus_selling_point = repair_broken_text(llm_item.get("focus_selling_point"))
     if focus_selling_point:
         merged["focus_selling_point"] = focus_selling_point
+    copy_blocks = llm_item.get("copy_blocks")
+    if isinstance(copy_blocks, dict) and copy_blocks:
+        merged_blocks = dict(merged.get("copy_blocks") or {})
+        attribution = dict(merged.get("copy_blocks_attribution") or {})
+        for key, value in copy_blocks.items():
+            if value:
+                merged_blocks[key] = value
+                attribution[key] = {
+                    "source": "planner_enriched",
+                    "source_path": f"main_planner.prompt_plan.{merged.get('slot_id')}.copy_blocks.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": False,
+                    "sanitized": True,
+                }
+        merged["copy_blocks"] = merged_blocks
+        merged["copy_blocks_attribution"] = attribution
+    for key in ("text_density", "visual_emphasis", "global_consistency_note"):
+        value = repair_broken_text(llm_item.get(key))
+        if value:
+            merged[key] = value
     return merged
 
 
@@ -1238,6 +1436,26 @@ def _merge_prompt_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | Non
 
     merged["planner_source"] = "llm"
     for key in ("expression_mode", "copy_focus", "focus_selling_point"):
+        value = repair_broken_text(llm_item.get(key))
+        if value:
+            merged[key] = value
+    copy_blocks = llm_item.get("copy_blocks")
+    if isinstance(copy_blocks, dict) and copy_blocks:
+        merged_blocks = dict(merged.get("copy_blocks") or {})
+        attribution = dict(merged.get("copy_blocks_attribution") or {})
+        for key, value in copy_blocks.items():
+            if value:
+                merged_blocks[key] = value
+                attribution[key] = {
+                    "source": "planner_enriched",
+                    "source_path": f"main_planner.prompt_plan.{merged.get('slot_id')}.copy_blocks.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": False,
+                    "sanitized": True,
+                }
+        merged["copy_blocks"] = merged_blocks
+        merged["copy_blocks_attribution"] = attribution
+    for key in ("text_density", "visual_emphasis", "global_consistency_note"):
         value = repair_broken_text(llm_item.get(key))
         if value:
             merged[key] = value

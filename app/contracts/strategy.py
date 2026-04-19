@@ -91,6 +91,10 @@ class PromptPlanItem(ContractModel):
 class StrategyPreviewPayload(ContractModel):
     platform_rule_pack: str | None = None
     platform_overlay: PlatformOverlay = Field(default_factory=PlatformOverlay)
+    brand_memory_enabled: bool | None = None
+    brand_memory_applied: bool | None = None
+    brand_memory_item_ids: list[str] = Field(default_factory=list)
+    brand_memory_trace: list[dict[str, Any]] = Field(default_factory=list)
     reference_manifest: list[ReferenceManifestItem] = Field(default_factory=list)
     strategy_reference_manifest: list[ReferenceManifestItem] = Field(default_factory=list)
     resolved_copy_attribution: dict[str, Any] = Field(default_factory=dict)

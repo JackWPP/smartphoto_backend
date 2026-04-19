@@ -458,6 +458,8 @@ def build_detail_strategy_preview(
         "planner_fallback_model": llm_result.get("planner_fallback_model"),
         "planner_attempt_count": int(llm_result.get("planner_attempt_count") or 0),
         "planner_final_source": llm_result.get("planner_final_source"),
+        "planner_ms": int(llm_result.get("planner_ms") or detail_planner_ms or 0),
+        "planner_fallback_reason": llm_result.get("planner_fallback_reason"),
         "detail_story_brief": _normalize_detail_story_brief(llm_result.get("detail_story_brief")),
         "provider": str(llm_result.get("provider") or "whatai"),
         "model": str(llm_result.get("model") or ""),

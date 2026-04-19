@@ -44,6 +44,7 @@ from app.services.reference_images import (
 )
 from app.services.strategy import build_strategy_preview, strategy_preview_input_hash
 from app.services.strategy_overrides import resolve_session_overrides
+from app.services.brand_memory import increment_brand_memory_usage
 
 
 def prepare_main_generation_inputs(
@@ -69,6 +70,9 @@ def prepare_main_generation_inputs(
             slot_preferences=existing_preview.get("slot_preferences") or [],
             prompt_overrides=prompt_overrides,
             strategy_reference_images=strategy_reference_images,
+            brand_id=session.brand_id,
+            brand_memory_enabled=bool(session.brand_memory_enabled),
+            service_id=session.service_id,
         )
     return {
         "existing_preview": existing_preview,
@@ -105,6 +109,9 @@ def plan_main_generation_strategy(
         slot_preferences=existing_preview.get("slot_preferences") or [],
         prompt_overrides=prompt_overrides,
         strategy_reference_images=strategy_reference_images,
+        brand_id=session.brand_id,
+        brand_memory_enabled=bool(session.brand_memory_enabled),
+        service_id=session.service_id,
     )
     session.strategy_preview = rebuilt
     return rebuilt
@@ -463,6 +470,7 @@ def finalize_main_rendered_asset(
         sync_result = {"passed": True, "checks": {}, "failure_reason": None, "error": str(exc)}
     generation_snapshot = build_main_generation_snapshot(
         confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
         prompt_payload=prompt_payload,
         reference_images=reference_images,
         upstream_endpoint=(render_spec.get("submission") or {}).get("upstream_endpoint"),
@@ -627,6 +635,7 @@ def render_single_main_asset_sync(
 
     generation_snapshot = build_main_generation_snapshot(
         confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
         prompt_payload=prompt_payload,
         reference_images=reference_images,
         upstream_endpoint="/v1/images/edits" if reference_images else "/v1/images/generations",
@@ -664,6 +673,7 @@ def render_single_main_asset_sync(
 def build_main_generation_snapshot(
     *,
     confirmed_copy: dict[str, object],
+    strategy_preview: dict[str, Any],
     prompt_payload: dict[str, Any],
     reference_images: list,
     upstream_endpoint: str | None,
@@ -717,6 +727,10 @@ def build_main_generation_snapshot(
         "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
         "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
         "platform_overlay": prompt_payload.get("platform_overlay"),
+        "brand_memory_enabled": bool(strategy_preview.get("brand_memory_enabled")),
+        "brand_memory_applied": bool(strategy_preview.get("brand_memory_applied")),
+        "brand_memory_item_ids": [str(item) for item in strategy_preview.get("brand_memory_item_ids", []) if str(item).strip()],
+        "brand_memory_trace": strategy_preview.get("brand_memory_trace") if isinstance(strategy_preview.get("brand_memory_trace"), list) else [],
         "timing": dict(timing or {}),
         "download_retry_count": download_retry_count,
         "download_rescued": download_rescued,
@@ -1301,6 +1315,10 @@ def execute_main_generation_flow(
     session.current_step = 6
     update_session_last_generated_at_fn(session)
     refresh_session_search_cache_fn(session)
+    increment_brand_memory_usage(
+        db,
+        memory_item_ids=[str(item) for item in (effective_strategy_preview.get("brand_memory_item_ids") or []) if str(item).strip()],
+    )
 
     finalized_result = finalize_main_result_payload(
         expected_slot_ids=expected_slot_ids,

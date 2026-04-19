@@ -77,3 +77,4 @@ runtime/redis/dump.rdb
 agent_harness_improvement_plan.md
 CLAUDE.md
 PIPELINE_REFACTOR_HANDOFF.md
+/.omx

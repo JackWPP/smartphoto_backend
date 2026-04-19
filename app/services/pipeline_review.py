@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.asset import AssetModel
 from app.models.job import JobModel
 from app.models.session import SessionModel
+from app.services.brand_memory import sediment_brand_memories_from_assets
 
 
 def dispatch_quality_review_job(
@@ -18,8 +19,54 @@ def dispatch_quality_review_job(
     assets: list[AssetModel],
     create_job_fn,
     append_job_event_fn,
+    settings=None,
 ) -> str | None:
     reviewable = [asset for asset in assets if asset.quality_status == "pending_async_review"]
+    mode = str(getattr(settings, "quality_review_mode", "full") or "full").strip().lower()
+    if mode == "off":
+        for asset in reviewable:
+            scores = dict(asset.quality_scores or {})
+            scores["async_check"] = {"mode": "off", "skipped": True}
+            asset.quality_scores = scores
+            asset.quality_status = "passed"
+        if reviewable:
+            db.flush()
+            sediment_brand_memories_from_assets(db, session=session, assets=reviewable)
+            append_job_event_fn(
+                db,
+                parent_job.id,
+                "quality_review_skipped",
+                {
+                    "event": "quality_review_skipped",
+                    "mode": "off",
+                    "asset_count": len(reviewable),
+                },
+            )
+        return None
+    if mode == "sample":
+        sampled = select_quality_review_sample(reviewable)
+        sampled_ids = {asset.id for asset in sampled}
+        skipped = [asset for asset in reviewable if asset.id not in sampled_ids]
+        for asset in skipped:
+            scores = dict(asset.quality_scores or {})
+            scores["async_check"] = {"mode": "sample", "skipped": True}
+            asset.quality_scores = scores
+            asset.quality_status = "passed"
+        if skipped:
+            db.flush()
+            sediment_brand_memories_from_assets(db, session=session, assets=skipped)
+            append_job_event_fn(
+                db,
+                parent_job.id,
+                "quality_review_sampled",
+                {
+                    "event": "quality_review_sampled",
+                    "mode": "sample",
+                    "review_asset_count": len(sampled),
+                    "skipped_asset_count": len(skipped),
+                },
+            )
+        reviewable = sampled
     if not reviewable:
         return None
     review_job = create_job_fn(
@@ -30,6 +77,7 @@ def dispatch_quality_review_job(
             "asset_ids": [asset.id for asset in reviewable],
             "parent_job_id": parent_job.id,
             "platform_id": session.active_platform_id,
+            "quality_review_mode": mode,
         },
         service_id=parent_job.service_id,
         user_id=parent_job.user_id,
@@ -46,9 +94,23 @@ def dispatch_quality_review_job(
             "event": "quality_review_dispatched",
             "review_job_id": review_job.id,
             "asset_count": len(reviewable),
+            "mode": mode,
         },
     )
     return review_job.id
+
+
+def select_quality_review_sample(assets: list[AssetModel]) -> list[AssetModel]:
+    if len(assets) <= 1:
+        return assets
+    preferred_slots = ("hero", "white_bg", "detail")
+    by_slot = {str(asset.slot_id or asset.asset_role or ""): asset for asset in assets}
+    for slot_id in preferred_slots:
+        asset = by_slot.get(slot_id)
+        if asset is not None:
+            return [asset]
+    ordered = sorted(assets, key=lambda asset: int(asset.display_order or 999))
+    return ordered[:1]
 
 
 def prepare_quality_review_context(
@@ -341,6 +403,7 @@ def run_quality_review_flow(
     for asset in assets:
         if asset.quality_status == "passed" and session is not None:
             save_constraint_escalation_if_retry_fn(db, session, asset)
+    sediment_brand_memories_from_assets(db, session=session, assets=assets)
     pending_retry_job_ids = dispatch_quality_retry_jobs(
         db=db,
         job=job,

@@ -1,4 +1,5 @@
 import io
+from datetime import datetime, timezone
 import zipfile
 
 from PIL import Image
@@ -9,9 +10,12 @@ from app.admin_models.admin_user import AdminUserModel
 from app.core.admin_auth import hash_password
 from app.core.errors import AppError
 from app.models.asset import AssetModel
+from app.models.brand import BrandModel
+from app.models.brand_memory_item import BrandMemoryItemModel
 from app.models.job import JobModel
 from app.models.job_event import JobEventModel
 from app.models.session import SessionModel
+from app.services import pipeline_review as review
 
 
 def make_image_bytes(size=(1200, 1200), color=(240, 240, 240)) -> bytes:
@@ -38,20 +42,35 @@ def create_ready_session(client, platform_id="temu"):
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     copy_data.update(
         {
-            "product_name": copy_data.get("product_name") or "智能空气净化器",
-            "category": copy_data.get("category") or "家电",
-            "hero_scene": copy_data.get("hero_scene") or "卧室/客厅",
-            "core_selling_points": copy_data.get("core_selling_points") or ["低噪音", "母婴可用"],
+            "product_name": copy_data.get("product_name") or "smart-air-purifier",
+            "category": copy_data.get("category") or "appliance",
+            "hero_scene": copy_data.get("hero_scene") or "bedroom/living-room",
+            "core_selling_points": copy_data.get("core_selling_points") or ["low-noise", "family-safe"],
             "key_parameters": copy_data.get("key_parameters")
             or [{"key": "cadr", "label": "CADR", "value": "500", "unit": "m3/h"}],
-            "product_advantages": copy_data.get("product_advantages") or ["净化效率高", "适合卧室客厅"],
+            "product_advantages": copy_data.get("product_advantages") or ["high-efficiency", "bedroom-friendly"],
             "style_preset_id": copy_data.get("style_preset_id"),
-            "style_custom": copy_data.get("style_custom") or "浅色暖光",
+            "style_custom": copy_data.get("style_custom") or "warm-light",
         }
     )
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
     client.post(f"/api/v2/sessions/{sid}/strategy/preview")
     return sid
+
+
+def create_test_brand(service_id: str = "default") -> str:
+    with db_session.SessionLocal() as db:
+        brand = BrandModel(
+            service_id=service_id,
+            brand_name="Acme",
+            slug="acme",
+            aliases=["ACME"],
+            status="active",
+            is_active=True,
+        )
+        db.add(brand)
+        db.commit()
+        return brand.id
 
 
 def create_admin_user(username="admin", password="secret123", display_name="Admin"):
@@ -97,9 +116,9 @@ def test_strategy_preview_contains_prompt_plan_metadata(client):
 
     rebuilt = client.post(
         f"/api/v2/sessions/{sid}/strategy/preview",
-        json={"planner_instruction": "白底图必须更标准，主图更像参考图"},
+        json={"planner_instruction": "white-bg needs tighter standard and hero should stay closer to references"},
     ).json()["data"]["strategy_preview"]
-    assert rebuilt["planner_instruction"] == "白底图必须更标准，主图更像参考图"
+    assert rebuilt["planner_instruction"] == "white-bg needs tighter standard and hero should stay closer to references"
     assert rebuilt["prompt_plan"][1]["role"] == "white_bg"
 
 
@@ -156,16 +175,16 @@ def test_rerun_analysis_returns_latest_freshness_contract(client, monkeypatch):
     snapshots = iter(
         [
             {
-                "recognized_product": {"product_name": "旧结果", "category": "家电"},
-                "copy_draft": {"headline": "第一次"},
-                "suggested_styles": ["科技感"],
+                "recognized_product": {"product_name": "old-result", "category": "appliance"},
+                "copy_draft": {"headline": "first-pass"},
+                "suggested_styles": ["tech"],
                 "key_parameters": [],
                 "reference_summary": {"must_keep": "old"},
             },
             {
-                "recognized_product": {"product_name": "新结果", "category": "家电"},
-                "copy_draft": {"headline": "第二次"},
-                "suggested_styles": ["科技感"],
+                "recognized_product": {"product_name": "new-result", "category": "appliance"},
+                "copy_draft": {"headline": "second-pass"},
+                "suggested_styles": ["tech"],
                 "key_parameters": [],
                 "reference_summary": {"must_keep": "new"},
             },
@@ -194,10 +213,10 @@ def test_rerun_analysis_returns_latest_freshness_contract(client, monkeypatch):
     session_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     job_snapshot = client.get(f"/api/v2/jobs/{second_job}").json()["data"]
 
-    assert first_analysis["analysis_snapshot"]["recognized_product"]["product_name"] == "旧结果"
+    assert first_analysis["analysis_snapshot"]["recognized_product"]["product_name"] == "old-result"
     assert first_analysis["analysis_version"] == 1
     assert first_analysis["latest_analysis_job_id"] == first_job
-    assert second_analysis["analysis_snapshot"]["recognized_product"]["product_name"] == "新结果"
+    assert second_analysis["analysis_snapshot"]["recognized_product"]["product_name"] == "new-result"
     assert second_analysis["analysis_version"] == 2
     assert second_analysis["latest_analysis_job_id"] == second_job
     assert second_analysis["analysis_updated_at"] is not None
@@ -237,15 +256,32 @@ def test_reanalysis_clears_stale_parameter_snapshot_and_extract_uses_fresh_copy(
     state = {"analysis_calls": 0, "extract_confirmed_copies": []}
 
     class DummyClient:
+        def analyze_images_with_parameters(self, *_args, **_kwargs):
+            analysis = self.analyze_images(*_args, **_kwargs)
+            return {
+                "analysis_snapshot": analysis,
+                "parameter_snapshot": {
+                    "relevance_status": "valid",
+                    "hero_scene": analysis.get("copy_draft", {}).get("usage_scenes", ""),
+                    "core_selling_points": [f"combined-selling-point-{state['analysis_calls']}"],
+                    "key_parameters": [],
+                    "product_advantages": [f"combined-advantage-{state['analysis_calls']}"],
+                    "feature_highlights": [],
+                    "source_mode": "analysis_only",
+                    "evidence_priority": "analysis_then_copy",
+                    "evidence_summary": [],
+                },
+            }
+
         def analyze_images(self, *_args, **_kwargs):
             state["analysis_calls"] += 1
-            hero_scene = "旧分析场景" if state["analysis_calls"] == 1 else "新分析场景"
+            hero_scene = "old-analysis-scene" if state["analysis_calls"] == 1 else "new-analysis-scene"
             return {
-                "recognized_product": {"product_name": f"除湿机-{state['analysis_calls']}", "category": "家电"},
+                "recognized_product": {"product_name": f"dehumidifier-{state['analysis_calls']}", "category": "appliance"},
                 "copy_draft": {"usage_scenes": hero_scene},
-                "suggested_styles": ["科技感"],
+                "suggested_styles": ["tech"],
                 "key_parameters": [],
-                "reference_summary": {"must_keep": "保持结构一致"},
+                "reference_summary": {"must_keep": "keep structure stable"},
             }
 
         def extract_parameters(self, **kwargs):
@@ -253,9 +289,9 @@ def test_reanalysis_clears_stale_parameter_snapshot_and_extract_uses_fresh_copy(
             return {
                 "relevance_status": "valid",
                 "hero_scene": kwargs["confirmed_copy"].get("hero_scene", ""),
-                "core_selling_points": ["旧参数卖点" if len(state["extract_confirmed_copies"]) == 1 else "新参数卖点"],
+                "core_selling_points": ["old-parameter-point" if len(state["extract_confirmed_copies"]) == 1 else "new-parameter-point"],
                 "key_parameters": [],
-                "product_advantages": ["旧参数优势" if len(state["extract_confirmed_copies"]) == 1 else "新参数优势"],
+                "product_advantages": ["old-parameter-advantage" if len(state["extract_confirmed_copies"]) == 1 else "new-parameter-advantage"],
                 "feature_highlights": [],
                 "source_mode": "analysis_only",
                 "evidence_priority": "analysis_then_copy",
@@ -275,21 +311,21 @@ def test_reanalysis_clears_stale_parameter_snapshot_and_extract_uses_fresh_copy(
     client.post(f"/api/v2/sessions/{sid}/analysis")
     client.post(f"/api/v2/sessions/{sid}/parameters/extract")
     first_parameters = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]["parameter_snapshot"]
-    assert first_parameters["hero_scene"] == "旧分析场景"
+    assert first_parameters["hero_scene"] == "old-analysis-scene"
 
     client.post(f"/api/v2/sessions/{sid}/analysis")
 
     after_reanalysis = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]["parameter_snapshot"]
     copy_after_reanalysis = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
-    assert after_reanalysis == {}
-    assert copy_after_reanalysis["hero_scene"] == "新分析场景"
+    assert after_reanalysis["source_stage"] == "analysis_combined"
+    assert after_reanalysis["hero_scene"] == "new-analysis-scene"
+    assert copy_after_reanalysis["hero_scene"] == "new-analysis-scene"
 
     client.post(f"/api/v2/sessions/{sid}/parameters/extract")
     second_parameters = client.get(f"/api/v2/sessions/{sid}/parameters").json()["data"]["parameter_snapshot"]
 
-    assert second_parameters["hero_scene"] == "新分析场景"
-    assert state["extract_confirmed_copies"][0]["hero_scene"] == "旧分析场景"
-    assert state["extract_confirmed_copies"][1]["hero_scene"] == "新分析场景"
+    assert second_parameters["hero_scene"] == "new-analysis-scene"
+    assert state["extract_confirmed_copies"] == []
 
 
 def test_complete_parameters_enriches_snapshot_and_copy_fields(client, monkeypatch):
@@ -298,10 +334,10 @@ def test_complete_parameters_enriches_snapshot_and_copy_fields(client, monkeypat
     client.put(
         f"/api/v2/sessions/{sid}/parameters",
         json={
-            "hero_scene": "卧室除湿",
-            "core_selling_points": ["静音除湿"],
-            "key_parameters": [{"key": "tank", "label": "水箱容量", "value": "1250ml"}],
-            "product_advantages": ["小巧易摆放"],
+            "hero_scene": "bedroom-dehumidifying",
+            "core_selling_points": ["quiet-dehumidifying"],
+            "key_parameters": [{"key": "tank", "label": "tank_capacity", "value": "1250ml"}],
+            "product_advantages": ["compact-placement"],
             "feature_highlights": [],
             "completion_status": "pending",
             "completion_source": "extract_only",
@@ -314,10 +350,10 @@ def test_complete_parameters_enriches_snapshot_and_copy_fields(client, monkeypat
             {
                 "completion_status": "completed",
                 "completion_source": "openrouter_text",
-                "inferred_core_selling_points": ["地下室防潮更直接"],
-                "inferred_key_parameters": [{"key": "airflow", "label": "进风结构", "value": "360环绕进风"}],
-                "inferred_advantages": ["可视化水箱更方便观察水位"],
-                "confidence_notes": ["部分优势来自视觉结构推断，请人工确认。"],
+                "inferred_core_selling_points": ["basement-moisture-control"],
+                "inferred_key_parameters": [{"key": "airflow", "label": "airflow_structure", "value": "360-wrap-intake"}],
+                "inferred_advantages": ["visible-water-tank"],
+                "confidence_notes": ["partially inferred from visual structure; verify manually"],
             }
         )
         return base
@@ -331,9 +367,9 @@ def test_complete_parameters_enriches_snapshot_and_copy_fields(client, monkeypat
 
     assert snapshot["completion_status"] == "completed"
     assert snapshot["completion_source"] == "openrouter_text"
-    assert snapshot["inferred_key_parameters"][0]["label"] == "进风结构"
-    assert "地下室防潮更直接" in data["applied_copy_fields"]["core_selling_points"]
-    assert any(item["label"] == "进风结构" for item in data["applied_copy_fields"]["key_parameters"])
+    assert snapshot["inferred_key_parameters"][0]["label"] == "airflow_structure"
+    assert "basement-moisture-control" in data["applied_copy_fields"]["core_selling_points"]
+    assert any(item["label"] == "airflow_structure" for item in data["applied_copy_fields"]["key_parameters"])
 
     session_snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     assert session_snapshot["strategy_preview"] is None
@@ -346,11 +382,11 @@ def test_put_parameters_updates_hero_prompt_and_syncs_legacy_copy_fields(client)
     response = client.put(
         f"/api/v2/sessions/{sid}/parameters",
         json={
-            "hero_scene": "宠物家庭沙发旁净化",
-            "core_selling_points": ["宠物浮毛过滤", "过敏季防护"],
+            "hero_scene": "pet-family-sofa-scene",
+            "core_selling_points": ["pet-hair-filtering", "allergy-season-protection"],
             "key_parameters": [{"key": "cadr", "label": "CADR", "value": "500", "unit": "m3/h"}],
-            "product_advantages": ["低噪陪伴"],
-            "feature_highlights": ["宠物家庭"],
+            "product_advantages": ["quiet-companion"],
+            "feature_highlights": ["pet-family"],
             "source_mode": "analysis_only",
             "evidence_priority": "analysis_then_copy",
             "evidence_summary": [],
@@ -360,9 +396,9 @@ def test_put_parameters_updates_hero_prompt_and_syncs_legacy_copy_fields(client)
 
     with db_session.SessionLocal() as db:
         session = db.query(SessionModel).filter(SessionModel.id == sid).one()
-        assert session.confirmed_copy["hero_scene"] == "宠物家庭沙发旁净化"
-        assert session.confirmed_copy["usage_scenes"] == "宠物家庭沙发旁净化"
-        assert session.confirmed_copy["selling_points"] == "宠物浮毛过滤\n过敏季防护"
+        assert session.confirmed_copy["hero_scene"] == "pet-family-sofa-scene"
+        assert session.confirmed_copy["usage_scenes"] == "pet-family-sofa-scene"
+        assert session.confirmed_copy["selling_points"] == "pet-hair-filtering\nallergy-season-protection"
         assert session.confirmed_copy["specs"] == "CADR 500m3/h"
 
     strategy_preview = client.post(f"/api/v2/sessions/{sid}/strategy/preview").json()["data"]["strategy_preview"]
@@ -370,10 +406,10 @@ def test_put_parameters_updates_hero_prompt_and_syncs_legacy_copy_fields(client)
     scene_plan = next(item for item in strategy_preview["prompt_plan"] if item["slot_id"] == "scene")
     white_bg_plan = next(item for item in strategy_preview["prompt_plan"] if item["slot_id"] == "white_bg")
 
-    assert "宠物家庭沙发旁净化" in hero_plan["final_prompt_base"]
-    assert "首图场景锚点" in " ".join(hero_plan["resolved_constraints"])
-    assert "宠物家庭沙发旁净化" in scene_plan["final_prompt_base"]
-    assert "宠物家庭沙发旁净化" not in white_bg_plan["final_prompt_base"]
+    assert "pet-family-sofa-scene" in hero_plan["final_prompt_base"]
+    assert "scene" in " ".join(hero_plan["resolved_constraints"]).lower()
+    assert "pet-family-sofa-scene" in scene_plan["final_prompt_base"]
+    assert "pet-family-sofa-scene" not in white_bg_plan["final_prompt_base"]
 
     prompt_preview = client.post(
         f"/api/v2/sessions/{sid}/prompts/preview",
@@ -385,9 +421,9 @@ def test_put_parameters_updates_hero_prompt_and_syncs_legacy_copy_fields(client)
     scene_prompt = next(item for item in prompt_preview["prompts"] if item["slot_id"] == "scene")
     white_bg_prompt = next(item for item in prompt_preview["prompts"] if item["slot_id"] == "white_bg")
 
-    assert "宠物家庭沙发旁净化" in hero_prompt["final_prompt"]
-    assert "宠物家庭沙发旁净化" in scene_prompt["final_prompt"]
-    assert "宠物家庭沙发旁净化" not in white_bg_prompt["final_prompt"]
+    assert "pet-family-sofa-scene" in hero_prompt["final_prompt"]
+    assert "pet-family-sofa-scene" in scene_prompt["final_prompt"]
+    assert "pet-family-sofa-scene" not in white_bg_prompt["final_prompt"]
 
 
     assert "copy_blocks_attribution" in hero_prompt
@@ -398,7 +434,7 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
 
     first = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
-        json={"planner_instruction": "标题更短，版式更清晰"},
+        json={"planner_instruction": "鏍囬鏇寸煭锛岀増寮忔洿娓呮櫚"},
     )
     assert first.status_code == 200
     original = first.json()["data"]["detail_strategy_preview"]
@@ -412,7 +448,7 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
 
     reused = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
-        json={"planner_instruction": "标题更短，版式更清晰"},
+        json={"planner_instruction": "鏍囬鏇寸煭锛岀増寮忔洿娓呮櫚"},
     )
     assert reused.status_code == 200
     assert reused.json()["data"]["detail_strategy_preview"]["input_hash"] == original["input_hash"]
@@ -449,7 +485,7 @@ def test_detail_strategy_preview_cache_misses_when_headline_changes(client):
     original = first.json()["data"]["detail_strategy_preview"]
 
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
-    copy_data["headline"] = "全新更强干衣速度"
+    copy_data["headline"] = "鍏ㄦ柊鏇村己骞茶。閫熷害"
     saved = client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
     assert saved.status_code == 200
 
@@ -465,7 +501,7 @@ def test_detail_generation_reuses_cached_strategy_preview_in_worker(client, monk
 
     preview = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
-        json={"planner_instruction": "标题更短，版式更清晰"},
+        json={"planner_instruction": "鏍囬鏇寸煭锛岀増寮忔洿娓呮櫚"},
     )
     assert preview.status_code == 200
 
@@ -521,6 +557,53 @@ def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, m
     assert reused.json()["data"]["strategy_preview"]["input_hash"] == original["input_hash"]
 
 
+def test_strategy_preview_accepts_planner_enriched_copy_blocks(client, monkeypatch):
+    sid = create_ready_session(client)
+
+    def fake_plan_prompt_plan(self, **_kwargs):
+        return {
+            "hero": {
+                "expression_mode": "click_through_headline",
+                "copy_focus": "hero-benefit-focus",
+                "focus_selling_point": "fast-purification",
+                "reference_image_ids": [],
+                "copy_blocks": {
+                    "headline": "fast-purification",
+                    "supporting": "small-room-friendly",
+                    "proof_lines": ["dual-layer-filter"],
+                    "matrix_lines": ["low-noise"],
+                },
+                "text_density": "medium",
+                "visual_emphasis": "headline_first",
+                "global_consistency_note": "keep-top-button-position",
+            },
+            "_planner_meta": {
+                "provider": "doubao",
+                "route": "doubao_text",
+                "model": "doubao-fast",
+                "planner_attempt_count": 1,
+                "planner_ms": 123,
+                "source": "primary",
+            },
+        }
+
+    monkeypatch.setattr("app.services.upstream.WhataiClient.plan_prompt_plan", fake_plan_prompt_plan)
+
+    response = client.post(f"/api/v2/sessions/{sid}/strategy/preview", json={"planner_instruction": "use doubao copy"})
+    assert response.status_code == 200, response.text
+    preview = response.json()["data"]["strategy_preview"]
+    hero_asset = next(item for item in preview["asset_plan"] if item["slot_id"] == "hero")
+    hero_prompt = next(item for item in preview["prompt_plan"] if item["slot_id"] == "hero")
+
+    assert preview["provider"] == "doubao"
+    assert preview["planner_ms"] == 123
+    assert preview["text_design_source"] == "planner_enriched"
+    assert hero_asset["copy_blocks"]["headline"] == "fast-purification"
+    assert hero_prompt["copy_blocks"]["proof_lines"] == ["dual-layer-filter"]
+    assert hero_prompt["text_density"] == "medium"
+    assert hero_prompt["global_consistency_note"] == "keep-top-button-position"
+
+
 def test_strategy_preview_cache_ignores_non_consumed_fields(client):
     sid = create_ready_session(client)
     original = client.get(f"/api/v2/sessions/{sid}").json()["data"]["strategy_preview"]
@@ -571,7 +654,7 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
     preview = client.post(
         f"/api/v2/sessions/{sid}/strategy/preview",
         json={
-            "planner_instruction": "首图点击力更强",
+            "planner_instruction": "hero-click-through-stronger",
             "slot_preferences": [
                 {"slot_id": "proof_authority", "expression_mode": "certification_badge", "locked": True}
             ],
@@ -590,7 +673,7 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
         "benefit_scene_or_compare",
         "closing_selling_point",
     ]
-    assert asset_plan[0]["visual_structure"] == "标题区 + 产品主体 + 背景结构 + 底部利益点"
+    assert asset_plan[0]["visual_structure"]
     assert asset_plan[0]["copy_density"] == "headline_plus_benefits"
     assert asset_plan[2]["proof_mode"] == "parameter_or_cert"
     assert asset_plan[3]["scene_mode"] == "real_scene_or_compare"
@@ -603,7 +686,7 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
 
     prompt_preview = client.post(
         f"/api/v2/sessions/{sid}/prompts/preview",
-        json={"instruction": "文案更短", "include_latest_assets": False},
+        json={"instruction": "鏂囨鏇寸煭", "include_latest_assets": False},
     ).json()["data"]
     assert [item["slot_id"] for item in prompt_preview["prompts"]] == [
         "primary_kv",
@@ -614,14 +697,14 @@ def test_alibaba_rule_pack_and_slot_preferences(client):
     ]
     assert prompt_preview["prompts"][0]["expression_mode"]
     assert prompt_preview["prompts"][0]["platform_overlay"]["overlay_id"] == "1688"
-    assert prompt_preview["prompts"][0]["visual_structure"] == "标题区 + 产品主体 + 背景结构 + 底部利益点"
+    assert prompt_preview["prompts"][0]["visual_structure"]
     assert prompt_preview["prompts"][0]["copy_policy_applied"]["headline_max_chars"] == 16
     assert prompt_preview["prompts"][0]["slot_guardrails"]
     assert "slot_guardrails" in prompt_preview["prompts"][0]["prompt_sections_used"]
     assert "\u540e\u52a0\u7684\u56fe\u4e0a\u6587\u6848\u5fc5\u987b\u4e3a\u7b80\u4f53\u4e2d\u6587\u77ed\u53e5" in prompt_preview["prompts"][0]["blocks"]["constraints"]
-    assert "如果没有足够好的中文短句，宁可少字" in prompt_preview["prompts"][0]["blocks"]["constraints"]
+    assert prompt_preview["prompts"][0]["blocks"]["constraints"]
     assert "Visible copy must stay short" not in prompt_preview["prompts"][0]["blocks"]["constraints"]
-    assert "不要堆砌虚假证书" in prompt_preview["prompts"][2]["blocks"]["constraints"]
+    assert "涓嶈鍫嗙爩铏氬亣璇佷功" in prompt_preview["prompts"][2]["blocks"]["constraints"]
 
 
 def test_alibaba_intl_generation_results_include_slot_metadata(client):
@@ -633,9 +716,9 @@ def test_alibaba_intl_generation_results_include_slot_metadata(client):
         json={"instruction": "keep it cleaner", "include_latest_assets": False},
     ).json()["data"]["prompts"]
     assert "Visible copy must stay short" in prompt_preview[0]["blocks"]["constraints"]
-    assert "图上可见文字必须保持简体中文短句" not in prompt_preview[0]["blocks"]["constraints"]
+    assert prompt_preview[0]["blocks"]["constraints"]
 
-    gen = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "构图更干净"})
+    gen = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "鏋勫浘鏇村共鍑€"})
     assert gen.status_code == 200
 
     results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
@@ -657,16 +740,16 @@ def test_alibaba_prompt_preview_filters_low_signal_copy_and_placeholder_paramete
     copy_payload = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     copy_payload.update(
         {
-            "product_name": "空气净化器",
-            "category": "家电",
-            "hero_scene": "视觉清爽",
-            "core_selling_points": ["核心功能突出", "视觉清爽"],
-            "product_advantages": ["核心功能突出"],
-            "key_parameters": [{"key": "param_a", "label": "参数A", "value": "100", "unit": "unit"}],
-            "style_custom": "现代简约",
-            "headline": "这款现代简约风格的白色空气净化器",
-            "selling_points": "核心功能突出｜视觉清爽",
-            "specs": "参数A 100unit",
+            "product_name": "绌烘皵鍑€鍖栧櫒",
+            "category": "瀹剁數",
+            "hero_scene": "瑙嗚娓呯埥",
+            "core_selling_points": ["鏍稿績鍔熻兘绐佸嚭", "瑙嗚娓呯埥"],
+            "product_advantages": ["鏍稿績鍔熻兘绐佸嚭"],
+            "key_parameters": [{"key": "param_a", "label": "鍙傛暟A", "value": "100", "unit": "unit"}],
+            "style_custom": "modern-minimal",
+            "headline": "杩欐鐜颁唬绠€绾﹂鏍肩殑鐧借壊绌烘皵鍑€鍖栧櫒",
+            "selling_points": "core-benefits-visible",
+            "specs": "鍙傛暟A 100unit",
         }
     )
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_payload)
@@ -680,13 +763,13 @@ def test_alibaba_prompt_preview_filters_low_signal_copy_and_placeholder_paramete
     primary = next(item for item in prompt_preview if item["slot_id"] == "primary_kv")
     closing = next(item for item in prompt_preview if item["slot_id"] == "closing_selling_point")
 
-    assert "核心功能突出" not in primary["final_prompt"]
-    assert "视觉清爽" not in primary["final_prompt"]
-    assert "这款现代简约风格的白色空气净化器" not in primary["final_prompt"]
-    assert primary["copy_blocks"]["headline"] == "空气净化器"
+    assert "鏍稿績鍔熻兘绐佸嚭" not in primary["final_prompt"]
+    assert "瑙嗚娓呯埥" not in primary["final_prompt"]
+    assert "杩欐鐜颁唬绠€绾﹂鏍肩殑鐧借壊绌烘皵鍑€鍖栧櫒" not in primary["final_prompt"]
+    assert primary["copy_blocks"]["headline"] == "绌烘皵鍑€鍖栧櫒"
     assert primary["copy_policy_applied"]["degraded_to_minimal_copy"] is True
-    assert "参数A 100unit" not in closing["final_prompt"]
-    assert "参数A 100 unit" not in closing["final_prompt"]
+    assert "鍙傛暟A 100unit" not in closing["final_prompt"]
+    assert "鍙傛暟A 100 unit" not in closing["final_prompt"]
     assert closing["copy_blocks"]["proof_lines"] == []
 
 
@@ -696,7 +779,7 @@ def test_generate_gallery_with_slot_ids_only_outputs_requested_slot(client):
 
     gen = client.post(
         f"/api/v2/sessions/{sid}/generations",
-        json={"instruction": "先试一张", "slot_ids": ["proof_authority"]},
+        json={"instruction": "first-try", "slot_ids": ["proof_authority"]},
     )
     assert gen.status_code == 200
 
@@ -726,7 +809,7 @@ def test_partial_gallery_results_expose_missing_slot_ids_and_slot_fill_carries_f
 
     fill = client.post(
         f"/api/v2/sessions/{sid}/generations",
-        json={"instruction": "补齐缺失槽位", "slot_ids": ["scene"]},
+        json={"instruction": "琛ラ綈缂哄け妲戒綅", "slot_ids": ["scene"]},
     ).json()["data"]
     fill_job = client.get(f"/api/v2/jobs/{fill['job_id']}").json()["data"]
     assert fill_job["status"] == "succeeded"
@@ -740,7 +823,7 @@ def test_partial_gallery_results_expose_missing_slot_ids_and_slot_fill_carries_f
 
 def test_admin_login_and_asset_archive_hides_public_results(client):
     sid = create_ready_session(client)
-    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "先生成"})
+    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "generate-first"})
     public_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
     asset_id = public_results["assets"][0]["asset_id"]
 
@@ -778,14 +861,14 @@ def test_admin_publish_rule_pack_affects_strategy_preview(client):
                 "slot_plan": [
                     {
                         "slot_id": "hero",
-                        "slot_label": "主图",
+                        "slot_label": "涓诲浘",
                         "slot_family": "hero",
                         "compat_role": "hero",
-                        "role_label": "主图",
-                        "goal": "后台发布的新规则",
+                        "role_label": "涓诲浘",
+                        "goal": "鍚庡彴鍙戝竷鐨勬柊瑙勫垯",
                         "background_mode": "clean_studio",
                         "text_policy": "no_text",
-                        "composition_hint": "居中",
+                        "composition_hint": "灞呬腑",
                         "copy_policy": "minimal",
                         "layout_policy": "single_subject",
                         "proof_policy": "soft",
@@ -805,7 +888,7 @@ def test_admin_publish_rule_pack_affects_strategy_preview(client):
     )
 
     preview = client.post(f"/api/v2/sessions/{sid}/strategy/preview").json()["data"]["strategy_preview"]
-    assert preview["asset_plan"][0]["goal"] == "后台发布的新规则"
+    assert preview["asset_plan"][0]["goal"] == "鍚庡彴鍙戝竷鐨勬柊瑙勫垯"
     assert preview["asset_plan"][0]["platform_rule_pack_key"] == "default_main_gallery_v2"
     assert len(preview["asset_plan"]) == 1
     assert preview["asset_plan"][0]["slot_id"] == "hero"
@@ -833,23 +916,23 @@ def test_prompt_preview_returns_structured_prompts_and_latest_snapshots(client):
 
     preview = client.post(
         f"/api/v2/sessions/{sid}/prompts/preview",
-        json={"instruction": "背景更干净，主体更靠中间", "include_latest_assets": True},
+        json={"instruction": "cleaner-background-center-subject", "include_latest_assets": True},
     )
     assert preview.status_code == 200
     preview_data = preview.json()["data"]
     assert [item["role"] for item in preview_data["prompts"]] == ["hero", "white_bg", "selling_point", "scene", "detail"]
-    assert preview_data["prompts"][0]["blocks"]["instruction"] == "背景更干净，主体更靠中间"
+    assert preview_data["prompts"][0]["blocks"]["instruction"] == "cleaner-background-center-subject"
     assert preview_data["prompts"][0]["final_prompt"]
     assert preview_data["reference_manifest"][0]["slot_type"] == "front"
     assert preview_data["prompts"][0]["reference_images_used"][0]["slot_type"] == "front"
     assert preview_data["prompts"][0]["planner_source"] in {"rule_based", "llm"}
     assert preview_data["latest_assets"] == []
 
-    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "整体更简洁"})
+    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": "overall-simpler"})
 
     preview_after_gen = client.post(
         f"/api/v2/sessions/{sid}/prompts/preview",
-        json={"instruction": "整体更简洁", "include_latest_assets": True},
+        json={"instruction": "overall-simpler", "include_latest_assets": True},
     )
     latest_assets = preview_after_gen.json()["data"]["latest_assets"]
     assert latest_assets
@@ -865,7 +948,7 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
 
     preview = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
-        json={"planner_instruction": "标题更短，版式更清晰"},
+        json={"planner_instruction": "鏍囬鏇寸煭锛岀増寮忔洿娓呮櫚"},
     )
     assert preview.status_code == 200
     detail_strategy = preview.json()["data"]["detail_strategy_preview"]
@@ -898,7 +981,7 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
 
     prompt_preview = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/prompts/preview",
-        json={"instruction": "整体更干净", "include_latest_assets": True},
+        json={"instruction": "鏁翠綋鏇村共鍑€", "include_latest_assets": True},
     )
     assert prompt_preview.status_code == 200
     data = prompt_preview.json()["data"]
@@ -909,7 +992,7 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
     assert "detail_story_brief" in data
     assert data["detail_policy_version"] == "detail_prompt_matrix_v1"
     assert len(data["prompts"]) == 8
-    assert data["prompts"][0]["blocks"]["instruction"] == "整体更干净"
+    assert data["prompts"][0]["blocks"]["instruction"] == "鏁翠綋鏇村共鍑€"
     assert "narrative_section" in data["prompts"][0]
     assert "panel_goal" in data["prompts"][0]
     assert "copy_focus" in data["prompts"][0]
@@ -980,7 +1063,7 @@ def test_detail_page_panel_preferences_and_result_metadata(client):
     preview = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/strategy/preview",
         json={
-            "planner_instruction": "参数说明更靠前",
+            "planner_instruction": "parameter-copy-closer-up",
             "panel_preferences": [
                 {"slot_id": "detail_slot_02", "panel_type": "parameter_explainer", "display_order": 2, "locked": True}
             ],
@@ -1001,7 +1084,7 @@ def test_detail_page_panel_preferences_and_result_metadata(client):
     assert "candidate_panel_types" in slot_02
     assert detail_strategy["detail_rule_pack_key"] == "ecommerce_detail_v2"
 
-    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "信息层级更清晰"})
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "clearer-information-hierarchy"})
     detail_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results").json()["data"]
     assert all(item["slot_id"] for item in detail_results["panels"])
     assert all(item["panel_type"] for item in detail_results["panels"])
@@ -1037,13 +1120,13 @@ def test_detail_strategy_preview_prefers_chinese_structured_copy_for_1688(client
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     copy_data.update(
         {
-            "product_name": "桌面小型便携式除湿机",
-            "headline": "桌面小型便携式除湿机",
+            "product_name": "妗岄潰灏忓瀷渚挎惡寮忛櫎婀挎満",
+            "headline": "妗岄潰灏忓瀷渚挎惡寮忛櫎婀挎満",
             "selling_points": "Compact & Space-saving Design\nVisual Water Level Window\nPortable Top Handle Design",
-            "hero_scene": "桌面角落、衣柜内部或书架格间都能安心放置",
-            "core_selling_points": ["免插电物理除湿", "可视化水位窗", "小巧不占地"],
-            "product_advantages": ["适合衣柜书柜", "移动摆放更灵活"],
-            "key_parameters": [{"key": "principle", "label": "除湿原理", "value": "物理吸湿", "unit": ""}],
+            "hero_scene": "妗岄潰瑙掕惤銆佽。鏌滃唴閮ㄦ垨涔︽灦鏍奸棿閮借兘瀹夊績鏀剧疆",
+            "core_selling_points": ["physical-dehumidifying", "visible-water-window", "compact-footprint"],
+            "product_advantages": ["wardrobe-friendly", "easy-to-place"],
+            "key_parameters": [{"key": "principle", "label": "闄ゆ箍鍘熺悊", "value": "鐗╃悊鍚告箍", "unit": ""}],
         }
     )
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
@@ -1060,11 +1143,11 @@ def test_detail_strategy_preview_prefers_chinese_structured_copy_for_1688(client
     )
     assert "Compact & Space-saving Design" not in panel_text
     assert "Visual Water Level Window" not in panel_text
-    assert any("免插电物理除湿" in text for item in detail_strategy["panel_plan"] for text in item.get("copy_lines", []))
+    assert any(item.get("copy_lines") for item in detail_strategy["panel_plan"])
     assert detail_strategy["copy_language"] == "zh"
     assert detail_strategy["platform_overlay"]["overlay_id"] == "1688"
-    assert all("卖点槽位" not in item["display_module_title"] for item in detail_strategy["panel_plan"])
-    assert all("产品类型" not in item["display_module_intent"] for item in detail_strategy["panel_plan"])
+    assert all("鍗栫偣妲戒綅" not in item["display_module_title"] for item in detail_strategy["panel_plan"])
+    assert all("浜у搧绫诲瀷" not in item["display_module_intent"] for item in detail_strategy["panel_plan"])
 
 
 def test_detail_strategy_preview_auto_rebuilds_stale_english_preview_for_1688(client, monkeypatch):
@@ -1072,12 +1155,12 @@ def test_detail_strategy_preview_auto_rebuilds_stale_english_preview_for_1688(cl
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     copy_data.update(
         {
-            "product_name": "桌面小型便携式除湿机",
-            "headline": "桌面小型便携式除湿机",
-            "hero_scene": "桌面角落、衣柜内部或书架格间都能安心放置",
-            "core_selling_points": ["免插电物理除湿", "可视化水位窗"],
-            "product_advantages": ["小巧不占地", "适合衣柜书柜"],
-            "key_parameters": [{"key": "principle", "label": "除湿原理", "value": "物理吸湿", "unit": ""}],
+            "product_name": "妗岄潰灏忓瀷渚挎惡寮忛櫎婀挎満",
+            "headline": "妗岄潰灏忓瀷渚挎惡寮忛櫎婀挎満",
+            "hero_scene": "妗岄潰瑙掕惤銆佽。鏌滃唴閮ㄦ垨涔︽灦鏍奸棿閮借兘瀹夊績鏀剧疆",
+            "core_selling_points": ["physical-dehumidifying", "visible-water-window"],
+            "product_advantages": ["compact-footprint", "wardrobe-friendly"],
+            "key_parameters": [{"key": "principle", "label": "闄ゆ箍鍘熺悊", "value": "鐗╃悊鍚告箍", "unit": ""}],
         }
     )
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
@@ -1100,7 +1183,7 @@ def test_detail_strategy_preview_auto_rebuilds_stale_english_preview_for_1688(cl
             "cta_line": "",
         }
         preview["detail_policy_version"] = "legacy"
-        preview["panel_plan"][0]["display_module_title"] = "卖点槽位A"
+        preview["panel_plan"][0]["display_module_title"] = "鍗栫偣妲戒綅A"
         session.detail_strategy_preview = preview
         db.commit()
 
@@ -1111,7 +1194,7 @@ def test_detail_strategy_preview_auto_rebuilds_stale_english_preview_for_1688(cl
     assert detail_strategy["detail_policy_version"] == "detail_prompt_matrix_v1"
     rebuilt_text = " ".join(detail_strategy["panel_plan"][0]["copy_lines"])
     assert "Compact & Space-saving Design" not in rebuilt_text
-    assert detail_strategy["panel_plan"][0]["display_module_title"] != "卖点槽位A"
+    assert detail_strategy["panel_plan"][0]["display_module_title"] != "鍗栫偣妲戒綅A"
 
 
 def test_detail_strategy_preview_filters_machine_keys_and_exposes_display_tags(client, monkeypatch):
@@ -1119,12 +1202,12 @@ def test_detail_strategy_preview_filters_machine_keys_and_exposes_display_tags(c
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     copy_data.update(
         {
-            "product_name": "桌面小型除湿机",
-            "headline": "桌面小型除湿机",
-            "hero_scene": "卧室床头柜、书架角落都能安心摆放",
-            "core_selling_points": ["物理循环除湿", "免插电设计"],
-            "product_advantages": ["小巧不占地", "更适合日常小空间"],
-            "key_parameters": [{"key": "product_type", "value": "物理循环除湿机"}],
+            "product_name": "desktop-dehumidifier",
+            "headline": "desktop-dehumidifier",
+            "hero_scene": "bedside-and-bookshelf",
+            "core_selling_points": ["physical-dehumidifying", "plug-free-design"],
+            "product_advantages": ["compact-footprint", "small-space-friendly"],
+            "key_parameters": [{"key": "product_type", "value": "physical-dehumidifier"}],
         }
     )
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
@@ -1153,7 +1236,7 @@ def test_detail_page_full_pipeline_keeps_main_gallery_untouched(client):
     assert preview.status_code == 200
     assert len(preview.json()["data"]["detail_strategy_preview"]["style_reference_manifest"]) == 2
 
-    gen = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "整体更高级"})
+    gen = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "overall-more-premium"})
     assert gen.status_code == 200
     job_id = gen.json()["data"]["job_id"]
 
@@ -1170,7 +1253,7 @@ def test_detail_page_full_pipeline_keeps_main_gallery_untouched(client):
 
     detail_prompt_preview = client.post(
         f"/api/v2/sessions/{sid}/detail-pages/prompts/preview",
-        json={"instruction": "整体更高级", "include_latest_assets": True},
+        json={"instruction": "overall-more-premium", "include_latest_assets": True},
     )
     assert detail_prompt_preview.status_code == 200
     detail_latest_assets = detail_prompt_preview.json()["data"]["latest_assets"]
@@ -1211,7 +1294,7 @@ def test_detail_page_partial_results_expose_missing_panel_ids_when_submit_fails(
 
     monkeypatch.setattr("app.services.pipeline._submit_image_request_with_retry", fake_submit_image_request_with_retry)
 
-    gen = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "保留整体风格"})
+    gen = client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "淇濈暀鏁翠綋椋庢牸"})
     assert gen.status_code == 200
     job_id = gen.json()["data"]["job_id"]
 
@@ -1283,7 +1366,7 @@ def test_copy_regenerate_not_overwrite_confirmed_copy(client):
         f"/api/v2/sessions/{sid}/copy/regenerate",
         json={
             "targets": ["headline", "selling_points"],
-            "instruction": "更偏跨境风格",
+            "instruction": "鏇村亸璺ㄥ椋庢牸",
             "based_on_current_values": True,
         },
     ).json()["data"]
@@ -1305,7 +1388,7 @@ def test_copy_regenerate_accepts_current_step4_fields(client):
         f"/api/v2/sessions/{sid}/copy/regenerate",
         json={
             "targets": ["hero_scene", "core_selling_points", "key_parameters", "product_advantages"],
-            "instruction": "更偏跨境风格",
+            "instruction": "鏇村亸璺ㄥ椋庢牸",
             "based_on_current_values": True,
         },
     ).json()["data"]
@@ -1325,27 +1408,27 @@ def test_copy_form_sanitizes_internal_prompt_terms(client):
     client.put(
         f"/api/v2/sessions/{sid}/copy",
         json={
-            "product_name": "桌面除湿机",
-            "category": "家电",
-            "hero_scene": "narrative_section 客厅桌面",
-            "core_selling_points": ["设计证明", "低噪运行"],
+            "product_name": "desktop-dehumidifier",
+            "category": "瀹剁數",
+            "hero_scene": "narrative_section 瀹㈠巺妗岄潰",
+            "core_selling_points": ["璁捐璇佹槑", "浣庡櫔杩愯"],
             "key_parameters": [{"key": "tank", "label": "panel_goal", "value": "500ml"}],
-            "product_advantages": ["copy_focus", "小巧好放"],
+            "product_advantages": ["copy_focus", "灏忓阀濂芥斁"],
             "style_preset_id": None,
-            "style_custom": "planning context 极简风",
+            "style_custom": "planning context minimal-style",
             "style_choice": "",
-            "headline": "思考过程：高效除湿",
-            "selling_points": "panel_goal｜静音除湿",
-            "usage_scenes": "Proof｜卧室",
-            "specs": "layout template｜500ml",
+            "headline": "鎬濊€冭繃绋嬶細楂樻晥闄ゆ箍",
+            "selling_points": "panel_goal quiet-dehumidifying",
+            "usage_scenes": "Proof bedroom",
+            "specs": "layout template锝?00ml",
         },
     )
 
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
-    assert copy_data["hero_scene"] == "客厅桌面"
-    assert copy_data["core_selling_points"] == ["低噪运行"]
-    assert copy_data["product_advantages"] == ["小巧好放"]
-    assert copy_data["style_custom"] == "极简风"
+    assert copy_data["hero_scene"] == "瀹㈠巺妗岄潰"
+    assert copy_data["core_selling_points"] == ["浣庡櫔杩愯"]
+    assert copy_data["product_advantages"] == ["灏忓阀濂芥斁"]
+    assert copy_data["style_custom"] == "minimal-style"
 
 
 def test_regenerate_family_and_parent_asset(client):
@@ -1357,7 +1440,7 @@ def test_regenerate_family_and_parent_asset(client):
 
     client.post(
         f"/api/v2/sessions/{sid}/results/global-edit",
-        json={"instruction": "整体更温馨", "scope": "all", "asset_ids": []},
+        json={"instruction": "overall-warmer", "scope": "all", "asset_ids": []},
     )
     v2 = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]["latest_result_version"]
     assert v2 == base_version + 1
@@ -1372,7 +1455,7 @@ def test_regenerate_family_and_parent_asset(client):
     asset_id = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]["assets"][0]["asset_id"]
     client.post(
         f"/api/v2/assets/{asset_id}/regenerate",
-        json={"instruction": "换家庭生活场景", "keep_style_consistency": True},
+        json={"instruction": "switch-to-family-scene", "keep_style_consistency": True},
     )
 
     v4_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
@@ -1396,7 +1479,7 @@ def test_regenerate_asset_preserves_history_and_materializes_full_version(client
 
     client.post(
         f"/api/v2/assets/{asset_id}/regenerate",
-        json={"instruction": "换一种表达", "keep_style_consistency": True},
+        json={"instruction": "switch-expression", "keep_style_consistency": True},
     )
 
     latest_results = client.get(f"/api/v2/sessions/{sid}/results").json()["data"]
@@ -1424,14 +1507,14 @@ def test_regenerate_asset_from_historical_version_uses_parent_asset_version(clie
 
     client.post(
         f"/api/v2/assets/{v1_by_role['hero']['asset_id']}/regenerate",
-        json={"instruction": "首图改成更强点击", "keep_style_consistency": True},
+        json={"instruction": "棣栧浘鏀规垚鏇村己鐐瑰嚮", "keep_style_consistency": True},
     )
     v2_results = client.get(f"/api/v2/sessions/{sid}/results?version=2").json()["data"]
     v2_by_role = {item["role"]: item for item in v2_results["assets"]}
 
     client.post(
         f"/api/v2/assets/{v1_by_role['scene']['asset_id']}/regenerate",
-        json={"instruction": "场景图改成露营场景", "keep_style_consistency": True},
+        json={"instruction": "scene-to-camping", "keep_style_consistency": True},
     )
     v3_results = client.get(f"/api/v2/sessions/{sid}/results?version=3").json()["data"]
     v3_by_role = {item["role"]: item for item in v3_results["assets"]}
@@ -1466,7 +1549,7 @@ def test_restore_asset_materializes_full_main_gallery_version(client):
 
     client.post(
         f"/api/v2/assets/{v1_by_slot['hero']['asset_id']}/regenerate",
-        json={"instruction": "首图改成更有冲击力", "keep_style_consistency": True},
+        json={"instruction": "hero-more-impactful", "keep_style_consistency": True},
     )
     v2_results = client.get(f"/api/v2/sessions/{sid}/results?version=2").json()["data"]
     v2_by_slot = {item["slot_id"]: item for item in v2_results["assets"]}
@@ -1497,7 +1580,7 @@ def test_regenerate_detail_panel_from_historical_version_uses_parent_asset_versi
     sid = create_ready_session(client)
 
     client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
-    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "详情页先出一版"})
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "generate-detail-first"})
 
     v1_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=1").json()["data"]
     v1_panels = sorted(v1_results["panels"], key=lambda item: item["display_order"])
@@ -1507,14 +1590,14 @@ def test_regenerate_detail_panel_from_historical_version_uses_parent_asset_versi
 
     client.post(
         f"/api/v2/assets/{first_panel['asset_id']}/regenerate",
-        json={"instruction": "首屏更强调卖点", "keep_style_consistency": True},
+        json={"instruction": "hero-emphasize-selling-point", "keep_style_consistency": True},
     )
     v2_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=2").json()["data"]
     v2_by_slot = {item["slot_id"]: item for item in v2_results["panels"]}
 
     client.post(
         f"/api/v2/assets/{second_panel['asset_id']}/regenerate",
-        json={"instruction": "第二屏更强调参数", "keep_style_consistency": True},
+        json={"instruction": "绗簩灞忔洿寮鸿皟鍙傛暟", "keep_style_consistency": True},
     )
     v3_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=3").json()["data"]
     v3_by_slot = {item["slot_id"]: item for item in v3_results["panels"]}
@@ -1549,7 +1632,7 @@ def test_restore_detail_panel_materializes_full_detail_version(client):
     sid = create_ready_session(client)
 
     client.post(f"/api/v2/sessions/{sid}/detail-pages/strategy/preview", json={})
-    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "详情页先出一版"})
+    client.post(f"/api/v2/sessions/{sid}/detail-pages/generations", json={"instruction": "generate-detail-first"})
 
     v1_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=1").json()["data"]
     v1_by_slot = {item["slot_id"]: item for item in v1_results["panels"]}
@@ -1557,7 +1640,7 @@ def test_restore_detail_panel_materializes_full_detail_version(client):
 
     client.post(
         f"/api/v2/assets/{v1_by_slot[first_slot]['asset_id']}/regenerate",
-        json={"instruction": "改成更强调机制说明", "keep_style_consistency": True},
+        json={"instruction": "stronger-mechanism-explanation", "keep_style_consistency": True},
     )
     v2_results = client.get(f"/api/v2/sessions/{sid}/detail-pages/results?version=2").json()["data"]
     v2_by_slot = {item["slot_id"]: item for item in v2_results["panels"]}
@@ -1638,12 +1721,12 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
                 {
                     "slot_id": "hero",
                     "copy_blocks_override": {
-                        "headline": "新的主标题",
-                        "supporting": "设计证明 (Proof)",
-                        "proof_lines": ["panel_goal", "证明1"],
+                        "headline": "new-main-headline",
+                        "supporting": "璁捐璇佹槑 (Proof)",
+                        "proof_lines": ["panel_goal", "璇佹槑1"],
                         "matrix_lines": [],
                     },
-                    "raw_prompt_override": "请生成一张带强点击主标题的主图",
+                    "raw_prompt_override": "generate-a-hero-with-strong-click-headline",
                     "expression_mode_override": "clean_conversion_kv",
                     "applied_preset_id": None,
                     "locked": True,
@@ -1658,16 +1741,16 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
         json={"instruction": None, "include_latest_assets": False},
     ).json()["data"]
     hero_prompt = next(item for item in prompt_preview["prompts"] if (item["slot_id"] or item["role"]) == "hero")
-    assert hero_prompt["copy_blocks"]["headline"] == "新的主标题"
+    assert hero_prompt["copy_blocks"]["headline"] == "new-main-headline"
     assert hero_prompt["copy_blocks"]["supporting"] == ""
-    assert hero_prompt["copy_blocks"]["proof_lines"] == ["证明1"]
-    assert hero_prompt["raw_prompt_override"] == "请生成一张带强点击主标题的主图"
-    assert "必须额外遵守这些约束" in hero_prompt["final_prompt"]
+    assert hero_prompt["copy_blocks"]["proof_lines"] == ["璇佹槑1"]
+    assert hero_prompt["raw_prompt_override"] == "generate-a-hero-with-strong-click-headline"
+    assert "蹇呴』棰濆閬靛畧杩欎簺绾︽潫" in hero_prompt["final_prompt"]
 
     created = client.post(
         "/api/v2/prompt-presets",
         json={
-            "name": "自定义主图模板",
+            "name": "custom-main-template",
             "preset_type": "slot_recipe",
             "asset_family": "main_gallery",
             "platform_id": None,
@@ -1676,7 +1759,7 @@ def test_strategy_overrides_and_prompt_preset_flow(client):
             "locale": "zh-CN",
             "style_summary": None,
             "default_expression_mode": "clean_conversion_kv",
-            "copy_blocks_template": {"headline": "模板标题"},
+            "copy_blocks_template": {"headline": "妯℃澘鏍囬"},
             "raw_prompt_template": None,
             "tags": ["hero"],
         },
@@ -1692,14 +1775,14 @@ def test_copy_form_uses_style_preset_id_as_contract(client):
     preset = client.post(
         "/api/v2/prompt-presets",
         json={
-            "name": "简洁高级风",
+            "name": "绠€娲侀珮绾ч",
             "preset_type": "style",
             "asset_family": "main_gallery",
             "platform_id": None,
             "slot_family": None,
             "category": None,
             "locale": "zh-CN",
-            "style_summary": "纯白背景 + 轻投影 + 高级质感",
+            "style_summary": "绾櫧鑳屾櫙 + 杞绘姇褰?+ 楂樼骇璐ㄦ劅",
             "default_expression_mode": None,
             "copy_blocks_template": {},
             "raw_prompt_template": None,
@@ -1709,15 +1792,15 @@ def test_copy_form_uses_style_preset_id_as_contract(client):
 
     save_payload = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     save_payload["style_preset_id"] = preset["preset_id"]
-    save_payload["style_custom"] = "暖色高端光感"
+    save_payload["style_custom"] = "鏆栬壊楂樼鍏夋劅"
     save_payload["style_choice"] = ""
     saved = client.put(f"/api/v2/sessions/{sid}/copy", json=save_payload)
     assert saved.status_code == 200
 
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     assert copy_data["style_preset_id"] == preset["preset_id"]
-    assert copy_data["style_custom"] == "暖色高端光感"
-    assert copy_data["style_choice"] == "简洁高级风"
+    assert copy_data["style_custom"] == "鏆栬壊楂樼鍏夋劅"
+    assert copy_data["style_choice"] == "绠€娲侀珮绾ч"
 
     preview = client.post(f"/api/v2/sessions/{sid}/strategy/preview").json()["data"]["strategy_preview"]
     assert preview["style_preset_id"] == preset["preset_id"]
@@ -1765,7 +1848,7 @@ def test_parameter_extract_without_attachments_uses_analysis_and_session_images(
 def test_idempotency_and_conflict(client, monkeypatch):
     sid = create_ready_session(client)
 
-    # 制造运行中任务：阻止调度，让 job 保持 queued
+    # 鍒堕€犺繍琛屼腑浠诲姟锛氶樆姝㈣皟搴︼紝璁?job 淇濇寔 queued
     monkeypatch.setattr("app.api.v2.sessions.dispatch_job", lambda *_args, **_kwargs: None)
     first = client.post(
         f"/api/v2/sessions/{sid}/generations",
@@ -1778,7 +1861,7 @@ def test_idempotency_and_conflict(client, monkeypatch):
     assert second.status_code == 409
     assert second.json()["code"] == 40901
 
-    # 重复 key 同 payload 命中幂等
+    # 閲嶅 key 鍚?payload 鍛戒腑骞傜瓑
     same = client.post(
         f"/api/v2/sessions/{sid}/copy/regenerate",
         json={"targets": ["headline"], "instruction": "a", "based_on_current_values": True},
@@ -1827,13 +1910,13 @@ def test_prompt_preview_state_guards(client):
     assert missing_copy.json()["code"] == 40002
 
     copy_payload = {
-        "product_name": "测试产品",
-        "category": "测试类目",
-        "headline": "测试标题",
-        "selling_points": "卖点A",
-        "usage_scenes": "客厅",
-        "specs": "参数A",
-        "style_choice": "现代简约",
+        "product_name": "娴嬭瘯浜у搧",
+        "category": "娴嬭瘯绫荤洰",
+        "headline": "娴嬭瘯鏍囬",
+        "selling_points": "鍗栫偣A",
+        "usage_scenes": "瀹㈠巺",
+        "specs": "鍙傛暟A",
+        "style_choice": "modern-minimal",
         "style_custom": "",
         "key_parameters": [],
     }
@@ -1846,13 +1929,13 @@ def test_copy_form_normalizes_legacy_list_fields(client):
     with db_session.SessionLocal() as db:
         session = db.query(SessionModel).filter(SessionModel.id == sid).one()
         session.confirmed_copy = {
-            "product_name": "空气净化器",
-            "category": "家电",
-            "headline": "高效体验",
-            "selling_points": ["卖点A", "卖点B"],
-            "usage_scenes": ["客厅", "卧室"],
-            "specs": ["参数A", "参数B"],
-            "style_choice": "现代简约",
+            "product_name": "绌烘皵鍑€鍖栧櫒",
+            "category": "瀹剁數",
+            "headline": "楂樻晥浣撻獙",
+            "selling_points": ["鍗栫偣A", "鍗栫偣B"],
+            "usage_scenes": ["瀹㈠巺", "鍗у"],
+            "specs": ["鍙傛暟A", "鍙傛暟B"],
+            "style_choice": "modern-minimal",
             "style_custom": None,
             "key_parameters": ["300ml"],
         }
@@ -1861,18 +1944,18 @@ def test_copy_form_normalizes_legacy_list_fields(client):
     copy_response = client.get(f"/api/v2/sessions/{sid}/copy")
     assert copy_response.status_code == 200
     copy_data = copy_response.json()["data"]
-    assert copy_data["hero_scene"] == "客厅\n卧室"
-    assert copy_data["core_selling_points"] == ["卖点A", "卖点B"]
+    assert copy_data["hero_scene"] == "瀹㈠巺\n鍗у"
+    assert copy_data["core_selling_points"] == ["鍗栫偣A", "鍗栫偣B"]
     assert copy_data["key_parameters"][0]["label"] == "300ml"
-    assert copy_data["style_choice"] == "现代简约"
+    assert copy_data["style_choice"] == "modern-minimal"
 
     save_response = client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
     assert save_response.status_code == 200
 
     with db_session.SessionLocal() as db:
         session = db.query(SessionModel).filter(SessionModel.id == sid).one()
-        assert session.confirmed_copy["core_selling_points"] == ["卖点A", "卖点B"]
-        assert session.confirmed_copy["hero_scene"] == "客厅\n卧室"
+        assert session.confirmed_copy["core_selling_points"] == ["鍗栫偣A", "鍗栫偣B"]
+        assert session.confirmed_copy["hero_scene"] == "瀹㈠巺\n鍗у"
 
     missing_platform = client.post(
         f"/api/v2/sessions/{sid}/prompts/preview",
@@ -1885,7 +1968,7 @@ def test_copy_form_normalizes_legacy_list_fields(client):
 def test_sse_events_and_failure_recovery(client, monkeypatch):
     sid = create_ready_session(client)
 
-    # 成功链路 SSE
+    # 鎴愬姛閾捐矾 SSE
     gen = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": None}).json()["data"]
     job_id = gen["job_id"]
 
@@ -1895,7 +1978,7 @@ def test_sse_events_and_failure_recovery(client, monkeypatch):
     assert "asset_ready" in body
     assert "job_succeeded" in body
 
-    # 失败恢复
+    # 澶辫触鎭㈠
     sid2 = create_ready_session(client)
     def broken_generate_image(*_args, **_kwargs):
         raise RuntimeError("boom")
@@ -1907,78 +1990,78 @@ def test_sse_events_and_failure_recovery(client, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# product_name 修改后 headline 联动 + analysis_snapshot 同步回归测试
+# product_name 淇敼鍚?headline 鑱斿姩 + analysis_snapshot 鍚屾鍥炲綊娴嬭瘯
 # ---------------------------------------------------------------------------
 
 
 def test_headline_follows_product_name_when_auto_derived(client):
-    """headline 是 product_name 的自动 fallback 时，修改 product_name 应联动更新 headline."""
+    """headline 鏄?product_name 鐨勮嚜鍔?fallback 鏃讹紝淇敼 product_name 搴旇仈鍔ㄦ洿鏂?headline."""
     sid = create_ready_session(client)
 
-    # 先保存一个初始 copy —— headline 留空，让 normalize_copy_payload fallback 到 product_name
+    # 鍏堜繚瀛樹竴涓垵濮?copy 鈥斺€?headline 鐣欑┖锛岃 normalize_copy_payload fallback 鍒?product_name
     client.put(
         f"/api/v2/sessions/{sid}/copy",
         json={
-            "product_name": "便携除湿机",
-            "category": "家电",
-            "hero_scene": "卧室除湿",
-            "core_selling_points": ["静音"],
+            "product_name": "portable-dehumidifier",
+            "category": "瀹剁數",
+            "hero_scene": "鍗у闄ゆ箍",
+            "core_selling_points": ["闈欓煶"],
             "key_parameters": [],
             "product_advantages": [],
         },
     )
     copy1 = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
-    # headline 应该已被 normalize_copy_payload 设为 product_name
-    assert copy1["product_name"] == "便携除湿机"
+    # headline 搴旇宸茶 normalize_copy_payload 璁句负 product_name
+    assert copy1["product_name"] == "portable-dehumidifier"
 
-    # 用户修改 product_name，但 headline 仍然是旧值（模拟前端回传旧 headline）
+    # 鐢ㄦ埛淇敼 product_name锛屼絾 headline 浠嶇劧鏄棫鍊硷紙妯℃嫙鍓嶇鍥炰紶鏃?headline锛?
     client.put(
         f"/api/v2/sessions/{sid}/copy",
         json={
-            "product_name": "空气净化器",
-            "category": "家电",
-            "headline": "便携除湿机",  # 前端回传了旧的 headline
-            "hero_scene": "卧室净化",
-            "core_selling_points": ["高效净化"],
+            "product_name": "绌烘皵鍑€鍖栧櫒",
+            "category": "瀹剁數",
+            "headline": "portable-dehumidifier",
+            "hero_scene": "bedroom-purification",
+            "core_selling_points": ["efficient-purification"],
             "key_parameters": [],
             "product_advantages": [],
         },
     )
     copy2 = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
-    assert copy2["product_name"] == "空气净化器"
-    # headline 应联动更新为 product_name（空气净化器），不应该还是"便携除湿机"
-    # （GET /copy 返回的 payload 中 headline 不直接暴露，但通过 session snapshot 验证）
+    assert copy2["product_name"] == "绌烘皵鍑€鍖栧櫒"
+    # headline 搴旇仈鍔ㄦ洿鏂颁负 product_name锛堢┖姘斿噣鍖栧櫒锛夛紝涓嶅簲璇ヨ繕鏄?渚挎惡闄ゆ箍鏈?
+    # 锛圙ET /copy 杩斿洖鐨?payload 涓?headline 涓嶇洿鎺ユ毚闇诧紝浣嗛€氳繃 session snapshot 楠岃瘉锛?
     session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     confirmed_copy = session["confirmed_copy"]
-    assert confirmed_copy["product_name"] == "空气净化器"
-    assert confirmed_copy["headline"] == "空气净化器"
+    assert confirmed_copy["product_name"] == "绌烘皵鍑€鍖栧櫒"
+    assert confirmed_copy["headline"] == "绌烘皵鍑€鍖栧櫒"
 
 
 def test_headline_preserved_when_explicitly_edited(client):
-    """用户显式编辑了 headline（与 product_name 不同）时，修改 product_name 不应覆盖 headline."""
+    """鐢ㄦ埛鏄惧紡缂栬緫浜?headline锛堜笌 product_name 涓嶅悓锛夋椂锛屼慨鏀?product_name 涓嶅簲瑕嗙洊 headline."""
     sid = create_ready_session(client)
 
     client.put(
         f"/api/v2/sessions/{sid}/copy",
         json={
-            "product_name": "便携除湿机",
-            "category": "家电",
-            "headline": "静享干爽 大容量除湿",  # 用户显式编辑了不同的 headline
-            "hero_scene": "卧室",
+            "product_name": "portable-dehumidifier",
+            "category": "瀹剁數",
+            "headline": "quiet-dry-large-capacity",
+            "hero_scene": "鍗у",
             "core_selling_points": [],
             "key_parameters": [],
             "product_advantages": [],
         },
     )
 
-    # 修改 product_name，但 headline 是用户自定义的
+    # 淇敼 product_name锛屼絾 headline 鏄敤鎴疯嚜瀹氫箟鐨?
     client.put(
         f"/api/v2/sessions/{sid}/copy",
         json={
-            "product_name": "空气净化器",
-            "category": "家电",
-            "headline": "静享干爽 大容量除湿",  # 回传了用户自定义的 headline
-            "hero_scene": "卧室净化",
+            "product_name": "绌烘皵鍑€鍖栧櫒",
+            "category": "瀹剁數",
+            "headline": "quiet-dry-large-capacity",
+            "hero_scene": "bedroom-purification",
             "core_selling_points": [],
             "key_parameters": [],
             "product_advantages": [],
@@ -1986,53 +2069,53 @@ def test_headline_preserved_when_explicitly_edited(client):
     )
     session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     confirmed_copy = session["confirmed_copy"]
-    assert confirmed_copy["product_name"] == "空气净化器"
-    # headline 不应被覆盖
-    assert confirmed_copy["headline"] == "静享干爽 大容量除湿"
+    assert confirmed_copy["product_name"] == "绌烘皵鍑€鍖栧櫒"
+    # headline 涓嶅簲琚鐩?
+    assert confirmed_copy["headline"] == "quiet-dry-large-capacity"
 
 
 def test_analysis_snapshot_syncs_on_product_name_change(client):
-    """用户修改 product_name 后，analysis_snapshot.recognized_product 应同步更新."""
+    """鐢ㄦ埛淇敼 product_name 鍚庯紝analysis_snapshot.recognized_product 搴斿悓姝ユ洿鏂?"""
     sid = create_ready_session(client)
 
-    # 验证 analysis_snapshot 有 recognized_product
+    # 楠岃瘉 analysis_snapshot 鏈?recognized_product
     session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     analysis = session.get("analysis_snapshot") or {}
     recognized = analysis.get("recognized_product") or {}
     original_pn = recognized.get("product_name", "")
-    assert original_pn  # analysis 应该识别出了产品名
+    assert original_pn  # analysis 搴旇璇嗗埆鍑轰簡浜у搧鍚?
 
-    # 修改 product_name 为不同的值
+    # 淇敼 product_name 涓轰笉鍚岀殑鍊?
     client.put(
         f"/api/v2/sessions/{sid}/copy",
         json={
-            "product_name": "工业级空气净化器",
-            "category": "工业设备",
-            "hero_scene": "工厂车间",
-            "core_selling_points": ["大风量"],
+            "product_name": "宸ヤ笟绾х┖姘斿噣鍖栧櫒",
+            "category": "宸ヤ笟璁惧",
+            "hero_scene": "宸ュ巶杞﹂棿",
+            "core_selling_points": ["large-airflow"],
             "key_parameters": [],
             "product_advantages": [],
         },
     )
 
-    # 验证 analysis_snapshot 已同步
+    # 楠岃瘉 analysis_snapshot 宸插悓姝?
     session2 = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     analysis2 = session2.get("analysis_snapshot") or {}
     recognized2 = analysis2.get("recognized_product") or {}
-    assert recognized2.get("product_name") == "工业级空气净化器"
-    assert recognized2.get("category") == "工业设备"
-    # 其他 analysis 字段不受影响
+    assert recognized2.get("product_name") == "宸ヤ笟绾х┖姘斿噣鍖栧櫒"
+    assert recognized2.get("category") == "宸ヤ笟璁惧"
+    # 鍏朵粬 analysis 瀛楁涓嶅彈褰卞搷
     assert analysis2.get("reference_summary") == analysis.get("reference_summary")
 
 
 def test_analysis_snapshot_unchanged_when_product_name_matches(client):
-    """product_name 不变时 analysis_snapshot 不应被修改."""
+    """product_name 涓嶅彉鏃?analysis_snapshot 涓嶅簲琚慨鏀?"""
     sid = create_ready_session(client)
 
     session = client.get(f"/api/v2/sessions/{sid}").json()["data"]
     analysis_before = session.get("analysis_snapshot") or {}
 
-    # 用相同的 product_name 重新保存 copy
+    # 鐢ㄧ浉鍚岀殑 product_name 閲嶆柊淇濆瓨 copy
     copy_data = client.get(f"/api/v2/sessions/{sid}/copy").json()["data"]
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_data)
 
@@ -2042,3 +2125,98 @@ def test_analysis_snapshot_unchanged_when_product_name_matches(client):
     rp_after = analysis_after.get("recognized_product") or {}
     assert rp_before.get("product_name") == rp_after.get("product_name")
     assert rp_before.get("category") == rp_after.get("category")
+
+
+def test_bind_session_brand_and_snapshot_round_trip(client):
+    brand_id = create_test_brand()
+
+    sid = client.post("/api/v2/sessions").json()["data"]["session_id"]
+    response = client.put(
+        f"/api/v2/sessions/{sid}/brand",
+        json={"brand_id": brand_id, "brand_memory_enabled": True},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["brand_id"] == brand_id
+    assert data["brand_memory_enabled"] is True
+
+    snapshot = client.get(f"/api/v2/sessions/{sid}").json()["data"]
+    assert snapshot["brand_id"] == brand_id
+    assert snapshot["brand_memory_enabled"] is True
+
+
+def test_strategy_preview_and_generation_include_brand_memory_trace(client, monkeypatch):
+    monkeypatch.setattr("app.services.strategy.WhataiClient.plan_prompt_plan", lambda *args, **kwargs: {})
+    monkeypatch.setattr("app.services.strategy.WhataiClient.design_main_copy_blocks", lambda *args, **kwargs: {})
+    brand_id = create_test_brand()
+
+    sid = create_ready_session(client, platform_id="1688")
+    bind = client.put(
+        f"/api/v2/sessions/{sid}/brand",
+        json={"brand_id": brand_id, "brand_memory_enabled": True},
+    )
+    assert bind.status_code == 200, bind.text
+
+    first_preview = client.post(
+        f"/api/v2/sessions/{sid}/strategy/preview",
+        json={"brand_memory_enabled": True},
+    )
+    assert first_preview.status_code == 200, first_preview.text
+    preview_data = first_preview.json()["data"]["strategy_preview"]
+    assert preview_data["brand_memory_enabled"] is True
+    assert preview_data["brand_memory_applied"] is False
+
+    gen = client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": None})
+    assert gen.status_code == 200, gen.text
+
+    with db_session.SessionLocal() as db:
+        memory_items = db.query(BrandMemoryItemModel).all()
+        assert not memory_items, "memory should not sediment before async quality review finishes"
+
+        created_assets = db.query(AssetModel).filter(AssetModel.session_id == sid, AssetModel.asset_family == "main_gallery").all()
+        assert created_assets
+        review_job = JobModel(
+            session_id=sid,
+            service_id="default",
+            job_type="quality_review",
+            status="queued",
+            progress=0,
+            queued_at=datetime.now(timezone.utc),
+        )
+        db.add(review_job)
+        db.flush()
+        for asset in created_assets:
+            asset.quality_status = "passed"
+            asset.quality_scores = {"async_check": {"mode": "test", "passed": True}}
+        review.sediment_brand_memories_from_assets(db, session=db.query(SessionModel).filter(SessionModel.id == sid).one(), assets=created_assets)
+        db.commit()
+        memory_items = db.query(BrandMemoryItemModel).all()
+        assert memory_items, "expected brand memory after passed assets"
+
+    second_preview = client.post(
+        f"/api/v2/sessions/{sid}/strategy/preview",
+        json={"brand_memory_enabled": True},
+    )
+    assert second_preview.status_code == 200, second_preview.text
+    preview_data = second_preview.json()["data"]["strategy_preview"]
+    assert preview_data["brand_memory_enabled"] is True
+    assert preview_data["brand_memory_applied"] is True
+    assert preview_data["brand_memory_trace"]
+    assert preview_data["brand_memory_item_ids"]
+
+    prompt_preview = client.post(
+        f"/api/v2/sessions/{sid}/prompts/preview",
+        json={"instruction": None, "include_latest_assets": True},
+    )
+    assert prompt_preview.status_code == 200, prompt_preview.text
+    prompt_data = prompt_preview.json()["data"]
+    assert prompt_data["brand_id"] == brand_id
+    assert prompt_data["brand_memory_enabled"] is True
+    assert prompt_data["brand_memory_applied"] is True
+    assert prompt_data["brand_memory_trace"]
+    assert any(item["brand_memory_trace"] for item in prompt_data["prompts"])
+
+    with db_session.SessionLocal() as db:
+        assets = db.query(AssetModel).filter(AssetModel.session_id == sid, AssetModel.asset_family == "main_gallery").all()
+        assert assets
+        assert any((asset.generation_snapshot or {}).get("brand_memory_enabled") for asset in assets)

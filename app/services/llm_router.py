@@ -19,7 +19,17 @@ class LLMRouter:
     WHATI_CHAT_ROUTE = "whatai_chat"
     WHATI_GEMINI_ROUTE = "whatai_gemini"
     OPENROUTER_TEXT_ROUTE = "openrouter_text"
+    DOUBAO_TEXT_ROUTE = "doubao_text"
+    OPENAI_COMPATIBLE_TEXT_ROUTE = "openai_compatible_text"
     DISABLED_ROUTE = "disabled"
+    VALID_ROUTES = {
+        WHATI_CHAT_ROUTE,
+        WHATI_GEMINI_ROUTE,
+        OPENROUTER_TEXT_ROUTE,
+        DOUBAO_TEXT_ROUTE,
+        OPENAI_COMPATIBLE_TEXT_ROUTE,
+        DISABLED_ROUTE,
+    }
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -28,7 +38,7 @@ class LLMRouter:
     def route_for_task(self, task: str) -> str:
         if task in {"main_planner", "detail_planner"} and self.settings.planner_profile == "light_model":
             route = str(self.settings.llm_route_planner_light or "").strip().lower()
-            if route in {self.WHATI_CHAT_ROUTE, self.WHATI_GEMINI_ROUTE, self.OPENROUTER_TEXT_ROUTE, self.DISABLED_ROUTE}:
+            if route in self.VALID_ROUTES:
                 return route
         mapping = {
             "analysis": self.settings.llm_route_analysis,
@@ -44,7 +54,7 @@ class LLMRouter:
             "fallback": self.WHATI_CHAT_ROUTE,
         }
         route = str(mapping.get(task) or "").strip().lower()
-        if route in {self.WHATI_CHAT_ROUTE, self.WHATI_GEMINI_ROUTE, self.OPENROUTER_TEXT_ROUTE, self.DISABLED_ROUTE}:
+        if route in self.VALID_ROUTES:
             return route
         return self.WHATI_CHAT_ROUTE
 
@@ -53,6 +63,10 @@ class LLMRouter:
             return "disabled"
         if route == self.OPENROUTER_TEXT_ROUTE:
             return "openrouter"
+        if route == self.DOUBAO_TEXT_ROUTE:
+            return "doubao"
+        if route == self.OPENAI_COMPATIBLE_TEXT_ROUTE:
+            return "openai_compatible"
         return "whatai"
 
     def model_for_task(self, task: str) -> str:
@@ -72,6 +86,32 @@ class LLMRouter:
         route = self.route_for_task(task)
         if route == self.DISABLED_ROUTE:
             return ""
+        if route == self.DOUBAO_TEXT_ROUTE:
+            return self._model_from_mapping(
+                task,
+                {
+                    "main_planner": self.settings.doubao_planner_model,
+                    "detail_planner": self.settings.doubao_detail_planner_model,
+                    "parameter_completion": self.settings.doubao_parameter_completion_model,
+                    "form_rewrite": self.settings.doubao_form_rewrite_model,
+                    "text_review": self.settings.doubao_text_review_model,
+                    "text_presentation": self.settings.doubao_text_presentation_model,
+                    "fallback": self.settings.doubao_fallback_model,
+                },
+            )
+        if route == self.OPENAI_COMPATIBLE_TEXT_ROUTE:
+            return self._model_from_mapping(
+                task,
+                {
+                    "main_planner": self.settings.openai_compatible_planner_model,
+                    "detail_planner": self.settings.openai_compatible_detail_planner_model,
+                    "parameter_completion": self.settings.openai_compatible_parameter_completion_model,
+                    "form_rewrite": self.settings.openai_compatible_form_rewrite_model,
+                    "text_review": self.settings.openai_compatible_text_review_model,
+                    "text_presentation": self.settings.openai_compatible_text_presentation_model,
+                    "fallback": self.settings.openai_compatible_fallback_model,
+                },
+            )
         if route == self.WHATI_GEMINI_ROUTE:
             whatai_mapping = {
                 "analysis": self.settings.whatai_analysis_model,
@@ -91,6 +131,16 @@ class LLMRouter:
             return str(self.settings.openrouter_detail_planner_model).strip()
         return str(mapping.get(task) or self.settings.llm_fallback_model).strip()
 
+    def _model_from_mapping(self, task: str, mapping: dict[str, str]) -> str:
+        candidate = str(mapping.get(task) or "").strip()
+        if candidate:
+            return candidate
+        if task == "detail_planner":
+            candidate = str(mapping.get("main_planner") or "").strip()
+            if candidate:
+                return candidate
+        return str(mapping.get("fallback") or "").strip()
+
     def provider_for_task(self, task: str) -> str:
         return self.provider_for_route(self.route_for_task(task))
 
@@ -100,6 +150,10 @@ class LLMRouter:
             return False
         if provider == "openrouter":
             return bool(self.settings.openrouter_api_key)
+        if provider == "doubao":
+            return bool(self.settings.doubao_api_base and self.settings.doubao_api_key)
+        if provider == "openai_compatible":
+            return bool(self.settings.openai_compatible_api_base and self.settings.openai_compatible_api_key)
         return bool(self.settings.whatai_api_key)
 
     def is_available(self, task: str) -> bool:
@@ -175,19 +229,23 @@ class LLMRouter:
             "temperature": temperature,
             "response_format": {"type": "json_object"},
         }
+        started = time.perf_counter()
         try:
             response = self._post_chat_json(payload, error_key, route=primary_route)
             text = self._extract_text(response)
             retry_meta = self._consume_retry_meta()
+            latency_ms = int((time.perf_counter() - started) * 1000)
             return {
                 "result": self._parse_json_object(text),
                 "meta": {
                     **base_meta,
                     "planner_attempt_count": 1 if task in {"main_planner", "detail_planner"} else 0,
+                    "planner_ms": latency_ms if task in {"main_planner", "detail_planner"} else None,
                     **retry_meta,
                 },
             }
         except AppError as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
             retry_meta = self._consume_retry_meta()
             if task in {"main_planner", "detail_planner"} and self._should_fallback_planner(exc):
                 fallback_attempt = self._complete_planner_fallback(
@@ -200,6 +258,8 @@ class LLMRouter:
                     original_error=exc,
                 )
                 if fallback_attempt is not None:
+                    fallback_attempt["meta"]["planner_primary_ms"] = latency_ms
+                    fallback_attempt["meta"]["planner_fallback_reason"] = exc.key
                     fallback_attempt["meta"]["rate_limit_retry_count"] = int(fallback_attempt["meta"].get("rate_limit_retry_count") or 0) + int(
                         retry_meta.get("rate_limit_retry_count") or 0
                     )
@@ -223,6 +283,20 @@ class LLMRouter:
                 headers={"Authorization": f"Bearer {self.settings.openrouter_api_key}"},
                 error_key=error_key,
                 attempts=3,
+                retryable_on_exhausted=True,
+            )
+        if provider == "doubao":
+            return self._post_doubao_responses_json(payload, error_key)
+        if provider == "openai_compatible":
+            return self._request_json_with_retry(
+                base_url=self.settings.openai_compatible_api_base.rstrip("/"),
+                method="POST",
+                path="/chat/completions",
+                payload=dict(payload),
+                headers={"Authorization": f"Bearer {self.settings.openai_compatible_api_key}"},
+                error_key=error_key,
+                attempts=max(int(self.settings.openai_compatible_max_retries), 1),
+                timeout_seconds=max(int(self.settings.openai_compatible_request_timeout_seconds), 1),
                 retryable_on_exhausted=True,
             )
         if model.startswith("gemini-"):
@@ -256,7 +330,7 @@ class LLMRouter:
         fallback_model = str(self._planner_fallback_model_for_route(fallback_route)).strip()
         fallback_provider = self.provider_for_route(fallback_route)
         if (
-            fallback_route not in {self.WHATI_CHAT_ROUTE, self.WHATI_GEMINI_ROUTE, self.OPENROUTER_TEXT_ROUTE}
+            fallback_route not in self.VALID_ROUTES - {self.DISABLED_ROUTE}
             or not fallback_model
             or not self.is_available_for_route(fallback_route)
             or (fallback_provider == primary_provider and fallback_model == primary_model)
@@ -277,9 +351,11 @@ class LLMRouter:
             "temperature": temperature,
             "response_format": {"type": "json_object"},
         }
+        started = time.perf_counter()
         response = self._post_chat_json(payload, error_key, route=fallback_route)
         text = self._extract_text(response)
         retry_meta = self._consume_retry_meta()
+        latency_ms = int((time.perf_counter() - started) * 1000)
         return {
             "result": self._parse_json_object(text),
             "meta": {
@@ -292,6 +368,8 @@ class LLMRouter:
                 "planner_fallback_model": fallback_model,
                 "planner_attempt_count": 2,
                 "planner_final_source": "fallback",
+                "planner_ms": latency_ms,
+                "planner_fallback_reason": original_error.key if original_error is not None else "primary_unavailable",
                 **retry_meta,
             },
         }
@@ -303,6 +381,13 @@ class LLMRouter:
             return str(self.settings.whatai_chat_model).strip()
         if route == self.OPENROUTER_TEXT_ROUTE:
             return str(self.settings.openrouter_planner_light_model).strip()
+        if route == self.DOUBAO_TEXT_ROUTE:
+            return self._model_from_mapping("main_planner", {"main_planner": self.settings.doubao_planner_model, "fallback": self.settings.doubao_fallback_model})
+        if route == self.OPENAI_COMPATIBLE_TEXT_ROUTE:
+            return self._model_from_mapping(
+                "main_planner",
+                {"main_planner": self.settings.openai_compatible_planner_model, "fallback": self.settings.openai_compatible_fallback_model},
+            )
         return ""
 
     def _should_fallback_planner(self, exc: AppError) -> bool:
@@ -332,6 +417,25 @@ class LLMRouter:
             retryable_on_exhausted=True,
         )
 
+    def _post_doubao_responses_json(self, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
+        request_payload = {
+            "model": str(payload.get("model") or ""),
+            "input": self._build_responses_input(payload.get("messages", [])),
+            "temperature": payload.get("temperature", 0.2),
+            "text": {"format": {"type": "json_object"}},
+        }
+        return self._request_json_with_retry(
+            base_url=self.settings.doubao_api_base.rstrip("/"),
+            method="POST",
+            path="/responses",
+            payload=request_payload,
+            headers={"Authorization": f"Bearer {self.settings.doubao_api_key}"},
+            error_key=error_key,
+            attempts=max(int(self.settings.doubao_max_retries), 1),
+            timeout_seconds=max(int(self.settings.doubao_request_timeout_seconds), 1),
+            retryable_on_exhausted=True,
+        )
+
     def _request_json_with_retry(
         self,
         *,
@@ -342,9 +446,10 @@ class LLMRouter:
         headers: dict[str, str],
         error_key: str,
         attempts: int,
+        timeout_seconds: int | None = None,
         retryable_on_exhausted: bool = False,
     ) -> dict[str, Any]:
-        timeout = max(int(self.settings.whatai_request_timeout_seconds), 1)
+        timeout = max(int(timeout_seconds or self.settings.whatai_request_timeout_seconds), 1)
         last_error: AppError | None = None
         url = f"{base_url.rstrip('/')}{path}"
         rate_limit_retry_count = 0
@@ -444,6 +549,24 @@ class LLMRouter:
             texts = [str(item.get("text") or "") for item in parts if isinstance(item, dict) and item.get("text")]
             if texts:
                 return "\n".join(texts)
+        output_text = payload.get("output_text") if isinstance(payload, dict) else None
+        if isinstance(output_text, str) and output_text:
+            return output_text
+        output = payload.get("output") if isinstance(payload, dict) else None
+        if isinstance(output, list):
+            texts = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                            texts.append(str(part.get("text") or ""))
+                elif isinstance(content, str):
+                    texts.append(content)
+            if texts:
+                return "\n".join(text for text in texts if text)
         return ""
 
     def _parse_json_object(self, text: str) -> dict[str, Any] | None:
@@ -492,3 +615,26 @@ class LLMRouter:
             if parts:
                 contents.append({"role": role, "parts": parts})
         return contents
+
+    def _build_responses_input(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        inputs: list[dict[str, Any]] = []
+        for message in messages:
+            role = "assistant" if str(message.get("role") or "user") == "assistant" else "user"
+            raw_content = message.get("content")
+            content: list[dict[str, Any]] = []
+            if isinstance(raw_content, str):
+                content.append({"type": "input_text", "text": raw_content})
+            else:
+                for item in raw_content or []:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "text":
+                        content.append({"type": "input_text", "text": str(item.get("text") or "")})
+                        continue
+                    if item.get("type") == "image_url":
+                        image_url = ((item.get("image_url") or {}).get("url") or "")
+                        if isinstance(image_url, str) and image_url:
+                            content.append({"type": "input_image", "image_url": image_url})
+            if content:
+                inputs.append({"role": role, "content": content})
+        return inputs

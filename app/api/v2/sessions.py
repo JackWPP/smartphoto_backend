@@ -3,6 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,7 @@ from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
 from app.models.asset import AssetModel
+from app.models.brand import BrandModel
 from app.models.detail_style_image import DetailStyleImageModel
 from app.models.job import JobModel
 from app.models.parameter_attachment import ParameterAttachmentModel
@@ -101,6 +103,7 @@ from app.services.parameter_snapshot import (
     merge_parameter_snapshot_into_copy,
     parameter_snapshot_to_copy_fields,
 )
+from app.services.brand_memory import get_brand_or_404
 from app.services.platforms import get_platform_or_none
 from app.services.prompts import build_prompt_previews
 from app.services.prompt_repo import list_prompt_presets
@@ -135,6 +138,11 @@ ALLOWED_SLOT = {"front", "angle45", "side", "extra"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_SESSION_IMAGES = 6
 MAX_DETAIL_STYLE_IMAGES = 4
+
+
+class SessionBrandBindRequest(BaseModel):
+    brand_id: str | None = Field(default=None)
+    brand_memory_enabled: bool = Field(default=False)
 
 
 def _signed_url(value: str | None) -> str | None:
@@ -207,6 +215,8 @@ def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:
         "session_id": session.id,
         "status": session.status,
         "current_step": session.current_step,
+        "brand_id": session.brand_id,
+        "brand_memory_enabled": bool(session.brand_memory_enabled),
         "selected_platform_ids": session.selected_platform_ids,
         "active_platform_id": session.active_platform_id,
         "analysis_snapshot": session.analysis_snapshot,
@@ -237,6 +247,9 @@ def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
         db=db,
         prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
         parameter_snapshot=session.parameter_snapshot or {},
+        brand_id=session.brand_id,
+        brand_memory_enabled=bool(session.brand_memory_enabled),
+        service_id=session.service_id,
     )
 
 
@@ -560,6 +573,36 @@ def create_session(db: Session = Depends(get_db), principal: ServicePrincipal = 
 def get_session_snapshot(session_id: str, db: Session = Depends(get_db), principal: ServicePrincipal = Depends(get_service_principal)) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     return success_response(_session_snapshot_payload(db, session))
+
+
+@router.put(
+    "/{session_id}/brand",
+    operation_id="bindSessionBrand",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def bind_session_brand(
+    session_id: str,
+    req: SessionBrandBindRequest,
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    if req.brand_id:
+        brand = get_brand_or_404(db, req.brand_id, service_id=principal.app_id)
+        session.brand_id = brand.id
+        session.brand_memory_enabled = bool(req.brand_memory_enabled)
+    else:
+        session.brand_id = None
+        session.brand_memory_enabled = False
+    session.strategy_preview = None
+    db.commit()
+    return success_response(
+        {
+            "session_id": session.id,
+            "brand_id": session.brand_id,
+            "brand_memory_enabled": bool(session.brand_memory_enabled),
+        }
+    )
 
 
 @router.post(
@@ -1501,6 +1544,12 @@ def build_strategy(
     if not session.active_platform_id:
         raise AppError("invalid_platform", "active platform required", 400)
     payload = req.model_dump() if req is not None else {"planner_instruction": None}
+    effective_brand_memory_enabled = bool(
+        payload.get("brand_memory_enabled")
+        if payload.get("brand_memory_enabled") is not None
+        else session.brand_memory_enabled
+    )
+    session.brand_memory_enabled = effective_brand_memory_enabled
     images = list_active_session_images(db, session.id)
     strategy_reference_images = list_active_strategy_reference_images(db, session.id)
     loaded_reference_images = load_reference_images(images) if images else []
@@ -1523,6 +1572,9 @@ def build_strategy(
         loaded_strategy_reference_images=loaded_strategy_reference_images,
         reference_manifest=reference_manifest,
         strategy_reference_manifest=strategy_reference_manifest,
+        brand_id=session.brand_id,
+        brand_memory_enabled=effective_brand_memory_enabled,
+        service_id=session.service_id,
     )
     existing_preview = session.strategy_preview if isinstance(session.strategy_preview, dict) else None
     if (
@@ -1570,6 +1622,9 @@ def build_strategy(
         loaded_strategy_reference_images=loaded_strategy_reference_images,
         reference_manifest=reference_manifest,
         strategy_reference_manifest=strategy_reference_manifest,
+        brand_id=session.brand_id,
+        brand_memory_enabled=effective_brand_memory_enabled,
+        service_id=session.service_id,
     )
     session.strategy_preview = preview
     session.latest_strategy_job_id = job.id
@@ -1748,6 +1803,9 @@ def put_strategy_overrides(
             db=db,
             prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
             parameter_snapshot=session.parameter_snapshot or {},
+            brand_id=session.brand_id,
+            brand_memory_enabled=bool(session.brand_memory_enabled),
+            service_id=session.service_id,
         )
         session.strategy_preview = preview
 
@@ -1882,6 +1940,9 @@ def preview_prompts(
             slot_preferences=strategy_preview.get("slot_preferences") or [],
             prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
+            brand_id=session.brand_id,
+            brand_memory_enabled=bool(session.brand_memory_enabled),
+            service_id=session.service_id,
         )
     prompts = build_prompt_previews(
         confirmed_copy=resolved_copy,
@@ -1909,6 +1970,7 @@ def preview_prompts(
                 "rule_pack_id": asset.rule_pack_id or (asset.generation_snapshot or {}).get("rule_pack_id"),
                 "raw_prompt_override": (asset.generation_snapshot or {}).get("raw_prompt_override"),
                 "applied_preset_id": (asset.generation_snapshot or {}).get("applied_preset_id"),
+                "brand_memory_trace": (asset.generation_snapshot or {}).get("brand_memory_trace", []),
             }
             for asset in assets
         ]
@@ -1918,6 +1980,10 @@ def preview_prompts(
         {
             "session_id": session.id,
             "active_platform_id": session.active_platform_id,
+            "brand_id": session.brand_id,
+            "brand_memory_enabled": bool(strategy_preview.get("brand_memory_enabled")),
+            "brand_memory_applied": bool(strategy_preview.get("brand_memory_applied")),
+            "brand_memory_trace": strategy_preview.get("brand_memory_trace", []),
             "hero_scene": resolved_copy.get("hero_scene", ""),
             "core_selling_points": resolved_copy.get("core_selling_points", []),
             "key_parameters": resolved_copy.get("key_parameters", []),
@@ -2023,8 +2089,12 @@ def generate_gallery(
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if session.status not in {"strategy_ready", "completed"}:
         raise AppError("invalid_session_status", "strategy not ready", 400)
+    if req.brand_memory_enabled is not None:
+        session.brand_memory_enabled = bool(req.brand_memory_enabled)
+        session.strategy_preview = None
+    strategy_preview = _effective_strategy_preview(session, db) if req.brand_memory_enabled is not None or req.slot_ids else None
     if req.slot_ids:
-        strategy_preview = _effective_strategy_preview(session, db)
+        strategy_preview = strategy_preview or _effective_strategy_preview(session, db)
         valid_slot_ids = {
             str(item.get("slot_id") or item.get("role") or "").strip()
             for item in strategy_preview.get("asset_plan", [])
@@ -2198,6 +2268,7 @@ def get_results(
                     "carry_forward": bool((asset.generation_snapshot or {}).get("carry_forward")),
                     "source_version_no": (asset.generation_snapshot or {}).get("source_version_no"),
                     "fidelity_validation_status": ((asset.generation_snapshot or {}).get("fidelity_validation") or {}).get("status"),
+                    "brand_memory_trace": (asset.generation_snapshot or {}).get("brand_memory_trace", []),
                 }
                 for asset in assets
             ],

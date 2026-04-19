@@ -213,6 +213,11 @@ def compose_prompt(
         "planner_base": _clean_text(prompt_plan.get("final_prompt_base")),
         "expression_mode": str(prompt_plan.get("expression_mode") or plan.get("expression_mode") or ""),
         "expression_label": str(prompt_plan.get("expression_label") or plan.get("expression_label") or ""),
+        "brand_memory_trace": [
+            item
+            for item in strategy_preview.get("brand_memory_trace", [])
+            if isinstance(item, dict) and str(item.get("slot_id") or "").strip() == str(plan.get("slot_id") or prompt_plan.get("slot_id") or "")
+        ],
         "rule_modules_used": [str(item) for item in prompt_plan.get("rule_modules_used", []) if str(item).strip()],
         "platform_overlay": prompt_plan.get("platform_overlay"),
         "risk_flags": [str(item) for item in prompt_plan.get("risk_flags", []) if str(item).strip()],
@@ -1107,6 +1112,11 @@ def compose_prompt(
         "planner_base": _clean_text(prompt_plan.get("final_prompt_base")),
         "expression_mode": str(prompt_plan.get("expression_mode") or plan.get("expression_mode") or ""),
         "expression_label": str(prompt_plan.get("expression_label") or plan.get("expression_label") or ""),
+        "brand_memory_trace": [
+            item
+            for item in strategy_preview.get("brand_memory_trace", [])
+            if isinstance(item, dict) and str(item.get("slot_id") or "").strip() == str(plan.get("slot_id") or prompt_plan.get("slot_id") or "")
+        ],
         "rule_modules_used": [str(item) for item in prompt_plan.get("rule_modules_used", []) if str(item).strip()],
         "platform_overlay": prompt_plan.get("platform_overlay"),
         "risk_flags": [str(item) for item in prompt_plan.get("risk_flags", []) if str(item).strip()],
