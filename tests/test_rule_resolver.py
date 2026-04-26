@@ -39,7 +39,7 @@ def test_detail_rule_resolver_is_platform_aware_and_keeps_display_metadata() -> 
     context = resolve_detail_page_context("1688")
     rules = resolve_detail_panel_rules("1688")
 
-    assert context.rule_pack_id == "ecommerce_detail_v2"
+    assert context.rule_pack_id == "alibaba_detail_v1"
     assert context.overlay["overlay_id"] == "1688"
     assert context.copy_language == "zh"
     assert len(rules) == 8

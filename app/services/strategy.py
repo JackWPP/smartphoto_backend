@@ -170,6 +170,7 @@ def _main_preview_hash_bundle(
     config_payload = {
         "platform_id": active_platform_id,
         "planner_profile": planner_profile,
+        "planner_prompt_mode": get_settings().planner_prompt_mode,
         "planner_provider": planner_provider,
         "planner_model": planner_model,
         "brand_id": str(brand_id or ""),
@@ -493,6 +494,10 @@ def build_strategy_preview(
         "provider": (planner_meta or {}).get("provider", "whatai"),
         "model": (planner_meta or {}).get("model", ""),
         "planner_profile": settings.planner_profile,
+        "prompt_profile": str((planner_meta or {}).get("prompt_profile") or settings.planner_prompt_mode),
+        "prompt_input_chars": int((planner_meta or {}).get("prompt_input_chars") or 0),
+        "planner_image_count": len(loaded_reference_images) + len(loaded_strategy_reference_images),
+        "cache_hit": False,
         "planner_primary_provider": (planner_meta or {}).get("planner_primary_provider"),
         "planner_primary_model": (planner_meta or {}).get("planner_primary_model"),
         "planner_fallback_provider": (planner_meta or {}).get("planner_fallback_provider"),

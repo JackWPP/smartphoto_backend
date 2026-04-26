@@ -1235,9 +1235,69 @@ def test_analyze_images_with_parameters_splits_combined_output(monkeypatch):
     assert calls["count"] == 1
     assert result["analysis_snapshot"]["recognized_product"]["product_name"] == "dehumidifier"
     assert result["analysis_snapshot"]["analysis_source"] == "llm"
+    assert result["analysis_snapshot"]["analysis_quality"] == "llm"
     assert result["parameter_snapshot"]["hero_scene"] == "wardrobe"
+    assert result["parameter_snapshot"]["analysis_quality"] == "llm"
     assert result["parameter_snapshot"]["provider"] == "whatai"
     assert result["parameter_snapshot"]["model"] == "analysis-fast-model"
+    assert client._should_skip_completion({**result["parameter_snapshot"], "source_stage": "analysis_combined"}) is True
+    assert client._should_skip_completion({"analysis_quality": "fallback", "source_stage": "analysis_combined"}) is False
+
+
+def test_compact_main_planner_missing_local_fields_does_not_force_repair():
+    client = WhataiClient()
+    asset_plan = [
+        {"role": role}
+        for role in ["hero", "white_bg", "selling_point", "scene", "detail"]
+    ]
+    parsed = {
+        "prompt_plan": [
+            {"role": item["role"], "copy_focus": f"{item['role']}-focus", "reference_image_ids": []}
+            for item in asset_plan
+        ]
+    }
+
+    errors = client._validate_main_planner_result(parsed, asset_plan, [])
+
+    assert errors
+    assert client._should_repair_validation_errors("main_planner", errors) is False
+
+
+def test_compact_detail_planner_missing_local_fields_does_not_force_repair():
+    client = WhataiClient()
+    parsed = {
+        "detail_story_brief": {},
+        "panel_plan": [
+            {
+                "panel_id": f"panel_{index:02d}",
+                "panel_goal": f"goal-{index}",
+                "copy_focus": f"focus-{index}",
+                "planner_prompt_base": f"prompt-{index}",
+                "visual_truth_mode": "faithful_closeup",
+                "origin_note": "based on uploaded product",
+                "copy_lines": [f"copy-{index}"],
+                "product_reference_ids": [],
+                "style_reference_ids": [],
+            }
+            for index in range(1, 9)
+        ],
+    }
+
+    errors = client._validate_detail_planner_result(parsed, [], [])
+
+    assert errors
+    assert client._should_repair_validation_errors("detail_planner", errors) is False
+
+
+def test_compact_planner_invalid_reference_still_forces_repair():
+    client = WhataiClient()
+    asset_plan = [{"role": "hero"}]
+    parsed = {"prompt_plan": [{"role": "hero", "copy_focus": "focus", "reference_image_ids": ["missing"]}]}
+
+    errors = client._validate_main_planner_result(parsed, asset_plan, [])
+
+    assert any(error["rule"] == "subset" for error in errors)
+    assert client._should_repair_validation_errors("main_planner", errors) is True
 
 
 def test_optimized_data_uri_downsizes_large_reference_images():
@@ -1512,6 +1572,7 @@ def test_llm_router_adds_enable_thinking_for_kimi_whatai(monkeypatch):
             whatai_api_key="test-key",
             llm_route_main_planner="whatai_gemini",
             whatai_planner_model="kimi-k2.5",
+            planner_kimi_enable_thinking=True,
         )
     )
 

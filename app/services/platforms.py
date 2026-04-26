@@ -14,8 +14,8 @@ class PlatformProfile:
 
 
 PLATFORMS: dict[str, PlatformProfile] = {
-    "1688": PlatformProfile("1688", "1688", "tuned", 5, "1:1", "alibaba_core_5_slot", "ecommerce_detail_v2", "zh-CN"),
-    "taobao": PlatformProfile("taobao", "淘宝", "tuned", 5, "1:1", "alibaba_core_5_slot", "ecommerce_detail_v2", "zh-CN"),
+    "1688": PlatformProfile("1688", "1688", "tuned", 5, "1:1", "alibaba_core_5_slot", "alibaba_detail_v1", "zh-CN"),
+    "taobao": PlatformProfile("taobao", "淘宝", "tuned", 5, "1:1", "alibaba_core_5_slot", "alibaba_detail_v1", "zh-CN"),
     "amazon": PlatformProfile("amazon", "Amazon", "tuned", 7, "1:1", "default_main_gallery_v2", "ecommerce_detail_v2", "en-US"),
     "douyin": PlatformProfile("douyin", "抖音", "tuned", 5, "1:1", "default_main_gallery_v2", "ecommerce_detail_v2", "zh-CN"),
     "temu": PlatformProfile("temu", "Temu", "tuned", 5, "1:1", "default_main_gallery_v2", "ecommerce_detail_v2", "en-US"),

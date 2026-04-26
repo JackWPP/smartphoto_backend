@@ -42,6 +42,7 @@ def get_job_status(job_id: str, db: Session = Depends(get_db), principal: Servic
         "job_type": job.job_type,
         "status": job.status,
         "progress": job.progress,
+        "progress_pct": job.progress,
         "stage": job.stage,
         "estimated_seconds": None,
         "queued_at": job.queued_at.isoformat() if job.queued_at else None,

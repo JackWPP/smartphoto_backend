@@ -20,6 +20,20 @@ def test_resolve_database_url_switches_to_psycopg2_when_needed(monkeypatch):
     assert resolved == "postgresql+psycopg2://smartphoto:smartphoto@localhost:5432/smartphoto"
 
 
+def test_planner_latency_switches_normalize_to_safe_defaults(monkeypatch):
+    config_module.get_settings.cache_clear()
+    monkeypatch.setenv("PLANNER_PROMPT_MODE", "unknown")
+    monkeypatch.setenv("DETAIL_PLANNER_PROMPT_MODE", "legacy")
+    monkeypatch.setenv("PLANNER_REPAIR_STRICTNESS", "unknown")
+
+    settings = config_module.get_settings()
+
+    assert settings.planner_prompt_mode == "compact"
+    assert settings.detail_planner_prompt_mode == "legacy"
+    assert settings.planner_repair_strictness == "critical_only"
+    config_module.get_settings.cache_clear()
+
+
 def test_normalize_rel_key_accepts_virtual_and_path_style_s3_urls(monkeypatch):
     config_module.get_settings.cache_clear()
     monkeypatch.setenv("STORAGE_BACKEND", "s3")

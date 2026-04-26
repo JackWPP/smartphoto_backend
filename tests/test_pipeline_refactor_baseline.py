@@ -284,7 +284,7 @@ def test_baseline_detail_page_prompt_preview_contract(client: TestClient) -> Non
         json={"instruction": "整体更干净", "include_latest_assets": True},
     ).json()["data"]
 
-    assert data["use_case"] == "amazon_detail"
+    assert data["use_case"] == "ecommerce_detail"
     assert data["aspect_ratio"] == "21:9"
     assert data["panel_count"] == 8
     assert data["image_size"] == "1792x768"

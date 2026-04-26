@@ -39,6 +39,13 @@ class UploadSessionImageData(BaseModel):
     uploaded_images: list[SessionImageSummary] = Field(description="当前 session 下所有有效图片。")
 
 
+class BatchUploadSessionImageData(BaseModel):
+    image_ids: list[str] = Field(description="批量上传的图片 ID 列表。")
+    session_id: str = Field(description="所属会话 ID。")
+    status: str = Field(description="上传后的 session 状态。")
+    uploaded_images: list[SessionImageSummary] = Field(description="当前 session 下所有有效图片。")
+
+
 class UploadPresignRequest(BaseModel):
     session_id: str = Field(description="所属会话 ID。")
     upload_kind: Literal["session_image", "detail_style_image", "parameter_attachment", "strategy_reference_image"] = Field(description="上传资源类型。")
@@ -679,3 +686,22 @@ class SessionSnapshotData(BaseModel):
     latest_result_version: int = Field(description="最近一版结果版本号。")
     detail_generation_round: int = Field(description="当前详情页生成轮次。")
     detail_latest_result_version: int = Field(description="最近一版详情页结果版本号。")
+    detail_preview_generated: bool = Field(default=False, description="详情页预览是否已生成。")
+    detail_preview_version: int = Field(default=0, description="详情页预览版本号。")
+    detail_preview_image_urls: dict[str, str] | None = Field(default=None, description="详情页预览图片 URL 映射。")
+
+
+class DetailPreviewPanelItem(BaseModel):
+    panel_id: str = Field(description="panel ID。")
+    slot_id: str | None = Field(default=None, description="详情页固定槽位 ID。")
+    display_order: int = Field(description="显示顺序。")
+    preview_url: str = Field(description="预览图片 URL。")
+    is_preview: bool = Field(default=True, description="是否为预览版。")
+    preview_watermarked: bool = Field(default=True, description="预览版是否已嵌入水印。")
+
+
+class DetailPreviewData(BaseModel):
+    session_id: str = Field(description="会话 ID。")
+    preview_generated: bool = Field(description="详情页预览是否已生成。")
+    preview_version: int = Field(description="详情页预览版本号。")
+    panels: list[DetailPreviewPanelItem] = Field(default_factory=list, description="预览 panel 列表。")

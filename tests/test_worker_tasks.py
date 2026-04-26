@@ -2114,6 +2114,7 @@ def test_execute_detail_generation_flow_emits_stitch_success_events(monkeypatch)
         "project_detail_panel_events",
         lambda **_kwargs: [{"event_type": "asset_ready", "payload": {"event": "detail_panel_render_succeeded"}}],
     )
+    monkeypatch.setattr(orchestration, "derive_detail_previews", lambda **_kwargs: None)
     monkeypatch.setattr(orchestration, "stitch_detail_panels", lambda panel_images: b"stitched-bytes")
     monkeypatch.setattr(
         orchestration,

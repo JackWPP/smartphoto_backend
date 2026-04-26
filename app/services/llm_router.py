@@ -394,6 +394,8 @@ class LLMRouter:
         return bool(exc.key == "rate_limited" or exc.retryable or exc.http_status in {429, 502, 503, 504})
 
     def _uses_kimi_thinking(self, model: str) -> bool:
+        if not self.settings.planner_kimi_enable_thinking:
+            return False
         normalized = str(model or "").strip().lower()
         return normalized in {"moonshotai/kimi-k2.5", "kimi-k2.5"}
 
@@ -424,6 +426,13 @@ class LLMRouter:
             "temperature": payload.get("temperature", 0.2),
             "text": {"format": {"type": "json_object"}},
         }
+        # Limit Doubao seed model thinking budget if configured.
+        # The Volcengine Responses API supports a thinking/reasoning budget for
+        # seed models.  When doubao_thinking_budget_tokens > 0 we pass it along
+        # so the model spends less time in unstructured internal reasoning.
+        budget = int(self.settings.doubao_thinking_budget_tokens or 0)
+        if budget > 0:
+            request_payload["thinking"] = {"budget_tokens": budget}
         return self._request_json_with_retry(
             base_url=self.settings.doubao_api_base.rstrip("/"),
             method="POST",

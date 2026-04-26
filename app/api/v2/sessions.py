@@ -28,6 +28,7 @@ from app.schemas.results import DetailResultsData, ResultsData
 from app.schemas.session import (
     AnalysisData,
     AnalysisTriggerData,
+    BatchUploadSessionImageData,
     CopyFormSchema,
     CopyData,
     CopyRegenerateJobData,
@@ -37,6 +38,7 @@ from app.schemas.session import (
     DeleteSessionImageData,
     DeleteDetailStyleImageData,
     DetailGenerationJobData,
+    DetailPreviewData,
     DetailPromptPreviewData,
     DetailStrategyPreviewData,
     DetailStrategyPreviewRequest,
@@ -232,6 +234,9 @@ def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:
         "latest_result_version": session.latest_result_version,
         "detail_generation_round": session.detail_generation_round,
         "detail_latest_result_version": session.detail_latest_result_version,
+        "detail_preview_generated": bool(session.detail_preview_generated),
+        "detail_preview_version": session.detail_preview_version,
+        "detail_preview_image_urls": session.detail_preview_image_urls,
     }
 
 
@@ -668,6 +673,98 @@ async def upload_session_image(
     return success_response(
         {
             "image_id": model.id,
+            "session_id": session.id,
+            "status": session.status,
+            "uploaded_images": [
+                {
+                    "image_id": item.id,
+                    "slot_type": item.slot_type,
+                    "display_order": item.display_order,
+                    "url": _signed_url(item.source_url),
+                }
+                for item in images
+            ],
+        }
+    )
+
+
+@router.post(
+    "/{session_id}/images/batch",
+    response_model=APIResponse[BatchUploadSessionImageData],
+    summary="批量上传会话图片",
+    description="向指定 session 批量上传商品参考图。支持一次上传多张，每张 ≤20MB，仅 jpeg/png/webp，总共最多 6 张。",
+    operation_id="uploadSessionImagesBatch",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+async def upload_session_images_batch(
+    session_id: str,
+    files: list[UploadFile] = File(..., description="图片文件列表。"),
+    slots: str = Form(..., description="JSON 数组，每项 {slot_type, display_order}，与 files 一一对应。"),
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    import json as _json
+
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    try:
+        slot_entries: list[dict[str, Any]] = _json.loads(slots)
+    except Exception:
+        raise AppError("invalid_request", "slots must be a valid JSON array", 400)
+
+    if len(files) != len(slot_entries):
+        raise AppError("invalid_request", "files and slots count mismatch", 400)
+
+    current_images = list_active_session_images(db, session_id)
+    if len(current_images) + len(files) > MAX_SESSION_IMAGES:
+        raise AppError("too_many_images", http_status=400)
+
+    storage = get_storage_adapter()
+    created_ids: list[str] = []
+
+    for file, entry in zip(files, slot_entries):
+        slot_type = str(entry.get("slot_type", ""))
+        display_order = int(entry.get("display_order", 0))
+        if slot_type not in ALLOWED_SLOT:
+            raise AppError("invalid_request", f"invalid slot_type: {slot_type}", 400)
+
+        content = await file.read()
+        if len(content) > MAX_IMAGE_BYTES:
+            raise AppError("file_too_large", http_status=400)
+        if file.content_type not in ALLOWED_MIME:
+            raise AppError("unsupported_file_type", http_status=400)
+
+        source_url, width, height, mime_type, file_size = storage.save_upload(
+            session_id=session_id,
+            original_name=file.filename or "upload.jpg",
+            content=content,
+        )
+        model = SessionImageModel(
+            session_id=session_id,
+            slot_type=slot_type,
+            display_order=display_order,
+            source_url=source_url,
+            width=width,
+            height=height,
+            mime_type=mime_type,
+            file_size=file_size,
+            is_deleted=False,
+        )
+        db.add(model)
+        db.flush()
+        created_ids.append(model.id)
+
+    if session.status == "created":
+        ensure_session_transition("created", "images_uploaded")
+        session.status = "images_uploaded"
+        session.current_step = 1
+    else:
+        _invalidate_analysis_outputs(session)
+
+    db.commit()
+    images = list_active_session_images(db, session_id)
+    return success_response(
+        {
+            "image_ids": created_ids,
             "session_id": session.id,
             "status": session.status,
             "uploaded_images": [
@@ -1277,8 +1374,26 @@ def complete_parameters(
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     client = WhataiClient()
+    current_snapshot = session.parameter_snapshot or {}
+    # 跳过补全：只要 Gemini 分析非 fallback 且无显式 completion_instruction，就复用现有快照
+    # 接口签名不变，对前端完全透明；快照中写入 skipped_completion 元数据供调试
+    if client._should_skip_completion(current_snapshot) and not req.completion_instruction:
+        current_snapshot = dict(current_snapshot)
+        current_snapshot["skipped_completion"] = True
+        current_snapshot["skip_reason"] = "gemini_success"
+        session.parameter_snapshot = current_snapshot
+        db.commit()
+        return success_response(
+            {
+                "session_id": session.id,
+                "parameter_snapshot": session.parameter_snapshot or {},
+                "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+                "applied_copy_attribution": parameter_snapshot_to_copy_attribution(session.parameter_snapshot or {}),
+                "overwrite_mode": "replace_all",
+            }
+        )
     snapshot = client.complete_parameters(
-        parameter_snapshot=session.parameter_snapshot or {},
+        parameter_snapshot=current_snapshot,
         analysis_snapshot=session.analysis_snapshot or {},
         confirmed_copy=_resolved_copy_for_session(session, db),
         active_platform_id=session.active_platform_id,
@@ -1317,7 +1432,12 @@ def put_parameters(
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     session.parameter_snapshot = payload or {}
-    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
+    session.confirmed_copy = apply_parameter_snapshot_to_copy(
+        session.confirmed_copy or {},
+        session.parameter_snapshot,
+        overwrite=True,
+        protect_explicit_input=False,
+    )
     refresh_session_search_cache(session)
     session.strategy_preview = None
     session.detail_strategy_preview = None
@@ -1582,6 +1702,13 @@ def build_strategy(
         and existing_preview.get("hash_policy_version") == PREVIEW_HASH_POLICY_VERSION
         and existing_preview.get("input_hash") == input_hash
     ):
+        response_preview = {
+            **existing_preview,
+            "cache_hit": True,
+            "prompt_profile": existing_preview.get("prompt_profile") or get_settings().planner_prompt_mode,
+            "prompt_input_chars": int(existing_preview.get("prompt_input_chars") or 0),
+            "planner_image_count": int(existing_preview.get("planner_image_count") or len(loaded_reference_images) + len(loaded_strategy_reference_images)),
+        }
         session.status = "strategy_ready"
         session.current_step = max(session.current_step, 5)
         db.commit()
@@ -1589,7 +1716,7 @@ def build_strategy(
             {
                 "session_id": session.id,
                 "status": session.status,
-                "strategy_preview": existing_preview,
+                "strategy_preview": response_preview,
             }
         )
 
@@ -1705,7 +1832,18 @@ def build_detail_strategy(
         current_input_hash=input_hash,
     ):
         db.commit()
-        return success_response({"session_id": session.id, "detail_strategy_preview": existing_preview})
+        return success_response(
+            {
+                "session_id": session.id,
+                "detail_strategy_preview": {
+                    **existing_preview,
+                    "cache_hit": True,
+                    "prompt_profile": existing_preview.get("prompt_profile") or get_settings().detail_planner_prompt_mode,
+                    "prompt_input_chars": int(existing_preview.get("prompt_input_chars") or 0),
+                    "planner_image_count": int(existing_preview.get("planner_image_count") or 0),
+                },
+            }
+        )
 
     preview = build_detail_strategy_preview(
         resolved_copy,
@@ -2370,6 +2508,53 @@ def get_detail_page_results(
             ),
         }
     )
+
+
+@router.get(
+    "/{session_id}/detail-pages/preview",
+    response_model=APIResponse[DetailPreviewData],
+    summary="获取详情页预览",
+    description="返回详情页预览图片列表。预览由详情页生成完成后自动派生（缩小+水印），仅供预览，不扣费。",
+    operation_id="getDetailPagePreview",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def get_detail_page_preview(
+    session_id: str,
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    preview_urls = session.detail_preview_image_urls or {}
+
+    # Build panel list from detail_strategy_preview to preserve display_order and slot_id
+    detail_preview = session.detail_strategy_preview or {}
+    panel_plan = detail_preview.get("panel_plan", [])
+    panel_map: dict[str, dict[str, Any]] = {}
+    for item in panel_plan:
+        if isinstance(item, dict):
+            pid = item.get("panel_id")
+            if pid:
+                panel_map[pid] = item
+
+    panels: list[dict[str, Any]] = []
+    for panel_id, preview_url in preview_urls.items():
+        plan = panel_map.get(panel_id, {})
+        panels.append({
+            "panel_id": panel_id,
+            "slot_id": plan.get("slot_id"),
+            "display_order": plan.get("display_order", 0),
+            "preview_url": _signed_url(preview_url) or preview_url,
+            "is_preview": True,
+            "preview_watermarked": True,
+        })
+    panels.sort(key=lambda item: item["display_order"])
+
+    return success_response({
+        "session_id": session.id,
+        "preview_generated": bool(session.detail_preview_generated),
+        "preview_version": session.detail_preview_version,
+        "panels": panels,
+    })
 
 
 @router.post(
