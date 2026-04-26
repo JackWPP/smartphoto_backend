@@ -439,6 +439,10 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
     assert first.status_code == 200
     original = first.json()["data"]["detail_strategy_preview"]
     assert original["hash_policy_version"] == "preview_hash_layers_v1"
+    assert original["cache_hit"] is False
+    assert original["prompt_profile"] in {"compact", "legacy"}
+    assert isinstance(original["prompt_input_chars"], int)
+    assert original["planner_image_count"] >= 1
     assert set(original["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash", "memory_hash"}
 
     def _unexpected_rebuild(*args, **kwargs):
@@ -451,7 +455,9 @@ def test_detail_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(cl
         json={"planner_instruction": "鏍囬鏇寸煭锛岀増寮忔洿娓呮櫚"},
     )
     assert reused.status_code == 200
-    assert reused.json()["data"]["detail_strategy_preview"]["input_hash"] == original["input_hash"]
+    reused_preview = reused.json()["data"]["detail_strategy_preview"]
+    assert reused_preview["input_hash"] == original["input_hash"]
+    assert reused_preview["cache_hit"] is True
 
 
 def test_detail_strategy_preview_cache_ignores_non_consumed_fields(client):
@@ -545,6 +551,10 @@ def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, m
     sid = create_ready_session(client)
     original = client.get(f"/api/v2/sessions/{sid}").json()["data"]["strategy_preview"]
     assert original["hash_policy_version"] == "preview_hash_layers_v1"
+    assert original["cache_hit"] is False
+    assert original["prompt_profile"] in {"compact", "legacy"}
+    assert isinstance(original["prompt_input_chars"], int)
+    assert original["planner_image_count"] >= 1
     assert set(original["hash_layers"].keys()) == {"config_hash", "content_hash", "reference_hash", "memory_hash"}
 
     def _unexpected_rebuild(*args, **kwargs):
@@ -554,7 +564,9 @@ def test_strategy_preview_reuses_cached_snapshot_when_inputs_unchanged(client, m
 
     reused = client.post(f"/api/v2/sessions/{sid}/strategy/preview", json={})
     assert reused.status_code == 200
-    assert reused.json()["data"]["strategy_preview"]["input_hash"] == original["input_hash"]
+    reused_preview = reused.json()["data"]["strategy_preview"]
+    assert reused_preview["input_hash"] == original["input_hash"]
+    assert reused_preview["cache_hit"] is True
 
 
 def test_strategy_preview_accepts_planner_enriched_copy_blocks(client, monkeypatch):
@@ -957,7 +969,7 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
     )
     assert preview.status_code == 200
     detail_strategy = preview.json()["data"]["detail_strategy_preview"]
-    assert detail_strategy["use_case"] == "amazon_detail"
+    assert detail_strategy["use_case"] == "ecommerce_detail"
     assert detail_strategy["aspect_ratio"] == "21:9"
     assert detail_strategy["panel_count"] == 8
     assert detail_strategy["style_source"] == "copy_fields"
@@ -990,7 +1002,7 @@ def test_detail_page_preview_and_prompt_preview_without_style_images(client):
     )
     assert prompt_preview.status_code == 200
     data = prompt_preview.json()["data"]
-    assert data["use_case"] == "amazon_detail"
+    assert data["use_case"] == "ecommerce_detail"
     assert data["aspect_ratio"] == "21:9"
     assert data["panel_count"] == 8
     assert data["image_size"] == "1792x768"

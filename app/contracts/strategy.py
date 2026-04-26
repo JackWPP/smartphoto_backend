@@ -105,3 +105,7 @@ class StrategyPreviewPayload(ContractModel):
     hash_policy_version: str | None = None
     hash_layers: dict[str, str] = Field(default_factory=dict)
     input_hash: str | None = None
+    cache_hit: bool | None = None
+    prompt_profile: str | None = None
+    prompt_input_chars: int | None = None
+    planner_image_count: int | None = None

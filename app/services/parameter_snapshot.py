@@ -30,9 +30,11 @@ def apply_parameter_snapshot_to_copy(
     parameter_snapshot: dict[str, Any] | None,
     *,
     overwrite: bool,
+    protect_explicit_input: bool = True,
 ) -> dict[str, Any]:
     return apply_parameter_snapshot_with_attribution(
         confirmed_copy,
         parameter_snapshot,
         overwrite=overwrite,
+        protect_explicit_input=protect_explicit_input,
     )

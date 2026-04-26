@@ -158,6 +158,9 @@
     - `harness_first`：当前默认主/详情 planner 先走 `WhatAI + kimi-k2.5`，并对 `kimi-k2.5` 自动追加 `enable_thinking=true`；若命中 `429/超时` 再降级到 `WHATAI_PLANNER_LIGHT_MODEL`
     - `light_model`：切到更轻量的 planner 模型
   - `strategy_preview` / `detail_strategy_preview` 会记录 `planner_profile`、`planner_primary_* / planner_fallback_* / planner_attempt_count / planner_final_source`，同时 `input_hash` 也会把当前 profile/provider/model 纳入哈希
+  - Latency mode: `PLANNER_PROMPT_MODE` and `DETAIL_PLANNER_PROMPT_MODE` default to `compact`; switch either to `legacy` to restore the longer planner prompts without code changes.
+  - Repair mode: `PLANNER_REPAIR_STRICTNESS=critical_only` means only invalid JSON, missing slot/panel coverage, invalid reference ids, visible-copy contamination, and similar critical planner errors trigger an extra LLM repair call; locally derivable fields are filled by rule merge/normalizers.
+  - Preview observability fields: both `strategy_preview` and `detail_strategy_preview` may include `cache_hit`, `prompt_profile`, `prompt_input_chars`, and `planner_image_count` for latency A/B comparison.
   - `Main Copy Design Agent` 当前默认关闭，不再作为主链默认时延来源
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”
   - 默认平台固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`

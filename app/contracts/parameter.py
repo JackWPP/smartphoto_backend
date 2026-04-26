@@ -20,3 +20,9 @@ class ParameterSnapshotPayload(ContractModel):
     completion_status: str | None = None
     completion_source: str | None = None
     confidence_notes: list[str] = Field(default_factory=list)
+    # 事实层溯源标记：由 Gemini analysis 写入，Doubao completion 不得修改
+    # 取值：'llm'（Gemini 正常分析）| 'fallback'（Gemini 未识别，走兜底）
+    analysis_quality: str | None = None
+    # 跳过补全时由 sessions.py 写入的调试元数据
+    skipped_completion: bool | None = None
+    skip_reason: str | None = None

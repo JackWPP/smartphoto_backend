@@ -144,6 +144,7 @@ def apply_parameter_snapshot_with_attribution(
     parameter_snapshot: dict[str, Any] | None,
     *,
     overwrite: bool,
+    protect_explicit_input: bool = True,
 ) -> dict[str, Any]:
     current = sanitize_copy_form_payload(strip_copy_meta(confirmed_copy))
     next_copy = normalize_copy_payload(current)
@@ -153,12 +154,28 @@ def apply_parameter_snapshot_with_attribution(
     snapshot = _normalized_parameter_snapshot(parameter_snapshot)
     highlights = normalize_string_list(snapshot.get("feature_highlights"))
 
+    # 字段级优先级判断：用户已显式填写时（explicit_input）即使 overwrite=True 也不覆盖
+    # 优先级顺序： explicit_input > evidence_backed (parameter_primary) > inferred > defaults
+    def _is_user_explicit(field: str) -> bool:
+        if not protect_explicit_input:
+            return False
+        field_meta = next_meta.get(field)
+        if isinstance(field_meta, dict):
+            return field_meta.get("source") == "explicit_input"
+        if isinstance(field_meta, list) and field_meta:
+            return any(m.get("source") == "explicit_input" for m in field_meta if isinstance(m, dict))
+        return False
+
     if overwrite:
-        next_copy["hero_scene"] = mapped["hero_scene"]
-        next_copy["core_selling_points"] = mapped["core_selling_points"]
-        next_copy["key_parameters"] = mapped["key_parameters"]
-        next_copy["product_advantages"] = mapped["product_advantages"]
-        if highlights:
+        if not _is_user_explicit("hero_scene"):
+            next_copy["hero_scene"] = mapped["hero_scene"]
+        if not _is_user_explicit("core_selling_points"):
+            next_copy["core_selling_points"] = mapped["core_selling_points"]
+        if not _is_user_explicit("key_parameters"):
+            next_copy["key_parameters"] = mapped["key_parameters"]
+        if not _is_user_explicit("product_advantages"):
+            next_copy["product_advantages"] = mapped["product_advantages"]
+        if highlights and not _is_user_explicit("style_custom"):
             next_copy["style_custom"] = "，".join(highlights[:2])
             next_meta["style_custom"] = attribution["style_custom"]
     else:
@@ -174,13 +191,17 @@ def apply_parameter_snapshot_with_attribution(
             next_copy["style_custom"] = "，".join(highlights[:2])
             next_meta["style_custom"] = attribution["style_custom"]
 
-    if mapped["hero_scene"] and (overwrite or not current.get("hero_scene")):
+    # attribution meta 只在字段实际被写入时才更新（遵守 explicit_input 守卫）
+    def _should_write_attr(field: str) -> bool:
+        return not _is_user_explicit(field) if overwrite else not current.get(field)
+
+    if mapped["hero_scene"] and _should_write_attr("hero_scene"):
         next_meta["hero_scene"] = attribution["hero_scene"]
-    if mapped["core_selling_points"] and (overwrite or not current.get("core_selling_points")):
+    if mapped["core_selling_points"] and _should_write_attr("core_selling_points"):
         next_meta["core_selling_points"] = attribution["core_selling_points"]
-    if mapped["key_parameters"] and (overwrite or not current.get("key_parameters")):
+    if mapped["key_parameters"] and _should_write_attr("key_parameters"):
         next_meta["key_parameters"] = attribution["key_parameters"]
-    if mapped["product_advantages"] and (overwrite or not current.get("product_advantages")):
+    if mapped["product_advantages"] and _should_write_attr("product_advantages"):
         next_meta["product_advantages"] = attribution["product_advantages"]
 
     next_copy = _sync_legacy_copy_fields_with_attribution(next_copy, next_meta, overwrite=overwrite)

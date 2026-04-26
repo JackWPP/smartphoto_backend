@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartPhoto 生图系统 - 流程与模型说明</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: #f5f7fa;
+            min-height: 100vh;
+            color: #333;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            color: #1a1a2e;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 50px;
+        }
+
+        /* Section styling */
+        .section {
+            background: #fff;
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 40px;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+        }
+        .section h2 {
+            font-size: 1.8em;
+            margin-bottom: 25px;
+            color: #1a1a2e;
+            border-left: 4px solid #4a90d9;
+            padding-left: 15px;
+        }
+
+        /* Model comparison table */
+        .model-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        .model-table th, .model-table td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .model-table th {
+            background: #f0f4f8;
+            color: #1a1a2e;
+            font-weight: 600;
+        }
+        .model-table tr:hover {
+            background: #fafbfc;
+        }
+        .before {
+            color: #e74c3c;
+        }
+        .after {
+            color: #27ae60;
+        }
+        .arrow {
+            color: #999;
+            font-size: 1.2em;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .badge-changed {
+            background: linear-gradient(90deg, #ff6b6b, #ff8e53);
+            color: #fff;
+        }
+        .badge-same {
+            background: #e8f5e9;
+            color: #27ae60;
+        }
+
+        /* Pipeline flow */
+        .pipeline {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 15px;
+            margin: 30px 0;
+        }
+        .pipeline-step {
+            background: linear-gradient(135deg, #f0f4f8, #e8ecf1);
+            border: 2px solid #d0d7e0;
+            border-radius: 12px;
+            padding: 20px;
+            width: 180px;
+            text-align: center;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .pipeline-step:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(74,144,217,0.2);
+        }
+        .pipeline-step .step-num {
+            background: #4a90d9;
+            color: #fff;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 10px;
+            font-weight: bold;
+        }
+        .pipeline-step .step-title {
+            font-size: 1.1em;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #1a1a2e;
+        }
+        .pipeline-step .step-model {
+            font-size: 0.85em;
+            color: #4a90d9;
+        }
+        .pipeline-arrow {
+            display: flex;
+            align-items: center;
+            color: #bbb;
+            font-size: 1.5em;
+        }
+
+        /* Gallery cards */
+        .gallery-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .gallery-card {
+            background: #f8fafc;
+            border: 1px solid #e5e9ed;
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .gallery-card:hover {
+            transform: scale(1.05);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+        }
+        .gallery-card .icon {
+            font-size: 3em;
+            margin-bottom: 10px;
+        }
+        .gallery-card h3 {
+            color: #1a1a2e;
+            margin-bottom: 5px;
+        }
+        .gallery-card p {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        /* Detail panel timeline */
+        .detail-panel {
+            display: flex;
+            overflow-x: auto;
+            gap: 15px;
+            padding: 20px 0;
+            margin-top: 20px;
+        }
+        .panel-item {
+            flex: 0 0 120px;
+            background: linear-gradient(180deg, #f0f4f8, #e8ecf1);
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+        }
+        .panel-item .panel-num {
+            background: #4a90d9;
+            color: #fff;
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 10px;
+            font-size: 0.85em;
+        }
+        .panel-item h4 {
+            font-size: 0.95em;
+            margin-bottom: 5px;
+            color: #1a1a2e;
+        }
+        .panel-item p {
+            font-size: 0.75em;
+            color: #666;
+        }
+
+        /* FAQ Section */
+        .faq-item {
+            background: #f8fafc;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-left: 3px solid #4a90d9;
+        }
+        .faq-item h3 {
+            color: #e74c3c;
+            margin-bottom: 15px;
+            font-size: 1.1em;
+        }
+        .faq-item h4 {
+            color: #27ae60;
+            margin: 15px 0 10px;
+            font-size: 1em;
+        }
+        .faq-item ul {
+            margin-left: 20px;
+            color: #555;
+        }
+        .faq-item li {
+            margin-bottom: 8px;
+        }
+
+        /* Highlight box */
+        .highlight-box {
+            background: linear-gradient(135deg, #fff5f5, #fff0e8);
+            border: 1px solid #ffd0c7;
+            border-radius: 15px;
+            padding: 25px;
+            margin-top: 20px;
+        }
+        .highlight-box h3 {
+            color: #e74c3c;
+            margin-bottom: 15px;
+        }
+
+        /* Parameters table */
+        .param-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .param-item {
+            background: #f0f9f4;
+            border: 1px solid #c8e6d5;
+            border-radius: 10px;
+            padding: 15px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        .param-item .param-icon {
+            font-size: 2em;
+        }
+        .param-item h4 {
+            color: #27ae60;
+            font-size: 0.95em;
+        }
+        .param-item p {
+            color: #666;
+            font-size: 0.85em;
+        }
+
+        /* Changed step styling */
+        .pipeline-step.changed {
+            border-color: #ff8e53;
+            background: linear-gradient(135deg, #fff5f0, #fff0e8);
+        }
+        .pipeline-step.changed .step-num {
+            background: #ff6b6b;
+        }
+        .pipeline-step.changed .step-model {
+            color: #e74c3c;
+        }
+
+        /* Conclusion text */
+        .conclusion-text {
+            color: #555;
+            line-height: 1.8;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .pipeline {
+                flex-direction: column;
+                align-items: center;
+            }
+            .pipeline-arrow {
+                transform: rotate(90deg);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SmartPhoto 生图系统</h1>
+        <p class="subtitle">电商主图与详情页智能生成</p>
+
+        <!-- Section 1: 模型变更对比 -->
+        <div class="section">
+            <h2>模型变更对比（近期更新）</h2>
+            <p style="color: #666; margin-bottom: 20px;">下方表格展示了近期系统调整中，发生变化的任务模块。图片生成和分析相关能力保持不变。</p>
+
+            <table class="model-table">
+                <thead>
+                    <tr>
+                        <th>任务类型</th>
+                        <th>变更前</th>
+                        <th>变更后</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>设计规划（主图）</td>
+                        <td class="before">Gemini 快速版</td>
+                        <td class="after">豆包</td>
+                        <td><span class="badge badge-changed">已变更</span></td>
+                    </tr>
+                    <tr>
+                        <td>设计规划（详情页）</td>
+                        <td class="before">Gemini 快速版</td>
+                        <td class="after">豆包</td>
+                        <td><span class="badge badge-changed">已变更</span></td>
+                    </tr>
+                    <tr>
+                        <td>参数补全</td>
+                        <td class="before">OpenRouter 供应商</td>
+                        <td class="after">豆包</td>
+                        <td><span class="badge badge-changed">已变更</span></td>
+                    </tr>
+                    <tr>
+                        <td>文字审核</td>
+                        <td class="before">OpenRouter 供应商</td>
+                        <td class="after">豆包</td>
+                        <td><span class="badge badge-changed">已变更</span></td>
+                    </tr>
+                    <tr>
+                        <td>商品图片分析</td>
+                        <td class="before">GPT-4.1-mini</td>
+                        <td class="after">Gemini 分析增强版</td>
+                        <td><span class="badge badge-same">能力提升</span></td>
+                    </tr>
+                    <tr>
+                        <td>参数提取</td>
+                        <td class="before">Gemini 轻量版</td>
+                        <td class="after">Gemini 快速版</td>
+                        <td><span class="badge badge-same">能力提升</span></td>
+                    </tr>
+                    <tr>
+                        <td>图片生成</td>
+                        <td class="before">GPT-Image</td>
+                        <td class="after">Gemini 图像版</td>
+                        <td><span class="badge badge-same">能力提升</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Section 2: 主图生成流程 -->
+        <div class="section">
+            <h2>主图生成流程（5张）</h2>
+            <p style="color: #666; margin-bottom: 30px;">系统会分析您的商品图片，自动生成5张不同风格的主图</p>
+
+            <div class="pipeline">
+                <div class="pipeline-step">
+                    <div class="step-num">1</div>
+                    <div class="step-title">上传图片</div>
+                    <div class="step-model">—</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">2</div>
+                    <div class="step-title">图片分析</div>
+                    <div class="step-model">Gemini 分析增强版</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">3</div>
+                    <div class="step-title">参数提取</div>
+                    <div class="step-model">Gemini 快速版</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step changed">
+                    <div class="step-num">4</div>
+                    <div class="step-title">参数补全</div>
+                    <div class="step-model">豆包 ⭐变更</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step changed">
+                    <div class="step-num">5</div>
+                    <div class="step-title">设计规划</div>
+                    <div class="step-model">豆包 ⭐变更</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">6</div>
+                    <div class="step-title">图片生成</div>
+                    <div class="step-model">Gemini 图像版</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">7</div>
+                    <div class="step-title">文字审核</div>
+                    <div class="step-model">豆包</div>
+                </div>
+            </div>
+
+            <div class="gallery-grid">
+                <div class="gallery-card">
+                    <div class="icon">🏔️</div>
+                    <h3>Hero 主图</h3>
+                    <p>整体展示，突出产品核心卖点</p>
+                </div>
+                <div class="gallery-card">
+                    <div class="icon">⬜</div>
+                    <h3>白底图</h3>
+                    <p>纯白背景，产品正面展示</p>
+                </div>
+                <div class="gallery-card">
+                    <div class="icon">💡</div>
+                    <h3>卖点图</h3>
+                    <p>突出1-2个核心功能优势</p>
+                </div>
+                <div class="gallery-card">
+                    <div class="icon">🏠</div>
+                    <h3>场景图</h3>
+                    <p>产品在实际环境中使用</p>
+                </div>
+                <div class="gallery-card">
+                    <div class="icon">🔍</div>
+                    <h3>细节图</h3>
+                    <p>展示产品做工和质感</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 3: 详情页生成流程 -->
+        <div class="section">
+            <h2>详情页生成流程（8张 + 1张拼接）</h2>
+            <p style="color: #666; margin-bottom: 30px;">自动规划8张详情页的内容和叙事逻辑，最终拼接成一张长图</p>
+
+            <div class="pipeline" style="flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start;">
+                <div class="pipeline-step">
+                    <div class="step-num">1</div>
+                    <div class="step-title">图片分析</div>
+                    <div class="step-model">Gemini</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step changed">
+                    <div class="step-num">2</div>
+                    <div class="step-title">叙事规划</div>
+                    <div class="step-model">豆包 ⭐</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">3</div>
+                    <div class="step-title">批量生成</div>
+                    <div class="step-model">Gemini 图像</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">4</div>
+                    <div class="step-title">自动拼接</div>
+                    <div class="step-model">—</div>
+                </div>
+                <div class="pipeline-arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">5</div>
+                    <div class="step-title">文字审核</div>
+                    <div class="step-model">豆包</div>
+                </div>
+            </div>
+
+            <div class="detail-panel">
+                <div class="panel-item">
+                    <div class="panel-num">1</div>
+                    <h4>封面</h4>
+                    <p>核心问题+解决方案</p>
+                </div>
+                <div class="panel-item">
+                    <div class="panel-num">2</div>
+                    <h4>概览</h4>
+                    <p>产品机制简介</p>
+                </div>
+                <div class="panel-item">
+                    <div class="panel-num">3</div>
+                    <h4>功能A</h4>
+                    <p>功能证明</p>
+                </div>
+                <div class="panel-item">
+                    <div class="panel-num">4</div>
+                    <h4>功能B</h4>
+                    <p>功能+场景</p>
+                </div>
+                <div class="panel-item">
+                    <div class="panel-num">5</div>
+                    <h4>场景</h4>
+                    <p>实际使用效果</p>
+                </div>
+                <div class="panel-item">
+                    <div class="panel-num">6</div>
+                    <h4>细节</h4>
+                    <p>拆解展示</p>
+                </div>
+                <div class="panel-item">
+                    <div class="panel-num">7</div>
+                    <h4>规格</h4>
+                    <p>参数说明</p>
+                </div>
+                <div class="panel-item">
+                    <div class="panel-num">8</div>
+                    <h4>结尾</h4>
+                    <p>信任背书</p>
+                </div>
+            </div>
+            <p style="text-align: center; color: #888; margin-top: 10px;">← 8张 Panel 横向拼接 → 最终输出 1张长图</p>
+        </div>
+
+        <!-- Section 4: 客户问题 -->
+        <div class="section">
+            <h2>客户常见问题</h2>
+
+            <div class="faq-item">
+                <h3>Q: 为什么之前能识别空气净化器的关键参数，现在不行了？</h3>
+                <p class="conclusion-text">近期我们对<strong style="color: #e74c3c;">参数补全</strong>和<strong style="color: #e74c3c;">设计规划</strong>环节的模型进行了调整，这两个环节直接影响产品类型识别和参数提取能力。</p>
+
+                <h4>可能的原因：</h4>
+                <ul>
+                    <li>不同 AI 模型对产品类型的识别能力有所差异</li>
+                    <li>豆包模型对某些细分产品类型的识别可能需要更多上下文信息</li>
+                    <li>空气净化器与加湿器在视觉上较为相似，需要更多特征区分</li>
+                </ul>
+
+                <h4>建议的解决方法：</h4>
+                <ul>
+                    <li><strong>多角度图片</strong>：上传多个角度的产品图片有助于更准确识别</li>
+                    <li><strong>手动补充参数</strong>：如果您知道产品参数，可在生成前手动输入</li>
+                    <li><strong>选择准确品类</strong>：选择最具体的产品品类（如"空气净化器"而非"家电"）</li>
+                    <li><strong>反馈问题</strong>：发现识别不准时，请反馈给我们持续优化</li>
+                </ul>
+            </div>
+
+            <div class="faq-item">
+                <h3>Q: 图片生成效果会受影响吗？</h3>
+                <p class="conclusion-text"><strong style="color: #27ae60;">不会。</strong> 图片生成环节使用的模型没有变化，继续使用 Gemini 图像生成模型。</p>
+            </div>
+
+            <div class="faq-item">
+                <h3>Q: 详情页的叙事逻辑会变化吗？</h3>
+                <p class="conclusion-text">可能会有细微差异。详情页规划环节换成了豆包，叙事逻辑的生成可能会有风格差异，但整体内容结构和逻辑框架保持一致。</p>
+            </div>
+        </div>
+
+        <!-- Section 5: 支持的参数类型 -->
+        <div class="section">
+            <h2>空气净化器相关参数</h2>
+            <p style="color: #666; margin-bottom: 20px;">系统可以识别和提取以下空气净化器相关参数：</p>
+
+            <div class="param-grid">
+                <div class="param-item">
+                    <div class="param-icon">💨</div>
+                    <div>
+                        <h4>CADR 值</h4>
+                        <p>洁净空气量（m³/h）</p>
+                    </div>
+                </div>
+                <div class="param-item">
+                    <div class="param-icon">🔲</div>
+                    <div>
+                        <h4>HEPA 滤网</h4>
+                        <p>滤网等级和寿命</p>
+                    </div>
+                </div>
+                <div class="param-item">
+                    <div class="param-icon">🔊</div>
+                    <div>
+                        <h4>噪音等级</h4>
+                        <p>静音档/最大档 dB</p>
+                    </div>
+                </div>
+                <div class="param-item">
+                    <div class="param-icon">📐</div>
+                    <div>
+                        <h4>适用面积</h4>
+                        <p>适用房间大小（㎡）</p>
+                    </div>
+                </div>
+                <div class="param-item">
+                    <div class="param-icon">✨</div>
+                    <div>
+                        <h4>功能特性</h4>
+                        <p>除甲醛/除菌/除异味</p>
+                    </div>
+                </div>
+                <div class="param-item">
+                    <div class="param-icon">📱</div>
+                    <div>
+                        <h4>操控方式</h4>
+                        <p>触摸/遥控/APP</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section 6: 核心结论 -->
+        <div class="highlight-box">
+            <h3>核心结论</h3>
+            <p class="conclusion-text">本次模型调整主要影响<strong style="color: #e74c3c;">参数补全</strong>和<strong style="color: #e74c3c;">设计规划</strong>环节。</p>
+            <p class="conclusion-text" style="margin-top: 10px;"><strong style="color: #27ae60;">图片生成能力</strong>和分析能力保持不变。</p>
+            <p class="conclusion-text" style="margin-top: 15px; color: #888;">如果您发现空气净化器参数识别出现问题，可以通过多上传图片或手动补充参数来解决，并请反馈给我们以便持续优化。</p>
+        </div>
+
+        <p style="text-align: center; color: #999; margin-top: 40px;">
+            SmartPhoto 生图系统 · 2026年4月更新
+        </p>
+    </div>
+</body>
+</html>

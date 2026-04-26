@@ -77,16 +77,22 @@ class Settings(BaseSettings):
     ark_api_key: str = ""
     doubao_request_timeout_seconds: int = Field(default=45, ge=5, le=600)
     doubao_max_retries: int = Field(default=2, ge=1, le=5)
+    doubao_thinking_budget_tokens: int = Field(default=0, ge=0, le=100000,
+        description="Doubao seed 模型思考 token 预算。0 表示使用 API 默认值，正整数表示限制思考 tokens (需 API 支持)。")
     openai_compatible_api_base: str = ""
     openai_compatible_api_key: str = ""
     openai_compatible_request_timeout_seconds: int = Field(default=45, ge=5, le=600)
     openai_compatible_max_retries: int = Field(default=2, ge=1, le=5)
     planner_profile: str = "harness_first"
+    planner_prompt_mode: str = "compact"
+    detail_planner_prompt_mode: str = "compact"
+    planner_repair_strictness: str = "critical_only"
     llm_route_analysis: str = "whatai_gemini"
     llm_route_main_planner: str = "doubao_text"
     llm_route_detail_planner: str = "doubao_text"
     llm_route_planner_light: str = "whatai_gemini"
     planner_fallback_route: str = "whatai_gemini"
+    planner_kimi_enable_thinking: bool = False
     llm_route_parameter_visual: str = "whatai_gemini"
     llm_route_parameter_completion: str = "doubao_text"
     llm_route_main_copy_design: str = "disabled"
@@ -117,6 +123,8 @@ class Settings(BaseSettings):
     doubao_text_review_model: str = "doubao-seed-2-0-pro-260215"
     doubao_text_presentation_model: str = ""
     doubao_fallback_model: str = ""
+    planner_temperature: float = Field(default=0.15, ge=0.0, le=1.0)
+    detail_planner_temperature: float = Field(default=0.15, ge=0.0, le=1.0)
     openai_compatible_planner_model: str = ""
     openai_compatible_detail_planner_model: str = ""
     openai_compatible_parameter_completion_model: str = ""
@@ -132,6 +140,7 @@ class Settings(BaseSettings):
     detail_generation_submit_concurrency: int = Field(default=4, ge=1, le=16)
     image_submit_batch_size: int = Field(default=5, ge=1, le=16)
     detail_image_submit_batch_size: int = Field(default=4, ge=1, le=16)
+    detail_preview_width: int = Field(default=800, ge=200, le=2048, description="preview image width in px (2x of frontend max_width)")
     image_submit_batch_interval_seconds: int = Field(default=5, ge=0, le=120)
     image_poll_initial_delay_seconds: int = Field(default=45, ge=0, le=300)
     image_task_timeout_seconds: int = Field(default=450, ge=60, le=1800)
@@ -290,6 +299,15 @@ def get_settings() -> Settings:
     settings.storage_backend = (settings.storage_backend or "local").strip().lower()
     settings.llm_provider = (settings.llm_provider or "whatai").strip().lower()
     settings.planner_profile = (settings.planner_profile or "harness_first").strip().lower()
+    settings.planner_prompt_mode = (settings.planner_prompt_mode or "compact").strip().lower()
+    if settings.planner_prompt_mode not in {"compact", "legacy"}:
+        settings.planner_prompt_mode = "compact"
+    settings.detail_planner_prompt_mode = (settings.detail_planner_prompt_mode or "compact").strip().lower()
+    if settings.detail_planner_prompt_mode not in {"compact", "legacy"}:
+        settings.detail_planner_prompt_mode = "compact"
+    settings.planner_repair_strictness = (settings.planner_repair_strictness or "critical_only").strip().lower()
+    if settings.planner_repair_strictness not in {"critical_only", "legacy"}:
+        settings.planner_repair_strictness = "critical_only"
     settings.llm_route_analysis = (settings.llm_route_analysis or "whatai_gemini").strip().lower()
     settings.llm_route_main_planner = (settings.llm_route_main_planner or "doubao_text").strip().lower()
     settings.llm_route_detail_planner = (settings.llm_route_detail_planner or "doubao_text").strip().lower()

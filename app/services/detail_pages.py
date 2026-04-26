@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from sqlalchemy.orm import Session
 
 from app.contracts.detail_strategy import DetailPanelPlanItem, DetailStrategyPreviewPayload
@@ -62,7 +62,7 @@ from app.services.visible_copy_policy import (
     visible_copy_language_for_platform,
 )
 
-DETAIL_PAGE_USE_CASE = "amazon_detail"
+DETAIL_PAGE_USE_CASE = "ecommerce_detail"  # 通用电商详情页，不绑定 Amazon 语义
 DETAIL_PAGE_ASPECT_RATIO = "21:9"
 DETAIL_PAGE_IMAGE_SIZE = "1792x768"
 DETAIL_PAGE_PANEL_COUNT = 8
@@ -150,6 +150,7 @@ def _detail_preview_hash_bundle(
     config_payload = {
         "platform_id": active_platform_id or "amazon",
         "planner_profile": planner_profile or "",
+        "detail_planner_prompt_mode": get_settings().detail_planner_prompt_mode,
         "planner_provider": planner_provider or "",
         "planner_model": planner_model or "",
         "language_policy_version": DETAIL_LANGUAGE_POLICY_VERSION,
@@ -330,6 +331,7 @@ def build_detail_strategy_preview(
     style_loaded = load_reference_images(style_images or []) if style_images else []
     resolved_panel_preferences = resolve_panel_preferences(panel_preferences, platform_id=active_platform_id, db=db)
     resolved_prompt_overrides = resolve_session_overrides(prompt_overrides)
+    client = WhataiClient()
 
     if not product_loaded:
         preview = {
@@ -353,6 +355,10 @@ def build_detail_strategy_preview(
             "language_policy_version": DETAIL_LANGUAGE_POLICY_VERSION,
             "detail_policy_version": DETAIL_POLICY_VERSION,
             "planner_profile": settings.planner_profile,
+            "prompt_profile": settings.detail_planner_prompt_mode,
+            "prompt_input_chars": 0,
+            "planner_image_count": 0,
+            "cache_hit": False,
             "planner_primary_provider": None,
             "planner_primary_model": None,
             "planner_fallback_provider": None,
@@ -407,7 +413,6 @@ def build_detail_strategy_preview(
         db=db,
     )
 
-    client = WhataiClient()
     product_grid, style_grid = build_detail_reference_grids(product_loaded, style_loaded)
     planner_started = time.perf_counter()
     llm_result = client.plan_detail_page_narrative(
@@ -452,6 +457,10 @@ def build_detail_strategy_preview(
         "language_policy_version": DETAIL_LANGUAGE_POLICY_VERSION,
         "detail_policy_version": DETAIL_POLICY_VERSION,
         "planner_profile": settings.planner_profile,
+        "prompt_profile": str(llm_result.get("prompt_profile") or settings.detail_planner_prompt_mode),
+        "prompt_input_chars": int(llm_result.get("prompt_input_chars") or 0),
+        "planner_image_count": 1 + (1 if style_grid is not None else 0),
+        "cache_hit": False,
         "planner_primary_provider": llm_result.get("planner_primary_provider"),
         "planner_primary_model": llm_result.get("planner_primary_model"),
         "planner_fallback_provider": llm_result.get("planner_fallback_provider"),
@@ -1052,9 +1061,14 @@ def _merge_panel_plan(
         for item in llm_plan
         if isinstance(item, dict) and str(item.get("panel_id") or "").strip()
     }
+    llm_by_index = {
+        int(item.get("_index")): item
+        for item in llm_plan
+        if isinstance(item, dict) and item.get("_index") is not None
+    }
     merged: list[dict[str, Any]] = []
-    for item in fallback_plan:
-        llm_item = llm_by_id.get(str(item["panel_id"]))
+    for index, item in enumerate(fallback_plan):
+        llm_item = llm_by_id.get(str(item["panel_id"])) or llm_by_index.get(index)
         if not llm_item:
             merged.append(item)
             continue
@@ -1997,3 +2011,29 @@ def compose_detail_panel_prompt(
         "copy_safety_notes": sanitized.copy_safety_notes,
         "final_prompt": pipeline.final_prompt,
     }
+
+
+def apply_watermark(image_bytes: bytes, text: str = "PREVIEW", opacity: float = 0.12) -> bytes:
+    """Apply a diagonal tiled watermark to an image and return the watermarked bytes."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    try:
+        font_size = max(int(min(img.size) * 0.06), 18)
+        font = ImageFont.truetype("arial.ttf", font_size)
+    except OSError:
+        font = ImageFont.load_default()
+
+    alpha = int(opacity * 255)
+    spacing_x = max(int(img.width * 0.4), 200)
+    spacing_y = max(int(img.height * 0.35), 100)
+
+    for y in range(-img.height, img.height * 2, spacing_y):
+        for x in range(-img.width, img.width * 2, spacing_x):
+            draw.text((x, y), text, fill=(255, 255, 255, alpha), font=font)
+
+    watermarked = Image.alpha_composite(img, overlay).convert("RGB")
+    buffer = io.BytesIO()
+    watermarked.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()

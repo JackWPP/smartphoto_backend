@@ -12,6 +12,7 @@ from app.models.rule_pack_version import RulePackVersionModel
 DEFAULT_MAIN_RULE_PACK_ID = "default_main_gallery_v2"
 ALIBABA_MAIN_RULE_PACK_ID = "alibaba_core_5_slot"
 DETAIL_RULE_PACK_ID = "ecommerce_detail_v2"
+ALIBABA_DETAIL_RULE_PACK_ID = "alibaba_detail_v1"
 
 _SHARED_HARNESS_BLOCKS: dict[str, Any] = {
     "fidelity_config": {
@@ -125,13 +126,97 @@ BUILTIN_RULE_PACKS: list[dict[str, Any]] = [
             ],
         },
     },
+    # ── 1688 / 淘宝专属详情页规则包 ──────────────────────────────────────────────
+    {
+        "name": "1688详情页规则",
+        "asset_family": "detail_page",
+        "platform_id": "1688",
+        "rule_pack_key": ALIBABA_DETAIL_RULE_PACK_ID,
+        "config_snapshot": {
+            # 平台约束：亮底、主体占比、禁止暗黑风格
+            "platform_constraints": {
+                "background_style": "bright_clean",          # 亮底/白底/浅灰底
+                "subject_ratio_min": 0.55,                   # 主体占画面比例 ≥ 55%
+                "forbidden_styles": ["dark_moody", "cyberpunk", "kv_poster", "magazine_spread"],
+                "copy_max_chars_headline": 12,               # 标题最多 12 汉字
+                "copy_max_chars_supporting": 20,             # 副文案最多 20 汉字
+                "thumbnail_readable": True,                  # 缩略图可读
+                "module_style": "card_modular",              # 模块化卡片风格
+            },
+            # 叙事模板：1688 移动端货架叙事结构
+            "detail_narrative_template": {
+                "structure": [
+                    "trust_overview",   # 首屏：品类定位 + 核心利益点
+                    "mechanism",        # 机制/原理：为什么有效
+                    "feature_a",        # 核心卖点 A 深度展开
+                    "feature_b",        # 核心卖点 B 深度展开
+                    "usage_scene",      # 使用场景可视化
+                    "parameter_proof", # 参数/认证/实验佐证
+                    "differentiator",  # 差异化亮点
+                    "closing_cta",     # 尾屏总结 + 行动号召
+                ],
+                "min_panels": 5,
+                "max_panels": 8,
+                "trust_module_required": True,
+                "evidence_module_required": True,
+                "panel_descriptions": {
+                    "trust_overview": "首屏货架信任入场：品牌/品类定位 + 核心利益点（亮底，短标题，主体突出）",
+                    "mechanism": "机制/原理卡：理由卡，解释为什么有效，可用图解或数据",
+                    "feature_a": "核心卖点 A 深度展开：证据卡，用参数/认证/对比佐证",
+                    "feature_b": "核心卖点 B 深度展开：场景利益卡，真实场景代入",
+                    "usage_scene": "使用场景可视化：生活化场景，体现人群和使用方式",
+                    "parameter_proof": "参数板/认证/实验数据：结构化参数展示",
+                    "differentiator": "差异化亮点：对比竞品或展示独有功能",
+                    "closing_cta": "尾屏总结收束：精简核心卖点矩阵 + 行动号召",
+                },
+            },
+            # 面板类型库：1688 货架语义（替换 Amazon 语义词汇）
+            "panel_type_library": {
+                # 1688 专属货架类型
+                "first_screen_shelf": {"label": "首屏货架图", "layout_template": "shelf_hero", "copy_policy": "headline_plus_supporting"},
+                "reason_why_card": {"label": "理由卡", "layout_template": "reason_card", "copy_policy": "headline_plus_supporting"},
+                "evidence_card": {"label": "证据卡", "layout_template": "proof_card", "copy_policy": "headline_plus_supporting"},
+                "scene_benefit_card": {"label": "场景利益卡", "layout_template": "immersive_scene", "copy_policy": "headline_plus_supporting"},
+                "closing_summary": {"label": "尾屏总结", "layout_template": "summary_matrix", "copy_policy": "matrix_copy"},
+                # 通用类型（保留）
+                "parameter_board": {"label": "参数板", "layout_template": "parameter_board", "copy_policy": "list_compare"},
+                "feature_proof": {"label": "卖点佐证", "layout_template": "proof_card", "copy_policy": "headline_plus_supporting"},
+                "feature_scene": {"label": "场景卖点", "layout_template": "immersive_scene", "copy_policy": "headline_plus_supporting"},
+                "feature_compare": {"label": "对比优势", "layout_template": "compare_board", "copy_policy": "list_compare"},
+                "feature_exploded_view": {"label": "爆炸结构", "layout_template": "exploded_view", "copy_policy": "headline_plus_supporting"},
+                "detail_closeup": {"label": "细节特写", "layout_template": "macro_closeup", "copy_policy": "headline_plus_supporting"},
+                "feature_benefit": {"label": "利益点详解", "layout_template": "benefit_story", "copy_policy": "headline_plus_supporting"},
+                "feature_process_material": {"label": "工艺材质", "layout_template": "material_process", "copy_policy": "headline_plus_supporting"},
+                "icon_island": {"label": "Icon岛", "layout_template": "icon_grid", "copy_policy": "icon_points"},
+                "product_selector": {"label": "产品选购", "layout_template": "selector_grid", "copy_policy": "list_compare"},
+                "promo_gift": {"label": "活动礼赠", "layout_template": "promo_offer", "copy_policy": "headline_plus_supporting"},
+                "sales_proof": {"label": "销售实力", "layout_template": "social_proof", "copy_policy": "headline_plus_supporting"},
+            },
+            # 槽位规划：首屏→理由→证据→卖点×2→场景→参数→尾屏
+            "slot_plan": [
+                {"slot_id": "detail_slot_01", "panel_id": "panel_01_cover", "panel_label": "首屏货架", "default_panel_type": "first_screen_shelf", "candidate_panel_types": ["first_screen_shelf", "sales_proof", "promo_gift", "product_selector"]},
+                {"slot_id": "detail_slot_02", "panel_id": "panel_02_reason", "panel_label": "理由/机制", "default_panel_type": "reason_why_card", "candidate_panel_types": ["reason_why_card", "icon_island", "product_selector", "feature_benefit"]},
+                {"slot_id": "detail_slot_03", "panel_id": "panel_03_feature_a", "panel_label": "卖点A佐证", "default_panel_type": "evidence_card", "candidate_panel_types": ["evidence_card", "feature_proof", "feature_compare", "feature_exploded_view"]},
+                {"slot_id": "detail_slot_04", "panel_id": "panel_04_feature_b", "panel_label": "卖点B场景", "default_panel_type": "scene_benefit_card", "candidate_panel_types": ["scene_benefit_card", "feature_scene", "feature_benefit", "feature_process_material"]},
+                {"slot_id": "detail_slot_05", "panel_id": "panel_05_scene", "panel_label": "使用场景", "default_panel_type": "feature_benefit", "candidate_panel_types": ["feature_benefit", "feature_scene", "feature_proof", "feature_compare"]},
+                {"slot_id": "detail_slot_06", "panel_id": "panel_06_diff", "panel_label": "差异化", "default_panel_type": "feature_compare", "candidate_panel_types": ["feature_compare", "feature_exploded_view", "feature_process_material", "feature_scene"]},
+                {"slot_id": "detail_slot_07", "panel_id": "panel_07_params", "panel_label": "参数/细节", "default_panel_type": "parameter_board", "candidate_panel_types": ["parameter_board", "detail_closeup", "feature_process_material", "feature_exploded_view"]},
+                {"slot_id": "detail_slot_08", "panel_id": "panel_08_closing", "panel_label": "尾屏总结", "default_panel_type": "closing_summary", "candidate_panel_types": ["closing_summary", "promo_gift", "sales_proof", "parameter_board"]},
+            ],
+        },
+    },
 ]
 
 
 def ensure_system_rule_packs(db: Session) -> None:
-    if db.query(RulePackModel).filter(RulePackModel.is_system.is_(True)).count() > 0:
-        return
+    """按 rule_pack_key 做 upsert，确保新增 builtin 时不会因已有记录而跳过。"""
+    existing_keys: set[str] = {
+        row.rule_pack_key
+        for row in db.query(RulePackModel.rule_pack_key).filter(RulePackModel.is_system.is_(True)).all()
+    }
     for item in BUILTIN_RULE_PACKS:
+        if item["rule_pack_key"] in existing_keys:
+            continue
         rule_pack = RulePackModel(
             name=item["name"],
             asset_family=item["asset_family"],

@@ -101,6 +101,10 @@ def test_strategy_preview_contract_round_trip() -> None:
         "hash_policy_version": "preview_hash_layers_v1",
         "hash_layers": {"config_hash": "cfg", "content_hash": "content", "reference_hash": "ref", "memory_hash": "mem"},
         "input_hash": "hash-1",
+        "cache_hit": False,
+        "prompt_profile": "compact",
+        "prompt_input_chars": 1200,
+        "planner_image_count": 1,
         "provider_debug": "keep",
     }
 
@@ -155,6 +159,10 @@ def test_detail_strategy_preview_contract_round_trip() -> None:
         "hash_policy_version": "preview_hash_layers_v1",
         "hash_layers": {"config_hash": "cfg", "content_hash": "content", "reference_hash": "ref", "memory_hash": "mem"},
         "input_hash": "detail-hash",
+        "cache_hit": False,
+        "prompt_profile": "compact",
+        "prompt_input_chars": 900,
+        "planner_image_count": 1,
         "debug_flag": True,
     }
 

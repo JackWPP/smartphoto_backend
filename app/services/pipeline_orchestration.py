@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 from typing import Any
 
+from PIL import Image
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -17,6 +19,7 @@ from app.contracts.validation import validate_contract_warn
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
+    apply_watermark,
     build_detail_reference_grids,
     build_detail_strategy_preview,
     compose_detail_panel_prompt,
@@ -1393,6 +1396,63 @@ def execute_main_generation_flow(
     }
 
 
+def derive_detail_previews(
+    *,
+    db: Session,
+    storage: Any,
+    session: SessionModel,
+    job: JobModel,
+    panel_bytes_for_stitch: list[tuple[int, bytes]],
+    created_panel_assets: list[AssetModel],
+) -> None:
+    """Derive preview versions from rendered panel images.
+
+    Resizes each panel to the configured preview width, applies a baked-in
+    watermark, persists the result to storage, and records the URLs on the
+    session model.
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    preview_width = settings.detail_preview_width
+    preview_urls: dict[str, str] = {}
+
+    # Build a lookup from display_order to panel_id
+    order_to_panel_id: dict[int, str] = {}
+    for asset in created_panel_assets:
+        if getattr(asset, "asset_kind", None) == "panel":
+            order_to_panel_id[getattr(asset, "display_order", 0)] = getattr(asset, "asset_role", "")
+
+    for display_order, panel_bytes in sorted(panel_bytes_for_stitch, key=lambda item: item[0]):
+        panel_id = order_to_panel_id.get(display_order)
+        if not panel_id:
+            continue
+
+        img = Image.open(io.BytesIO(panel_bytes))
+        ratio = preview_width / img.width
+        preview_height = int(img.height * ratio)
+        resized = img.resize((preview_width, preview_height), Image.LANCZOS)
+        resized_bytes = io.BytesIO()
+        resized.save(resized_bytes, format="JPEG", quality=92)
+        watermarked_bytes = apply_watermark(resized_bytes.getvalue())
+
+        preview_url, _thumb_url, _w, _h, _mime, _size = storage.save_generated_image(
+            session_id=session.id,
+            round_no=session.detail_generation_round + 1,
+            version_no=session.detail_latest_result_version + 1,
+            role=f"{panel_id}_preview",
+            display_order=display_order,
+            image_bytes=watermarked_bytes,
+            ext=".jpg",
+        )
+        preview_urls[panel_id] = preview_url
+
+    setattr(session, "detail_preview_generated", True)
+    current_preview_version = getattr(session, "detail_preview_version", 0) or 0
+    setattr(session, "detail_preview_version", current_preview_version + 1)
+    setattr(session, "detail_preview_image_urls", preview_urls)
+
+
 def execute_detail_generation_flow(
     *,
     db: Session,
@@ -1617,6 +1677,15 @@ def execute_detail_generation_flow(
                 "detail_render_ms": detail_render_ms,
             },
         )
+
+    derive_detail_previews(
+        db=db,
+        storage=storage,
+        session=session,
+        job=job,
+        panel_bytes_for_stitch=panel_bytes_for_stitch,
+        created_panel_assets=created_assets,
+    )
 
     session.detail_generation_round = round_no
     session.detail_latest_result_version = version_no

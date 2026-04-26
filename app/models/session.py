@@ -41,6 +41,10 @@ class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     detail_generation_round: Mapped[int] = mapped_column(Integer, default=0)
     detail_latest_result_version: Mapped[int] = mapped_column(Integer, default=0)
 
+    detail_preview_generated: Mapped[bool] = mapped_column(Boolean, default=False)
+    detail_preview_version: Mapped[int] = mapped_column(Integer, default=0)
+    detail_preview_image_urls: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     product_name_cache: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     brand_name_cache: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     style_tag_cache: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)

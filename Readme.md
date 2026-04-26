@@ -83,6 +83,9 @@ cp .env.example .env
 # LLM_ANALYSIS_MODEL=moonshotai/kimi-k2.5
 # LLM_MAIN_PLANNER_MODEL=xiaomi/mimo-v2-pro
 # LLM_DETAIL_PLANNER_MODEL=minimax/minimax-m2.7
+# PLANNER_PROMPT_MODE=compact
+# DETAIL_PLANNER_PROMPT_MODE=compact
+# PLANNER_REPAIR_STRICTNESS=critical_only
 # WHATAI_REQUEST_TIMEOUT_SECONDS=90
 # [上线推荐] 切到对象存储：
 # STORAGE_BACKEND=s3
