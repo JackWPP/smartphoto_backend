@@ -8,11 +8,13 @@ from sqlalchemy.orm import Session
 from app.services.copy_normalization import (
     is_low_information_copy_text,
     is_placeholder_copy_text,
+    key_parameter_strings,
     normalize_phrase_list,
+    sync_legacy_copy_fields,
     repair_broken_text,
 )
 from app.services.platforms import PlatformProfile, get_platform_or_none
-from app.services.rule_packs import load_published_rule_pack_config
+from app.services.rule_packs import DETAIL_RULE_PACK_ID, load_published_rule_pack_config
 from app.services.visible_copy_policy import simplified_chinese_visible_copy_constraints
 
 
@@ -46,6 +48,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "hero",
             "candidate_expression_modes": ["clean_conversion_kv", "floating_focus", "lifestyle_kv"],
+            "layout_recipe": {
+                "product_anchor": "center",
+                "product_occupancy": [0.50, 0.65],
+                "title_zone": None,
+                "benefit_chip_count": 0,
+                "proof_block_count": 0,
+                "text_container_style": "none",
+                "frame_strength": "light",
+                "scene_weight": 0.15,
+                "product_weight": 0.75,
+                "copy_weight": 0.1,
+                "avoid_patterns": ["collage_grid", "dense_text_overlay"],
+            },
         },
         {
             "slot_id": "white_bg",
@@ -68,6 +83,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": True,
             "reference_role_hint": "white_bg",
             "candidate_expression_modes": ["pure_white_standard", "pure_white_shadow"],
+            "layout_recipe": {
+                "product_anchor": "center",
+                "product_occupancy": [0.75, 0.90],
+                "title_zone": None,
+                "benefit_chip_count": 0,
+                "proof_block_count": 0,
+                "text_container_style": "none",
+                "frame_strength": "none",
+                "scene_weight": 0.0,
+                "product_weight": 1.0,
+                "copy_weight": 0.0,
+                "avoid_patterns": ["any_text_overlay", "scene_elements", "collage_grid"],
+            },
         },
         {
             "slot_id": "selling_point",
@@ -90,6 +118,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "selling_point",
             "candidate_expression_modes": ["single_feature_focus", "benefit_proof_card", "feature_matrix"],
+            "layout_recipe": {
+                "product_anchor": "center",
+                "product_occupancy": [0.40, 0.60],
+                "title_zone": None,
+                "benefit_chip_count": 1,
+                "proof_block_count": 0,
+                "text_container_style": "none",
+                "frame_strength": "light",
+                "scene_weight": 0.1,
+                "product_weight": 0.7,
+                "copy_weight": 0.2,
+                "avoid_patterns": ["collage_grid", "magazine_spread"],
+            },
         },
         {
             "slot_id": "scene",
@@ -112,6 +153,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "scene",
             "candidate_expression_modes": ["immersive_scene", "benefit_scene", "comparison_scene"],
+            "layout_recipe": {
+                "product_anchor": "center",
+                "product_occupancy": [0.35, 0.55],
+                "title_zone": None,
+                "benefit_chip_count": 0,
+                "proof_block_count": 0,
+                "text_container_style": "none",
+                "frame_strength": "light",
+                "scene_weight": 0.5,
+                "product_weight": 0.45,
+                "copy_weight": 0.05,
+                "avoid_patterns": ["collage_grid", "dense_text_overlay"],
+            },
         },
         {
             "slot_id": "detail",
@@ -134,6 +188,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "detail",
             "candidate_expression_modes": ["macro_texture_closeup", "structure_cutaway", "material_process_focus"],
+            "layout_recipe": {
+                "product_anchor": "center",
+                "product_occupancy": [0.70, 0.90],
+                "title_zone": None,
+                "benefit_chip_count": 0,
+                "proof_block_count": 0,
+                "text_container_style": "none",
+                "frame_strength": "none",
+                "scene_weight": 0.0,
+                "product_weight": 0.95,
+                "copy_weight": 0.05,
+                "avoid_patterns": ["collage_grid", "dense_text_overlay", "magazine_spread"],
+            },
         },
     ],
     ALIBABA_MAIN_RULE_PACK_ID: [
@@ -158,6 +225,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "hero",
             "candidate_expression_modes": ["click_through_headline", "benefit_kv", "problem_solution_kv"],
+            "layout_recipe": {
+                "product_anchor": "center",
+                "product_occupancy": [0.40, 0.55],
+                "title_zone": "top_center",
+                "benefit_chip_count": 2,
+                "proof_block_count": 0,
+                "text_container_style": "banner",
+                "frame_strength": "strong",
+                "scene_weight": 0.1,
+                "product_weight": 0.5,
+                "copy_weight": 0.4,
+                "avoid_patterns": ["pure_photo_no_structure", "magazine_spread", "empty_center_composition"],
+            },
         },
         {
             "slot_id": "reason_why",
@@ -180,6 +260,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "selling_point",
             "candidate_expression_modes": ["reason_card", "mechanism_card", "what_you_get"],
+            "layout_recipe": {
+                "product_anchor": "center",
+                "product_occupancy": [0.30, 0.45],
+                "title_zone": "top_left",
+                "benefit_chip_count": 0,
+                "proof_block_count": 0,
+                "text_container_style": "card",
+                "frame_strength": "strong",
+                "scene_weight": 0.05,
+                "product_weight": 0.45,
+                "copy_weight": 0.5,
+                "avoid_patterns": ["pure_photo_no_structure", "single_angle_repeat", "empty_white_bg"],
+            },
         },
         {
             "slot_id": "proof_authority",
@@ -202,6 +295,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "selling_point",
             "candidate_expression_modes": ["certificate_proof", "lab_proof", "spec_proof"],
+            "layout_recipe": {
+                "product_anchor": "left",
+                "product_occupancy": [0.30, 0.45],
+                "title_zone": "top_right",
+                "benefit_chip_count": 0,
+                "proof_block_count": 3,
+                "text_container_style": "card",
+                "frame_strength": "strong",
+                "scene_weight": 0.0,
+                "product_weight": 0.4,
+                "copy_weight": 0.6,
+                "avoid_patterns": ["pure_photo_no_structure", "lifestyle_only", "empty_proof_area"],
+            },
         },
         {
             "slot_id": "benefit_scene_or_compare",
@@ -224,6 +330,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "scene",
             "candidate_expression_modes": ["real_scene_benefit", "compare_superiority", "coverage_scene"],
+            "layout_recipe": {
+                "product_anchor": "center_bottom",
+                "product_occupancy": [0.35, 0.50],
+                "title_zone": "top_left",
+                "benefit_chip_count": 1,
+                "proof_block_count": 1,
+                "text_container_style": "floating",
+                "frame_strength": "medium",
+                "scene_weight": 0.35,
+                "product_weight": 0.4,
+                "copy_weight": 0.25,
+                "avoid_patterns": ["pure_photo_no_structure", "empty_flat_display"],
+            },
         },
         {
             "slot_id": "closing_selling_point",
@@ -246,6 +365,19 @@ MAIN_GALLERY_SLOT_PRESETS: dict[str, list[dict[str, Any]]] = {
             "requires_white_bg_validation": False,
             "reference_role_hint": "detail",
             "candidate_expression_modes": ["selling_point_matrix", "parameter_highlight", "tail_summary"],
+            "layout_recipe": {
+                "product_anchor": "center",
+                "product_occupancy": [0.35, 0.50],
+                "title_zone": "top_center",
+                "benefit_chip_count": 2,
+                "proof_block_count": 0,
+                "text_container_style": "pill",
+                "frame_strength": "medium",
+                "scene_weight": 0.2,
+                "product_weight": 0.45,
+                "copy_weight": 0.35,
+                "avoid_patterns": ["pure_photo_no_structure", "simple_reshoot"],
+            },
         },
     ],
 }
@@ -377,18 +509,21 @@ EXPRESSION_LIBRARY: dict[str, dict[str, Any]] = {
         "layout_policy": "proof_card",
         "copy_policy": "headline_plus_proof",
         "prompt_modules": ["proof_focus", "certificate_focus"],
+        "layout_recipe_override": {"proof_block_count": 3, "frame_strength": "strong"},
     },
     "lab_proof": {
         "label": "实验佐证",
         "layout_policy": "proof_card",
         "copy_policy": "headline_plus_proof",
         "prompt_modules": ["proof_focus", "lab_focus"],
+        "layout_recipe_override": {"proof_block_count": 3, "frame_strength": "strong"},
     },
     "spec_proof": {
         "label": "参数佐证",
         "layout_policy": "proof_card",
         "copy_policy": "headline_plus_proof",
         "prompt_modules": ["proof_focus", "spec_focus"],
+        "layout_recipe_override": {"proof_block_count": 3, "frame_strength": "strong"},
     },
     "real_scene_benefit": {
         "label": "真实场景利益点",
@@ -401,6 +536,7 @@ EXPRESSION_LIBRARY: dict[str, dict[str, Any]] = {
         "layout_policy": "scene_or_compare",
         "copy_policy": "benefit_copy",
         "prompt_modules": ["compare_focus", "benefit_focus", "proof_focus"],
+        "layout_recipe_override": {"frame_strength": "strong", "proof_block_count": 2},
     },
     "coverage_scene": {
         "label": "覆盖场景",
@@ -413,12 +549,14 @@ EXPRESSION_LIBRARY: dict[str, dict[str, Any]] = {
         "layout_policy": "matrix_or_summary",
         "copy_policy": "matrix_copy",
         "prompt_modules": ["feature_matrix", "benefit_focus"],
+        "layout_recipe_override": {"benefit_chip_count": 4, "frame_strength": "medium"},
     },
     "parameter_highlight": {
         "label": "参数亮点",
         "layout_policy": "matrix_or_summary",
         "copy_policy": "matrix_copy",
         "prompt_modules": ["spec_focus", "benefit_focus"],
+        "layout_recipe_override": {"proof_block_count": 2, "frame_strength": "medium"},
     },
     "tail_summary": {
         "label": "尾屏总结",
@@ -434,21 +572,32 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "id": "default",
         "locale": "zh-CN",
         "copy_language": "zh",
+        "grammar_family": "brand_free",
         "allow_dense_copy": False,
         "allow_certificate_elements": False,
         "allow_compare_overlay": False,
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": [],
+        "negative_prompt_additions": [],
         "constraints": ["文案应保持短句，避免信息卡海报化", "优先保证商品保真，不要为了文字牺牲产品结构"],
     },
     "1688": {
         "id": "1688",
         "locale": "zh-CN",
         "copy_language": "zh",
+        "grammar_family": "guided_conversion",
         "allow_dense_copy": True,
         "allow_certificate_elements": True,
         "allow_compare_overlay": True,
+        "hero_text_overlay": "dense",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["侵权品牌商标"],
+        "negative_prompt_additions": [],
         "constraints": [
             "中文短句允许更密，但每屏只保留1个核心主标题和少量佐证信息",
             "允许认证、参数、证书、对比优势等导购型元素",
+            "首图需要一眼说明产品是什么、解决什么问题",
             *simplified_chinese_visible_copy_constraints(),
         ],
     },
@@ -456,9 +605,14 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "id": "taobao",
         "locale": "zh-CN",
         "copy_language": "zh",
+        "grammar_family": "guided_conversion",
         "allow_dense_copy": True,
         "allow_certificate_elements": True,
         "allow_compare_overlay": True,
+        "hero_text_overlay": "dense",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["侵权品牌商标", "绝对化用语"],
+        "negative_prompt_additions": [],
         "constraints": [
             "中文短句允许较密集，强调点击率和利益点承接",
             "允许理由卡、能力卡和适度的销售导向文案",
@@ -469,36 +623,334 @@ PLATFORM_OVERLAYS: dict[str, dict[str, Any]] = {
         "id": "alibaba_intl",
         "locale": "en-US",
         "copy_language": "en",
+        "grammar_family": "brand_free",
         "allow_dense_copy": False,
         "allow_certificate_elements": True,
         "allow_compare_overlay": False,
-        "constraints": ["Visible text must be concise English and should remain sparse.", "Avoid domestic ecommerce badges or over-dense local platform UI styling."],
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["中文文案泄漏", "domestic_ecommerce_badges"],
+        "negative_prompt_additions": [
+            "Do NOT include any Chinese characters in newly added copy or text overlays.",
+        ],
+        "constraints": [
+            "Visible text must be concise English and should remain sparse.",
+            "Avoid domestic ecommerce badges or over-dense local platform UI styling.",
+            "Preserve original Chinese brand marks on the product body, but all added copy must be English only.",
+        ],
     },
     "amazon": {
         "id": "amazon",
         "locale": "en-US",
         "copy_language": "en",
+        "grammar_family": "compliance_white",
         "allow_dense_copy": False,
         "allow_certificate_elements": False,
         "allow_compare_overlay": False,
-        "constraints": ["Prefer cleaner hero images and sparse text overlays.", "Avoid badge-heavy or collage-heavy compositions."],
+        "hero_text_overlay": "forbidden",
+        "white_bg_mandatory": True,
+        "prohibited_elements": ["price_tags", "promotional_stickers", "watermarks", "qr_codes", "shipping_info"],
+        "negative_prompt_additions": [
+            "Do NOT add any text, logo, or watermark on the main/hero image.",
+            "Do NOT include price tags, shipping info, or promotional badges.",
+        ],
+        "constraints": [
+            "Hero image MUST be pure white background with product only, NO text overlay.",
+            "Product should fill at least 85% of the image frame on white background images.",
+            "All subsequent images may have minimal, clean English text.",
+            "Avoid collage-heavy or badge-heavy compositions.",
+        ],
     },
     "temu": {
         "id": "temu",
         "locale": "en-US",
         "copy_language": "en",
+        "grammar_family": "compliance_white",
         "allow_dense_copy": False,
         "allow_certificate_elements": False,
         "allow_compare_overlay": False,
-        "constraints": ["Keep the layout simple and high-contrast for quick mobile scanning.", "Avoid certificate walls or dense information blocks."],
+        "hero_text_overlay": "forbidden",
+        "white_bg_mandatory": True,
+        "prohibited_elements": ["price_tags", "promotional_stickers", "watermarks"],
+        "negative_prompt_additions": [
+            "Do NOT add text overlay on the hero image.",
+        ],
+        "constraints": [
+            "Keep the layout simple and high-contrast for quick mobile scanning.",
+            "Hero image prefers pure white background with product only.",
+            "Avoid certificate walls or dense information blocks.",
+        ],
+    },
+    "jd": {
+        "id": "jd",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "grammar_family": "structured_retail",
+        "allow_dense_copy": True,
+        "allow_certificate_elements": True,
+        "allow_compare_overlay": True,
+        "hero_text_overlay": "allowed",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["绝对化用语", "虚假宣传"],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "京东主图建议白底或浅色背景，产品主体突出。",
+            "文案简洁有力，突出核心卖点和参数。",
+            "允许认证、参数、对比等导购型元素。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
+    },
+    "pdd": {
+        "id": "pdd",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "grammar_family": "structured_retail",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": False,
+        "allow_compare_overlay": False,
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["过度牛皮癣", "大面积水印"],
+        "negative_prompt_additions": [
+            "【绝对禁止】不要生成牛皮癣式密集促销贴纸和角标",
+        ],
+        "constraints": [
+            "拼多多主图简洁清爽，避免过度促销感。",
+            "少量文案辅助即可，不要信息过载。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
+    },
+    "xiaohongshu": {
+        "id": "xiaohongshu",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "grammar_family": "lifestyle",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": False,
+        "allow_compare_overlay": False,
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["硬广感元素", "促销角标", "传统电商排版"],
+        "negative_prompt_additions": [
+            "【绝对禁止】不要生成传统电商硬广风格，不要使用促销角标或信息卡海报排版",
+        ],
+        "constraints": [
+            "小红书风格偏种草、生活化，构图自然真实。",
+            "色调温暖自然，偏生活方式杂志感，避免硬广感。",
+            "文案少而精，融入画面，不要独立文案区块。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
+    },
+    "douyin": {
+        "id": "douyin",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "grammar_family": "thumbnail_impact",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": True,
+        "allow_compare_overlay": True,
+        "hero_text_overlay": "allowed",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["过度PS感"],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "抖音主图风格鲜明有冲击力，适合短视频缩略图场景。",
+            "文案短句有力，一眼抓住注意力。",
+            "允许适度的对比和认证元素强化说服力。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
+    },
+    "tiktok": {
+        "id": "tiktok",
+        "locale": "en-US",
+        "copy_language": "en",
+        "grammar_family": "thumbnail_impact",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": False,
+        "allow_compare_overlay": False,
+        "hero_text_overlay": "minimal",
+        "white_bg_mandatory": False,
+        "prohibited_elements": ["heavy_retouching", "promotional_stickers"],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "TikTok shop images should feel authentic and vibrant, not over-produced.",
+            "Minimal text, high visual impact, mobile-first layout.",
+            "Avoid heavy retouching or artificial-looking compositions.",
+        ],
+    },
+    "official_site": {
+        "id": "official_site",
+        "locale": "en-US",
+        "copy_language": "en",
+        "grammar_family": "lifestyle",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": True,
+        "allow_compare_overlay": True,
+        "hero_text_overlay": "allowed",
+        "white_bg_mandatory": False,
+        "prohibited_elements": [],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "Independent site allows more creative freedom in layout and composition.",
+            "Maintain brand consistency and professional quality across all images.",
+            "Text overlays should be clean and well-integrated with the design.",
+        ],
+    },
+    "custom": {
+        "id": "custom",
+        "locale": "zh-CN",
+        "copy_language": "zh",
+        "grammar_family": "brand_free",
+        "allow_dense_copy": False,
+        "allow_certificate_elements": False,
+        "allow_compare_overlay": False,
+        "hero_text_overlay": "allowed",
+        "white_bg_mandatory": False,
+        "prohibited_elements": [],
+        "negative_prompt_additions": [],
+        "constraints": [
+            "文案应保持短句，避免信息卡海报化。",
+            "优先保证商品保真，不要为了文字牺牲产品结构。",
+            *simplified_chinese_visible_copy_constraints(),
+        ],
     },
 }
 
 
-def get_platform_overlay(platform_id: str | None) -> dict[str, Any]:
-    overlay = {**PLATFORM_OVERLAYS["default"], **PLATFORM_OVERLAYS.get(platform_id or "", {})}
-    overlay["overlay_id"] = overlay.get("id")
-    return overlay
+PLATFORM_GRAMMAR_FAMILIES: dict[str, dict[str, Any]] = {
+    "guided_conversion": {
+        "label": "强导购框架型",
+        "platforms": ["1688", "taobao"],
+        "default_frame_strength": "strong",
+        "default_copy_weight_floor": 0.3,
+        "proof_emphasis": "high",
+        "family_avoid_patterns": ["pure_photo_no_structure", "lifestyle_magazine", "empty_center_composition"],
+    },
+    "structured_retail": {
+        "label": "结构化零售型",
+        "platforms": ["jd", "pdd"],
+        "default_frame_strength": "medium",
+        "default_copy_weight_floor": 0.2,
+        "proof_emphasis": "medium",
+        "family_avoid_patterns": ["pure_photo_no_structure", "dense_certificate_wall"],
+    },
+    "compliance_white": {
+        "label": "合规白底型",
+        "platforms": ["amazon", "temu"],
+        "default_frame_strength": "none",
+        "default_copy_weight_cap": 0.0,
+        "proof_emphasis": "low",
+        "family_avoid_patterns": ["dense_text_overlay", "certificate_wall", "collage_grid"],
+    },
+    "lifestyle": {
+        "label": "生活方式型",
+        "platforms": ["xiaohongshu", "official_site"],
+        "default_frame_strength": "light",
+        "default_copy_weight_cap": 0.15,
+        "proof_emphasis": "low",
+        "family_avoid_patterns": ["hard_sell_layout", "dense_text_overlay", "certificate_wall"],
+    },
+    "thumbnail_impact": {
+        "label": "缩略图冲击型",
+        "platforms": ["douyin", "tiktok"],
+        "default_frame_strength": "medium",
+        "default_copy_weight_cap": 0.25,
+        "proof_emphasis": "medium",
+        "family_avoid_patterns": ["subtle_layout", "dense_text_overlay", "information_overload"],
+    },
+    "brand_free": {
+        "label": "自由品牌型",
+        "platforms": ["custom", "alibaba_intl"],
+        "default_frame_strength": "light",
+        "default_copy_weight_cap": 0.2,
+        "proof_emphasis": "medium",
+        "family_avoid_patterns": [],
+    },
+}
+
+
+def get_grammar_family(platform_id: str | None) -> dict[str, Any] | None:
+    """Return the grammar family config for a given platform, or None."""
+    if not platform_id:
+        return None
+    for family in PLATFORM_GRAMMAR_FAMILIES.values():
+        if platform_id in family.get("platforms", []):
+            return family
+    return None
+
+
+PLATFORM_DISPLAY_NAMES: dict[str, str] = {
+    "default": "默认配置",
+    "1688": "阿里1688",
+    "taobao": "淘宝天猫",
+    "alibaba_intl": "阿里国际站",
+    "amazon": "亚马逊",
+    "temu": "TEMU",
+    "jd": "京东",
+    "pdd": "拼多多",
+    "xiaohongshu": "小红书",
+    "douyin": "抖音电商",
+    "tiktok": "TikTok Shop",
+    "official_site": "品牌官网",
+    "custom": "自定义平台",
+}
+
+_platform_configs_seeded = False
+
+
+def ensure_system_platform_configs(db: Session) -> bool:
+    """Auto-seed PlatformConfigModel rows from PLATFORM_OVERLAYS on first access.
+
+    Mirrors the ensure_system_rule_packs() pattern in rule_packs.py.
+    Skips DB check after first successful seed within this process.
+    """
+    global _platform_configs_seeded
+    from app.models.platform_config import PlatformConfigModel
+
+    existing_platform_ids = {
+        str(row[0]).strip()
+        for row in db.query(PlatformConfigModel.platform_id).all()
+        if str(row[0]).strip()
+    }
+    if _platform_configs_seeded and existing_platform_ids:
+        return False
+    changed = False
+    for pid, overlay in PLATFORM_OVERLAYS.items():
+        if pid in existing_platform_ids:
+            continue
+        profile = get_platform_or_none(pid)
+        db.add(PlatformConfigModel(
+            platform_id=pid,
+            name=PLATFORM_DISPLAY_NAMES.get(pid, pid),
+            locale=overlay["locale"],
+            copy_language=overlay["copy_language"],
+            allow_dense_copy=overlay["allow_dense_copy"],
+            allow_certificate_elements=overlay["allow_certificate_elements"],
+            allow_compare_overlay=overlay["allow_compare_overlay"],
+            hero_text_overlay=overlay["hero_text_overlay"],
+            white_bg_mandatory=overlay["white_bg_mandatory"],
+            default_image_count=profile.default_image_count if profile else 5,
+            default_aspect_ratio=profile.default_aspect_ratio if profile else "1:1",
+            main_rule_pack_id=profile.main_rule_pack_id if profile else DEFAULT_MAIN_RULE_PACK_ID,
+            detail_rule_pack_id=profile.detail_rule_pack_id if profile else DETAIL_RULE_PACK_ID,
+            prohibited_elements=overlay["prohibited_elements"],
+            negative_prompt_additions=overlay["negative_prompt_additions"],
+            constraints=overlay["constraints"],
+            is_active=True,
+            created_by=None,
+            operator_note="系统自动初始化",
+        ))
+        changed = True
+    if changed:
+        db.flush()
+    _platform_configs_seeded = True
+    return changed
+
+
+def get_platform_overlay(platform_id: str | None, *, db: Session | None = None) -> dict[str, Any]:
+    from app.services.rule_resolution import resolve_main_platform_overlay
+
+    return resolve_main_platform_overlay(platform_id, db=db)
 
 
 def get_main_rule_pack_id(platform_id: str) -> str:
@@ -507,33 +959,9 @@ def get_main_rule_pack_id(platform_id: str) -> str:
 
 
 def get_main_gallery_slot_blueprints(platform_id: str, *, db: Session | None = None) -> list[dict[str, Any]]:
-    rule_pack_id = get_main_rule_pack_id(platform_id)
-    rule_pack, version, config = load_published_rule_pack_config(
-        asset_family="main_gallery",
-        rule_pack_key=rule_pack_id,
-        platform_id=platform_id,
-        db=db,
-    )
-    seed_slot_blueprints = MAIN_GALLERY_SLOT_PRESETS.get(
-        rule_pack_id,
-        MAIN_GALLERY_SLOT_PRESETS[DEFAULT_MAIN_RULE_PACK_ID],
-    )
-    seed_by_slot = {
-        str(item.get("slot_id") or item.get("compat_role") or ""): item
-        for item in seed_slot_blueprints
-        if str(item.get("slot_id") or item.get("compat_role") or "")
-    }
-    slot_blueprints = (config or {}).get("slot_plan") or seed_slot_blueprints
-    return [
-        {
-            **seed_by_slot.get(str(item.get("slot_id") or item.get("compat_role") or ""), {}),
-            **item,
-            "platform_rule_pack": rule_pack.id if rule_pack is not None else rule_pack_id,
-            "platform_rule_pack_key": rule_pack.rule_pack_key if rule_pack is not None else rule_pack_id,
-            "platform_rule_pack_version": version.version_no if version is not None else 1,
-        }
-        for item in slot_blueprints
-    ]
+    from app.services.rule_resolution import resolve_main_slot_rules
+
+    return [dict(rule.slot_blueprint) for rule in resolve_main_slot_rules(platform_id, db=db)]
 
 
 def recommend_expression_mode(
@@ -544,12 +972,18 @@ def recommend_expression_mode(
     analysis_snapshot: dict[str, Any],
     planner_instruction: str | None,
 ) -> tuple[str, str]:
+    normalized_copy = sync_legacy_copy_fields(confirmed_copy, overwrite=True)
     slot_id = str(slot_blueprint["slot_id"])
     candidates = [str(item) for item in slot_blueprint.get("candidate_expression_modes", []) if str(item).strip()]
-    selling_points = _split_points(confirmed_copy.get("selling_points"))
-    usage_scenes = _split_points(confirmed_copy.get("usage_scenes"))
-    specs = _split_points(confirmed_copy.get("specs"))
-    key_parameters = _key_parameter_strings(confirmed_copy.get("key_parameters"))
+    selling_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
+    usage_scenes = _split_points(normalized_copy.get("hero_scene") or normalized_copy.get("usage_scenes"))
+    product_name = _text(normalized_copy.get("product_name"), "产品")
+    usage_scenes = [
+        item for item in usage_scenes
+        if not is_low_information_copy_text(item, product_name=product_name)
+    ]
+    specs = key_parameter_strings(normalized_copy.get("key_parameters")) or _split_points(normalized_copy.get("specs"))
+    key_parameters = _key_parameter_strings(normalized_copy.get("key_parameters"))
     must_keep = _safe_analysis_value(analysis_snapshot, "reference_summary", "must_keep")
     evidence_scores = (analysis_snapshot or {}).get("evidence_scores") if isinstance((analysis_snapshot or {}).get("evidence_scores"), dict) else {}
     risk_flags = {str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()}
@@ -610,15 +1044,10 @@ def recommend_expression_mode(
     return (candidates[0] if candidates else "clean_conversion_kv"), "使用默认表达方式推荐。"
 
 
-def expression_metadata(expression_mode: str) -> dict[str, Any]:
-    value = EXPRESSION_LIBRARY.get(expression_mode, {})
-    return {
-        "expression_mode": expression_mode,
-        "expression_label": value.get("label", expression_mode),
-        "rule_modules_used": [str(item) for item in value.get("prompt_modules", []) if str(item).strip()],
-        "layout_policy": value.get("layout_policy"),
-        "copy_policy": value.get("copy_policy"),
-    }
+def expression_metadata(expression_mode: str, *, db: Session | None = None, platform_id: str | None = None) -> dict[str, Any]:
+    from app.services.rule_resolution import resolve_main_expression_metadata
+
+    return resolve_main_expression_metadata(expression_mode, db=db, platform_id=platform_id)
 
 
 def build_copy_blocks(
@@ -628,13 +1057,14 @@ def build_copy_blocks(
     confirmed_copy: dict[str, Any],
     expression_mode: str,
 ) -> dict[str, Any]:
-    product_name = _text(confirmed_copy.get("product_name"), "产品")
-    headline = _text(confirmed_copy.get("headline"), product_name)
-    selling_points = _split_points(confirmed_copy.get("core_selling_points") or confirmed_copy.get("selling_points"))
-    usage_scenes = _split_points(confirmed_copy.get("hero_scene") or confirmed_copy.get("usage_scenes"))
-    specs = _split_points(confirmed_copy.get("specs"))
-    product_advantages = _split_points(confirmed_copy.get("product_advantages"))
-    key_parameters = _key_parameter_strings(confirmed_copy.get("key_parameters"))
+    normalized_copy = sync_legacy_copy_fields(confirmed_copy, overwrite=True)
+    product_name = _text(normalized_copy.get("product_name"), "产品")
+    headline = _text(normalized_copy.get("headline"), product_name)
+    selling_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
+    usage_scenes = _split_points(normalized_copy.get("hero_scene") or normalized_copy.get("usage_scenes"))
+    specs = key_parameter_strings(normalized_copy.get("key_parameters")) or _split_points(normalized_copy.get("specs"))
+    product_advantages = _split_points(normalized_copy.get("product_advantages"))
+    key_parameters = _key_parameter_strings(normalized_copy.get("key_parameters"))
     overlay = get_platform_overlay(platform_id)
     copy_language = overlay.get("copy_language", "zh")
     if copy_language == "en":
@@ -748,21 +1178,9 @@ def resolve_slot_preferences(
     *,
     db: Session | None = None,
 ) -> dict[str, dict[str, Any]]:
-    valid_slots = {item["slot_id"] for item in get_main_gallery_slot_blueprints(platform_id, db=db)}
-    resolved: dict[str, dict[str, Any]] = {}
-    for item in incoming or []:
-        if not isinstance(item, dict):
-            continue
-        slot_id = str(item.get("slot_id") or "").strip()
-        if slot_id not in valid_slots:
-            continue
-        expression_mode = str(item.get("expression_mode") or "").strip() or None
-        resolved[slot_id] = {
-            "slot_id": slot_id,
-            "expression_mode": expression_mode,
-            "locked": bool(item.get("locked")),
-        }
-    return resolved
+    from app.services.rule_resolution import resolve_main_slot_preferences
+
+    return resolve_main_slot_preferences(platform_id, incoming, db=db)
 
 
 def preview_hash_payload(

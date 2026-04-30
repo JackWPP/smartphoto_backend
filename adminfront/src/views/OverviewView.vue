@@ -2,7 +2,7 @@
   <section class="page-stack">
     <div class="page-toolbar">
       <div>
-        <span class="eyebrow">Overview</span>
+        <span class="eyebrow">全局概览</span>
         <h3>运行与产出总览</h3>
       </div>
       <button class="ghost-button" @click="loadAll">刷新看板</button>
@@ -27,7 +27,7 @@
       <article class="surface-card">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Ops Focus</span>
+            <span class="eyebrow">操作关注点</span>
             <h4>当前关注点</h4>
           </div>
         </div>
@@ -39,7 +39,7 @@
       <article class="surface-card">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Failures</span>
+            <span class="eyebrow">失败队列</span>
             <h4>最近失败任务</h4>
           </div>
         </div>
@@ -59,7 +59,7 @@
       <article class="surface-card">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Audit</span>
+            <span class="eyebrow">审计记录</span>
             <h4>最近高风险操作</h4>
           </div>
         </div>

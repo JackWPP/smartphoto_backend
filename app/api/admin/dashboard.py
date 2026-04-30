@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
@@ -209,3 +210,108 @@ def dashboard_trends(
 
     points = [{"bucket": bucket, **metrics} for bucket, metrics in sorted(buckets.items())]
     return success_response({"window_days": days, "points": points})
+
+
+@router.get("/quality", operation_id="adminDashboardQuality", responses={**OPENAPI_ERROR_RESPONSES})
+def dashboard_quality(
+    days: int = Query(default=7, ge=1, le=30),
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_current_admin_user),
+) -> dict:
+    """Quality gate metrics and user feedback summary."""
+    from app.models.asset_feedback import AssetFeedbackModel
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Quality gate pass rates
+    total_reviewed = (
+        db.query(func.count(AssetModel.id))
+        .filter(AssetModel.created_at >= since, AssetModel.quality_status.notin_(["unchecked"]))
+        .scalar() or 0
+    )
+    passed_count = (
+        db.query(func.count(AssetModel.id))
+        .filter(AssetModel.created_at >= since, AssetModel.quality_status == "passed")
+        .scalar() or 0
+    )
+    sync_failed = (
+        db.query(func.count(AssetModel.id))
+        .filter(AssetModel.created_at >= since, AssetModel.quality_status == "sync_failed")
+        .scalar() or 0
+    )
+    async_failed = (
+        db.query(func.count(AssetModel.id))
+        .filter(AssetModel.created_at >= since, AssetModel.quality_status == "async_failed")
+        .scalar() or 0
+    )
+    generation_failed = (
+        db.query(func.count(AssetModel.id))
+        .filter(AssetModel.created_at >= since, AssetModel.quality_status == "generation_failed")
+        .scalar() or 0
+    )
+
+    # User feedback summary
+    total_feedback = db.query(func.count(AssetFeedbackModel.id)).filter(AssetFeedbackModel.created_at >= since).scalar() or 0
+    avg_rating = db.query(func.avg(AssetFeedbackModel.rating)).filter(AssetFeedbackModel.created_at >= since).scalar()
+    bad_feedback = (
+        db.query(func.count(AssetFeedbackModel.id))
+        .filter(AssetFeedbackModel.created_at >= since, AssetFeedbackModel.rating == 1)
+        .scalar() or 0
+    )
+
+    return success_response({
+        "window_days": days,
+        "quality_gate": {
+            "total_reviewed": int(total_reviewed),
+            "passed": int(passed_count),
+            "sync_failed": int(sync_failed),
+            "async_failed": int(async_failed),
+            "generation_failed": int(generation_failed),
+            "pass_rate": round(passed_count / total_reviewed, 4) if total_reviewed else 0.0,
+        },
+        "feedback": {
+            "total": int(total_feedback),
+            "avg_rating": round(float(avg_rating or 0), 2),
+            "bad_count": int(bad_feedback),
+            "bad_rate": round(bad_feedback / total_feedback, 4) if total_feedback else 0.0,
+        },
+    })
+
+
+@router.get("/quality/breakdown", operation_id="adminQualityBreakdown", responses={**OPENAPI_ERROR_RESPONSES})
+def quality_breakdown(
+    days: int = Query(default=7, ge=1, le=30),
+    dimension: Literal["platform", "category", "slot"] = Query(default="platform", description="分组维度: platform, category, slot"),
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_current_admin_user),
+) -> dict:
+    """Quality pass rates broken down by platform, category, or slot."""
+    from app.services.quality_analytics import quality_breakdown_by_dimension
+
+    data = quality_breakdown_by_dimension(db, days=days, dimension=dimension)
+    return success_response({"window_days": days, "dimension": dimension, "items": data})
+
+
+@router.get("/quality/issue-tags", operation_id="adminQualityIssueTags", responses={**OPENAPI_ERROR_RESPONSES})
+def quality_issue_tags(
+    days: int = Query(default=7, ge=1, le=30),
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_current_admin_user),
+) -> dict:
+    """Top issue tags from user feedback."""
+    from app.services.quality_analytics import feedback_issue_tag_ranking
+
+    data = feedback_issue_tag_ranking(db, days=days)
+    return success_response({"window_days": days, "items": data})
+
+
+@router.get("/quality/timing", operation_id="adminQualityTiming", responses={**OPENAPI_ERROR_RESPONSES})
+def quality_timing(
+    days: int = Query(default=7, ge=1, le=30),
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_current_admin_user),
+) -> dict:
+    """Generation and quality review timing statistics (P50/P95)."""
+    from app.services.quality_analytics import generation_timing_stats
+
+    return success_response(generation_timing_stats(db, days=days))

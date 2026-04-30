@@ -72,19 +72,35 @@ class Settings(BaseSettings):
     llm_provider: str = "whatai"
     openrouter_api_base: str = "https://openrouter.ai/api/v1"
     openrouter_api_key: str = ""
+    doubao_api_base: str = "https://ark.cn-beijing.volces.com/api/v3"
+    doubao_api_key: str = ""
+    ark_api_key: str = ""
+    doubao_request_timeout_seconds: int = Field(default=45, ge=5, le=600)
+    doubao_max_retries: int = Field(default=2, ge=1, le=5)
+    doubao_thinking_budget_tokens: int = Field(default=0, ge=0, le=100000,
+        description="Doubao seed 模型思考 token 预算。0 表示使用 API 默认值，正整数表示限制思考 tokens (需 API 支持)。")
+    openai_compatible_api_base: str = ""
+    openai_compatible_api_key: str = ""
+    openai_compatible_request_timeout_seconds: int = Field(default=45, ge=5, le=600)
+    openai_compatible_max_retries: int = Field(default=2, ge=1, le=5)
     planner_profile: str = "harness_first"
+    planner_prompt_mode: str = "compact"
+    detail_planner_prompt_mode: str = "compact"
+    planner_repair_strictness: str = "critical_only"
     llm_route_analysis: str = "whatai_gemini"
-    llm_route_main_planner: str = "whatai_gemini"
-    llm_route_detail_planner: str = "whatai_gemini"
+    llm_route_main_planner: str = "doubao_text"
+    llm_route_detail_planner: str = "doubao_text"
     llm_route_planner_light: str = "whatai_gemini"
     planner_fallback_route: str = "whatai_gemini"
+    planner_kimi_enable_thinking: bool = False
     llm_route_parameter_visual: str = "whatai_gemini"
-    llm_route_parameter_completion: str = "openrouter_text"
+    llm_route_parameter_completion: str = "doubao_text"
     llm_route_main_copy_design: str = "disabled"
     llm_route_detail_copy_review: str = "openrouter_text"
     llm_route_form_rewrite: str = "openrouter_text"
-    llm_route_text_review: str = "openrouter_text"
+    llm_route_text_review: str = "doubao_text"
     llm_route_text_presentation: str = "openrouter_text"
+    parameter_extraction_mode: str = "combined"
     llm_analysis_model: str = "deepseek/deepseek-v3.2"
     llm_main_planner_model: str = "deepseek/deepseek-v3.2"
     llm_detail_planner_model: str = "minimax/minimax-m2.7"
@@ -100,6 +116,22 @@ class Settings(BaseSettings):
     openrouter_form_rewrite_model: str = "deepseek/deepseek-v3.2"
     openrouter_text_review_model: str = "minimax/minimax-m2.7"
     openrouter_text_presentation_model: str = "minimax/minimax-m2.7"
+    doubao_planner_model: str = "doubao-seed-2-0-pro-260215"
+    doubao_detail_planner_model: str = "doubao-seed-2-0-pro-260215"
+    doubao_parameter_completion_model: str = "doubao-seed-2-0-pro-260215"
+    doubao_form_rewrite_model: str = ""
+    doubao_text_review_model: str = "doubao-seed-2-0-pro-260215"
+    doubao_text_presentation_model: str = ""
+    doubao_fallback_model: str = ""
+    planner_temperature: float = Field(default=0.15, ge=0.0, le=1.0)
+    detail_planner_temperature: float = Field(default=0.15, ge=0.0, le=1.0)
+    openai_compatible_planner_model: str = ""
+    openai_compatible_detail_planner_model: str = ""
+    openai_compatible_parameter_completion_model: str = ""
+    openai_compatible_form_rewrite_model: str = ""
+    openai_compatible_text_review_model: str = ""
+    openai_compatible_text_presentation_model: str = ""
+    openai_compatible_fallback_model: str = ""
 
     generation_lock_ttl_seconds: int = Field(default=600, ge=30)
     main_generation_concurrency: int = Field(default=4, ge=1, le=12)
@@ -108,9 +140,18 @@ class Settings(BaseSettings):
     detail_generation_submit_concurrency: int = Field(default=4, ge=1, le=16)
     image_submit_batch_size: int = Field(default=5, ge=1, le=16)
     detail_image_submit_batch_size: int = Field(default=4, ge=1, le=16)
+    detail_preview_width: int = Field(default=800, ge=200, le=2048, description="preview image width in px (2x of frontend max_width)")
     image_submit_batch_interval_seconds: int = Field(default=5, ge=0, le=120)
     image_poll_initial_delay_seconds: int = Field(default=45, ge=0, le=300)
     image_task_timeout_seconds: int = Field(default=450, ge=60, le=1800)
+
+    # --- Quality review & async retry ---
+    color_validation_enabled: bool = False
+    color_validation_delta_e_threshold: float = Field(default=25.0, ge=5.0, le=100.0)
+    async_quality_retry_enabled: bool = False
+    async_quality_retry_max_per_session: int = Field(default=3, ge=0, le=10)
+    quality_review_mode: str = "sample"
+
     image_poll_profile: str = Field(default='[{"interval_seconds":10,"attempts":6},{"interval_seconds":15,"attempts":8},{"interval_seconds":20,"attempts":10}]')
     credit_pricing_rules: str = Field(
         default='{"generate_gallery":{"credits":10,"description":"主图整组生成"},"generate_detail_page":{"credits":16,"description":"详情页整组生成"},"global_edit":{"credits":8,"description":"主图全局修改"},"regenerate_asset":{"credits":3,"description":"单张主图重生成"},"regenerate_detail_panel":{"credits":4,"description":"单张详情页 panel 重生成"},"regenerate_gallery":{"credits":10,"description":"主图整组重生成"}}'
@@ -258,16 +299,34 @@ def get_settings() -> Settings:
     settings.storage_backend = (settings.storage_backend or "local").strip().lower()
     settings.llm_provider = (settings.llm_provider or "whatai").strip().lower()
     settings.planner_profile = (settings.planner_profile or "harness_first").strip().lower()
+    settings.planner_prompt_mode = (settings.planner_prompt_mode or "compact").strip().lower()
+    if settings.planner_prompt_mode not in {"compact", "legacy"}:
+        settings.planner_prompt_mode = "compact"
+    settings.detail_planner_prompt_mode = (settings.detail_planner_prompt_mode or "compact").strip().lower()
+    if settings.detail_planner_prompt_mode not in {"compact", "legacy"}:
+        settings.detail_planner_prompt_mode = "compact"
+    settings.planner_repair_strictness = (settings.planner_repair_strictness or "critical_only").strip().lower()
+    if settings.planner_repair_strictness not in {"critical_only", "legacy"}:
+        settings.planner_repair_strictness = "critical_only"
     settings.llm_route_analysis = (settings.llm_route_analysis or "whatai_gemini").strip().lower()
-    settings.llm_route_main_planner = (settings.llm_route_main_planner or "whatai_gemini").strip().lower()
-    settings.llm_route_detail_planner = (settings.llm_route_detail_planner or "whatai_gemini").strip().lower()
+    settings.llm_route_main_planner = (settings.llm_route_main_planner or "doubao_text").strip().lower()
+    settings.llm_route_detail_planner = (settings.llm_route_detail_planner or "doubao_text").strip().lower()
     settings.llm_route_planner_light = (settings.llm_route_planner_light or "whatai_gemini").strip().lower()
     settings.planner_fallback_route = (settings.planner_fallback_route or "whatai_gemini").strip().lower()
     settings.llm_route_parameter_visual = (settings.llm_route_parameter_visual or "whatai_gemini").strip().lower()
-    settings.llm_route_parameter_completion = (settings.llm_route_parameter_completion or "openrouter_text").strip().lower()
+    settings.llm_route_parameter_completion = (settings.llm_route_parameter_completion or "doubao_text").strip().lower()
     settings.llm_route_main_copy_design = (settings.llm_route_main_copy_design or "disabled").strip().lower()
     settings.llm_route_detail_copy_review = (settings.llm_route_detail_copy_review or "openrouter_text").strip().lower()
     settings.llm_route_form_rewrite = (settings.llm_route_form_rewrite or "openrouter_text").strip().lower()
-    settings.llm_route_text_review = (settings.llm_route_text_review or "openrouter_text").strip().lower()
+    settings.llm_route_text_review = (settings.llm_route_text_review or "doubao_text").strip().lower()
     settings.llm_route_text_presentation = (settings.llm_route_text_presentation or "openrouter_text").strip().lower()
+    settings.parameter_extraction_mode = (settings.parameter_extraction_mode or "combined").strip().lower()
+    if settings.parameter_extraction_mode not in {"combined", "separate"}:
+        settings.parameter_extraction_mode = "combined"
+    settings.doubao_api_base = (settings.doubao_api_base or "").strip().rstrip("/")
+    settings.doubao_api_key = (settings.doubao_api_key or settings.ark_api_key or "").strip()
+    settings.openai_compatible_api_base = (settings.openai_compatible_api_base or "").strip().rstrip("/")
+    settings.quality_review_mode = (settings.quality_review_mode or "sample").strip().lower()
+    if settings.quality_review_mode not in {"off", "sample", "full"}:
+        settings.quality_review_mode = "sample"
     return settings

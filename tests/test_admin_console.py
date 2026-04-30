@@ -5,6 +5,12 @@ from PIL import Image
 from app.admin_db import session as admin_db_session
 from app.admin_models.admin_user import AdminUserModel
 from app.core.admin_auth import hash_password
+from app.db import session as db_session
+from app.models.platform_config import PlatformConfigModel
+from app.models.asset import AssetModel
+from app.models.session import SessionModel
+from app.models.brand import BrandModel
+from app.services.pipeline_review import sediment_brand_memories_from_assets
 
 
 def make_image_bytes(size=(1200, 1200), color=(240, 240, 240)) -> bytes:
@@ -59,6 +65,21 @@ def create_ready_session(client, platform_id: str = "temu") -> str:
     client.put(f"/api/v2/sessions/{sid}/copy", json=copy_payload)
     client.post(f"/api/v2/sessions/{sid}/strategy/preview")
     return sid
+
+
+def create_test_brand() -> str:
+    with db_session.SessionLocal() as db:
+        brand = BrandModel(
+            service_id="default",
+            brand_name="Acme",
+            slug="acme",
+            aliases=["ACME"],
+            status="active",
+            is_active=True,
+        )
+        db.add(brand)
+        db.commit()
+        return brand.id
 
 
 def test_admin_console_overview_runtime_and_audit_are_image_only(client):
@@ -188,6 +209,18 @@ def test_admin_category_catalog_crud_and_audit(client):
     assert "恢复测试品类" in notes
 
 
+def test_admin_platform_configs_seed_persists_across_sessions(client):
+    admin_headers = admin_headers_for(client)
+
+    listing = client.get("/api/admin/v1/platform-configs", headers=admin_headers)
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["data"]["total"] >= 1
+
+    with db_session.SessionLocal() as db:
+        count = db.query(PlatformConfigModel).count()
+        assert count >= 1
+
+
 def test_admin_asset_quality_feedback_roundtrip(client):
     session_id = create_ready_session(client)
     client.post(f"/api/v2/sessions/{session_id}/generations", json={"instruction": None})
@@ -217,3 +250,96 @@ def test_admin_asset_quality_feedback_roundtrip(client):
     audit = client.get("/api/admin/v1/audit-logs?module=assets", headers=admin_headers)
     assert audit.status_code == 200, audit.text
     assert any(item["action"] == "asset.quality_feedback.create" for item in audit.json()["data"]["items"])
+
+
+def test_admin_brand_crud_profile_memory_and_audit(client, monkeypatch):
+    monkeypatch.setattr("app.services.strategy.WhataiClient.plan_prompt_plan", lambda *args, **kwargs: {})
+    monkeypatch.setattr("app.services.strategy.WhataiClient.design_main_copy_blocks", lambda *args, **kwargs: {})
+    admin_headers = admin_headers_for(client)
+
+    created = client.post(
+        "/api/admin/v1/brands",
+        json={
+            "service_id": "default",
+            "brand_name": "Acme",
+            "slug": "acme",
+            "aliases": ["ACME"],
+            "notes": "core ecommerce client",
+            "status": "active",
+            "is_active": True,
+            "operator_note": "create brand memory pilot",
+        },
+        headers=admin_headers,
+    )
+    assert created.status_code == 200, created.text
+    brand_id = created.json()["data"]["brand"]["brand_id"]
+
+    listing = client.get("/api/admin/v1/brands", headers=admin_headers)
+    assert listing.status_code == 200, listing.text
+    assert any(item["brand_id"] == brand_id for item in listing.json()["data"]["items"])
+
+    updated = client.put(
+        f"/api/admin/v1/brands/{brand_id}",
+        json={"notes": "updated notes", "operator_note": "update brand notes"},
+        headers=admin_headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["data"]["brand"]["notes"] == "updated notes"
+
+    profile = client.put(
+        f"/api/admin/v1/brands/{brand_id}/profile",
+        json={
+            "identity_payload": {"brand_tone": "professional"},
+            "visual_payload": {"palette": ["#112233"]},
+            "copy_payload": {"headline_style": "short"},
+            "operator_note": "seed brand profile",
+        },
+        headers=admin_headers,
+    )
+    assert profile.status_code == 200, profile.text
+    assert profile.json()["data"]["profile"]["visual_payload"]["palette"] == ["#112233"]
+
+    sid = create_ready_session(client, platform_id="1688")
+    bind = client.put(
+        f"/api/v2/sessions/{sid}/brand",
+        json={"brand_id": brand_id, "brand_memory_enabled": True},
+    )
+    assert bind.status_code == 200, bind.text
+    client.post(f"/api/v2/sessions/{sid}/strategy/preview", json={"brand_memory_enabled": True})
+    client.post(f"/api/v2/sessions/{sid}/generations", json={"instruction": None})
+
+    with db_session.SessionLocal() as db:
+        session = db.query(SessionModel).filter(SessionModel.id == sid).one()
+        assets = db.query(AssetModel).filter(AssetModel.session_id == sid, AssetModel.asset_family == "main_gallery").all()
+        assert assets
+        for asset in assets:
+            asset.quality_status = "passed"
+            asset.quality_scores = {"async_check": {"mode": "test", "passed": True}}
+        sediment_brand_memories_from_assets(db, session=session, assets=assets)
+        db.commit()
+
+    memory_items = client.get(f"/api/admin/v1/brands/{brand_id}/memory-items", headers=admin_headers)
+    assert memory_items.status_code == 200, memory_items.text
+    items = memory_items.json()["data"]["items"]
+    assert items
+    memory_item_id = items[0]["memory_item_id"]
+
+    evidence = client.get(f"/api/admin/v1/brands/{brand_id}/memory-items/{memory_item_id}/evidence", headers=admin_headers)
+    assert evidence.status_code == 200, evidence.text
+    assert evidence.json()["data"]["items"]
+
+    disabled = client.put(
+        f"/api/admin/v1/brands/{brand_id}/memory-items/{memory_item_id}",
+        json={"is_enabled": False, "operator_note": "disable weak memory"},
+        headers=admin_headers,
+    )
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["data"]["memory_item"]["is_enabled"] is False
+
+    audit = client.get("/api/admin/v1/audit-logs?module=brands", headers=admin_headers)
+    assert audit.status_code == 200, audit.text
+    notes = [item["operator_note"] for item in audit.json()["data"]["items"]]
+    assert "create brand memory pilot" in notes
+    assert "update brand notes" in notes
+    assert "seed brand profile" in notes
+    assert "disable weak memory" in notes

@@ -2,16 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.contracts.copy import MainCopyBlocks
+from app.contracts.parameter import ParameterSnapshotPayload
+from app.contracts.strategy import AssetPlanItem, PromptPlanItem, StrategyPreviewPayload
+from app.contracts.validation import validate_contract_warn
 from app.core.config import get_settings
 from app.models.session_image import SessionImageModel
-from app.services.copy_normalization import normalize_phrase_list, repair_broken_text
+from app.services.copy_normalization import (
+    is_low_information_copy_text,
+    key_parameter_strings,
+    normalize_phrase_list,
+    repair_broken_text,
+    sync_legacy_copy_fields,
+)
+from app.services.copy_resolution import resolve_session_copy
+from app.services.brand_memory import apply_brand_memory_to_strategy_preview, match_brand_memory_items
 from app.services.main_gallery_rules import (
     build_copy_blocks,
     expression_metadata,
+    get_grammar_family,
     get_main_gallery_slot_blueprints,
     get_platform_overlay,
     platform_profile,
@@ -20,6 +34,13 @@ from app.services.main_gallery_rules import (
     resolve_slot_preferences,
 )
 from app.services.parameter_snapshot import merge_parameter_snapshot_into_copy
+from app.services.preview_hashing import (
+    PREVIEW_HASH_POLICY_VERSION,
+    build_hash_layers,
+    normalize_manifest_item,
+    normalize_text_list,
+    sort_dicts,
+)
 from app.services.prompt_specs import get_prompt_role_spec
 from app.services.quality_signals import build_truth_contract
 from app.services.reference_images import (
@@ -32,6 +53,186 @@ from app.services.reference_images import (
 from app.services.upstream import WhataiClient
 from app.services.strategy_overrides import resolve_session_overrides
 from app.services.visible_copy_policy import requires_simplified_chinese_visible_copy
+
+logger = logging.getLogger(__name__)
+
+
+def _resolved_style_preset_hash_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "id": str(value.get("id") or ""),
+        "name": str(value.get("name") or ""),
+        "style_summary": str(value.get("style_summary") or ""),
+    }
+
+
+
+def _normalized_brand_memory_trace(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        memory_item_id = str(item.get("memory_item_id") or "").strip()
+        if not memory_item_id:
+            continue
+        normalized.append(
+            {
+                "memory_item_id": memory_item_id,
+                "slot_id": str(item.get("slot_id") or "").strip(),
+                "memory_type": str(item.get("memory_type") or "").strip(),
+                "quality_score": float(item.get("quality_score") or 0.0),
+                "confidence_score": float(item.get("confidence_score") or 0.0),
+            }
+        )
+    return normalized
+
+
+def _match_unique_brand_memory_items(
+    *,
+    db: Session | None,
+    service_id: str | None,
+    brand_id: str | None,
+    active_platform_id: str,
+    category: str | None,
+    slot_ids: list[str],
+    brand_memory_enabled: bool,
+) -> list[Any]:
+    if not brand_memory_enabled or not brand_id or db is None or not service_id:
+        return []
+    matched_items: list[Any] = []
+    for slot_id in slot_ids:
+        normalized_slot = str(slot_id or "").strip()
+        for matched in match_brand_memory_items(
+            db,
+            service_id=service_id,
+            brand_id=brand_id,
+            platform_id=active_platform_id,
+            category=category or None,
+            slot_id=normalized_slot or None,
+        ):
+            if all(existing.id != matched.id for existing in matched_items):
+                matched_items.append(matched)
+    return matched_items
+
+
+def _main_preview_hash_bundle(
+    *,
+    normalized_copy: dict[str, Any],
+    active_platform_id: str,
+    overlay: dict[str, Any],
+    slot_blueprints: list[dict[str, Any]],
+    analysis_snapshot: dict[str, Any],
+    parameter_snapshot: dict[str, Any],
+    planner_instruction: str | None,
+    resolved_slot_preferences: dict[str, dict[str, Any]],
+    resolved_prompt_overrides: dict[str, dict[str, Any]],
+    reference_manifest: list[dict[str, Any]],
+    strategy_reference_manifest: list[dict[str, Any]],
+    planner_profile: str,
+    planner_provider: str,
+    planner_model: str,
+    brand_id: str | None = None,
+    brand_memory_enabled: bool = False,
+    brand_memory_trace: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    recognized_product = analysis_snapshot.get("recognized_product") if isinstance(analysis_snapshot.get("recognized_product"), dict) else {}
+    config_slot_blueprints = [
+        {
+            "slot_id": str(item.get("slot_id") or ""),
+            "slot_family": str(item.get("slot_family") or ""),
+            "candidate_expression_modes": [str(mode) for mode in item.get("candidate_expression_modes", []) if str(mode).strip()],
+            "layout_recipe": item.get("layout_recipe") if isinstance(item.get("layout_recipe"), dict) else {},
+            "platform_rule_pack": str(item.get("platform_rule_pack") or ""),
+        }
+        for item in slot_blueprints
+        if isinstance(item, dict) and item.get("slot_id")
+    ]
+    normalized_overrides = []
+    for slot_id, value in resolved_prompt_overrides.items():
+        if not isinstance(value, dict):
+            continue
+        normalized_overrides.append(
+            {
+                "slot_id": str(slot_id),
+                "expression_mode_override": str(value.get("expression_mode_override") or ""),
+                "raw_prompt_override": str(value.get("raw_prompt_override") or ""),
+                "applied_preset_id": str(value.get("applied_preset_id") or ""),
+                "locked": bool(value.get("locked", False)),
+                "copy_blocks_override": value.get("copy_blocks_override") if isinstance(value.get("copy_blocks_override"), dict) else {},
+                "copy_blocks_template": value.get("applied_preset", {}).get("copy_blocks_template")
+                if isinstance(value.get("applied_preset"), dict)
+                else {},
+            }
+        )
+    config_payload = {
+        "platform_id": active_platform_id,
+        "planner_profile": planner_profile,
+        "planner_prompt_mode": get_settings().planner_prompt_mode,
+        "planner_provider": planner_provider,
+        "planner_model": planner_model,
+        "brand_id": str(brand_id or ""),
+        "brand_memory_enabled": bool(brand_memory_enabled),
+        "platform_overlay": overlay,
+        "slot_blueprints": sort_dicts(config_slot_blueprints, "slot_id"),
+    }
+    content_payload = {
+        "confirmed_copy": {
+            "product_name": str(normalized_copy.get("product_name") or ""),
+            "category": str(normalized_copy.get("category") or ""),
+            "headline": str(normalized_copy.get("headline") or ""),
+            "hero_scene": str(normalized_copy.get("hero_scene") or ""),
+            "core_selling_points": normalize_text_list(normalized_copy.get("core_selling_points")),
+            "key_parameters": normalized_copy.get("key_parameters") if isinstance(normalized_copy.get("key_parameters"), list) else [],
+            "product_advantages": normalize_text_list(normalized_copy.get("product_advantages")),
+            "style_preset_id": normalized_copy.get("style_preset_id"),
+            "style_custom": str(normalized_copy.get("style_custom") or ""),
+            "resolved_style_preset": _resolved_style_preset_hash_payload(normalized_copy.get("resolved_style_preset")),
+        },
+        "recognized_product_category": str(recognized_product.get("category") or ""),
+        "analysis_reference_summary": analysis_snapshot.get("reference_summary") if isinstance(analysis_snapshot.get("reference_summary"), dict) else {},
+        "risk_flags": normalize_text_list(analysis_snapshot.get("risk_flags")),
+        "selling_point_entities": normalize_text_list(analysis_snapshot.get("selling_point_entities")),
+        "detected_view_slots": normalize_text_list(analysis_snapshot.get("detected_view_slots")),
+        "feature_highlights": normalize_text_list(parameter_snapshot.get("feature_highlights")),
+        "planner_instruction": str(planner_instruction or ""),
+        "slot_preferences": sort_dicts(list(resolved_slot_preferences.values()), "slot_id"),
+        "strategy_overrides": sort_dicts(normalized_overrides, "slot_id"),
+    }
+    reference_payload = {
+        "reference_manifest": sort_dicts(
+            [normalize_manifest_item(item) for item in reference_manifest if isinstance(item, dict) and item.get("image_id")],
+            "display_order",
+            "slot_type",
+            "image_id",
+        ),
+        "strategy_reference_manifest": sort_dicts(
+            [normalize_manifest_item(item) for item in strategy_reference_manifest if isinstance(item, dict) and item.get("image_id")],
+            "display_order",
+            "slot_type",
+            "image_id",
+        ),
+    }
+    memory_payload = {
+        "brand_memory_trace": _normalized_brand_memory_trace(brand_memory_trace or []),
+    }
+    return build_hash_layers(
+        stage="main_strategy_preview",
+        config_payload=config_payload,
+        content_payload=content_payload,
+        reference_payload=reference_payload,
+        memory_payload=memory_payload,
+    )
+
+
+def _is_current_main_preview_hash(preview: dict[str, Any] | None, expected_input_hash: str) -> bool:
+    if not isinstance(preview, dict):
+        return False
+    if preview.get("hash_policy_version") != PREVIEW_HASH_POLICY_VERSION:
+        return False
+    return str(preview.get("input_hash") or "") == expected_input_hash
 
 
 def strategy_preview_input_hash(
@@ -50,10 +251,21 @@ def strategy_preview_input_hash(
     loaded_strategy_reference_images: list[LoadedReferenceImage] | None = None,
     reference_manifest: list[dict[str, Any]] | None = None,
     strategy_reference_manifest: list[dict[str, Any]] | None = None,
+    brand_id: str | None = None,
+    brand_memory_enabled: bool = False,
+    service_id: str | None = None,
 ) -> str:
     settings = get_settings()
     client = WhataiClient()
-    normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
+    parameter_snapshot = validate_contract_warn(
+        ParameterSnapshotPayload,
+        parameter_snapshot or {},
+        context={"active_platform_id": active_platform_id, "stage": "strategy_preview_input_hash_parameter_snapshot"},
+    )
+    normalized_copy = sync_legacy_copy_fields(
+        merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot),
+        overwrite=True,
+    )
     loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
     loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
     reference_manifest = reference_manifest if reference_manifest is not None else build_reference_manifest(loaded_reference_images)
@@ -71,15 +283,57 @@ def strategy_preview_input_hash(
         reference_manifest=reference_manifest,
         strategy_reference_manifest=strategy_reference_manifest,
     )
-    payload["platform_overlay"] = get_platform_overlay(active_platform_id)
+    payload["platform_overlay"] = get_platform_overlay(active_platform_id, db=db)
     payload["slot_blueprints"] = slot_blueprints
     payload["strategy_overrides"] = list(resolved_prompt_overrides.values())
     payload["planner_profile"] = settings.planner_profile
     payload["planner_provider"] = client.llm_router.provider_for_task("main_planner")
     payload["planner_model"] = client.llm_router.model_for_task("main_planner")
-    return _stable_hash(
-        payload
+    recognized = analysis_snapshot.get("recognized_product") if isinstance(analysis_snapshot, dict) else {}
+    category = str(recognized.get("category") or "").strip() if isinstance(recognized, dict) else ""
+    matched_items = _match_unique_brand_memory_items(
+        db=db,
+        service_id=service_id,
+        brand_id=brand_id,
+        active_platform_id=active_platform_id,
+        category=category,
+        slot_ids=[
+            str(item.get("slot_id") or item.get("compat_role") or "").strip()
+            for item in slot_blueprints
+        ],
+        brand_memory_enabled=brand_memory_enabled,
     )
+    brand_memory_hash_trace: list[dict[str, Any]] = [
+        {
+            "memory_item_id": item.id,
+            "slot_id": str(item.slot_id or ""),
+            "memory_type": str(item.memory_type or ""),
+            "quality_score": float(item.quality_score or 0.0),
+            "confidence_score": float(item.confidence_score or 0.0),
+        }
+        for item in matched_items
+    ]
+
+    hash_bundle = _main_preview_hash_bundle(
+        normalized_copy=normalized_copy,
+        active_platform_id=active_platform_id,
+        overlay=payload["platform_overlay"],
+        slot_blueprints=slot_blueprints,
+        analysis_snapshot=analysis_snapshot or {},
+        parameter_snapshot=parameter_snapshot or {},
+        planner_instruction=planner_instruction,
+        resolved_slot_preferences=resolved_slot_preferences,
+        resolved_prompt_overrides=resolved_prompt_overrides,
+        reference_manifest=reference_manifest,
+        strategy_reference_manifest=strategy_reference_manifest,
+        planner_profile=settings.planner_profile,
+        planner_provider=payload["planner_provider"],
+        planner_model=payload["planner_model"],
+        brand_id=brand_id,
+        brand_memory_enabled=brand_memory_enabled,
+        brand_memory_trace=brand_memory_hash_trace,
+    )
+    return str(hash_bundle["input_hash"])
 
 
 def build_strategy_preview(
@@ -98,13 +352,23 @@ def build_strategy_preview(
     loaded_strategy_reference_images: list[LoadedReferenceImage] | None = None,
     reference_manifest: list[dict[str, Any]] | None = None,
     strategy_reference_manifest: list[dict[str, Any]] | None = None,
+    brand_id: str | None = None,
+    brand_memory_enabled: bool = False,
+    service_id: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
-    normalized_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
+    client = WhataiClient()
+    parameter_snapshot = validate_contract_warn(
+        ParameterSnapshotPayload,
+        parameter_snapshot or {},
+        context={"active_platform_id": active_platform_id, "stage": "build_strategy_preview_parameter_snapshot"},
+    )
+    copy_resolution = resolve_session_copy(confirmed_copy, parameter_snapshot=parameter_snapshot)
+    normalized_copy = sync_legacy_copy_fields(copy_resolution["copy"], overwrite=True)
     profile = platform_profile(active_platform_id)
     platform_name = profile.name if profile else active_platform_id
     aspect_ratio = profile.default_aspect_ratio if profile else "1:1"
-    overlay = get_platform_overlay(active_platform_id)
+    overlay = get_platform_overlay(active_platform_id, db=db)
 
     loaded_reference_images = loaded_reference_images if loaded_reference_images is not None else (load_reference_images(session_images or []) if session_images else [])
     loaded_strategy_reference_images = loaded_strategy_reference_images if loaded_strategy_reference_images is not None else (load_reference_images(strategy_reference_images or []) if strategy_reference_images else [])
@@ -133,7 +397,15 @@ def build_strategy_preview(
     )
     planner_meta = llm_slot_plan.get("_planner_meta") if isinstance(llm_slot_plan, dict) else None
     if llm_slot_plan:
-        asset_plan = [_merge_asset_plan_item(plan_item, llm_slot_plan.get(str(plan_item["slot_id"])) or llm_slot_plan.get(str(plan_item["role"]))) for plan_item in asset_plan]
+        asset_plan = [
+            _merge_asset_plan_item(
+                plan_item,
+                llm_slot_plan.get(str(plan_item["slot_id"])) or llm_slot_plan.get(str(plan_item["role"])),
+                active_platform_id=active_platform_id,
+                db=db,
+            )
+            for plan_item in asset_plan
+        ]
     prompt_plan = _build_prompt_plan(
         confirmed_copy=normalized_copy,
         active_platform_id=active_platform_id,
@@ -146,6 +418,31 @@ def build_strategy_preview(
         platform_overlay=overlay,
         llm_plan=llm_slot_plan,
     )
+    brand_memory_trace: list[dict[str, Any]] = []
+    brand_memory_item_ids: list[str] = []
+    brand_memory_applied = False
+    recognized = analysis_snapshot.get("recognized_product") if isinstance(analysis_snapshot, dict) else {}
+    category = str(recognized.get("category") or "").strip() if isinstance(recognized, dict) else ""
+    matched_items = _match_unique_brand_memory_items(
+        db=db,
+        service_id=service_id,
+        brand_id=brand_id,
+        active_platform_id=active_platform_id,
+        category=category,
+        slot_ids=[str(item.get("slot_id") or item.get("role") or "").strip() for item in asset_plan],
+        brand_memory_enabled=brand_memory_enabled,
+    )
+    if matched_items:
+        memory_preview = apply_brand_memory_to_strategy_preview(
+            {"asset_plan": asset_plan, "prompt_plan": prompt_plan},
+            matched_items=matched_items,
+        )
+        asset_plan = memory_preview.get("asset_plan", asset_plan)
+        prompt_plan = memory_preview.get("prompt_plan", prompt_plan)
+        brand_memory_trace = memory_preview.get("brand_memory_trace", [])
+        brand_memory_item_ids = memory_preview.get("brand_memory_item_ids", [])
+        brand_memory_applied = bool(memory_preview.get("brand_memory_applied"))
+
     copy_design_plan = _design_main_gallery_copy(
         confirmed_copy=normalized_copy,
         analysis_snapshot=analysis_snapshot or {},
@@ -154,9 +451,23 @@ def build_strategy_preview(
     )
     if copy_design_plan:
         asset_plan, prompt_plan = _apply_main_copy_design(asset_plan, prompt_plan, copy_design_plan)
+    text_design_source = _copy_design_source(copy_design_plan)
+    if text_design_source == "rule_based":
+        text_design_source = _copy_design_source_from_llm_plan(llm_slot_plan if isinstance(llm_slot_plan, dict) else None)
     asset_plan = _sync_asset_plan_quality_metadata(asset_plan, prompt_plan)
 
-    return {
+    # Category-aware supplementary view suggestions
+    from app.services.category_catalog import suggest_supplementary_views
+    category_slug = ""
+    if analysis_snapshot:
+        recognized = analysis_snapshot.get("recognized_product") or {}
+        category_slug = str(recognized.get("category", "")).strip()
+    detected_slots = []
+    if analysis_snapshot:
+        detected_slots = [str(s).strip() for s in (analysis_snapshot.get("detected_view_slots") or []) if str(s).strip()]
+    supplementary_suggestions = suggest_supplementary_views(category_slug, detected_slots)
+
+    preview = {
         "product_name": normalized_copy.get("product_name", ""),
         "hero_scene": normalized_copy.get("hero_scene", ""),
         "core_selling_points": normalized_copy.get("core_selling_points", []),
@@ -175,42 +486,65 @@ def build_strategy_preview(
         "planner_instruction": planner_instruction,
         "platform_rule_pack": profile.main_rule_pack_id if profile else "default_main_gallery_v2",
         "platform_overlay": overlay,
+        "brand_id": brand_id,
+        "brand_memory_enabled": bool(brand_memory_enabled),
+        "brand_memory_applied": brand_memory_applied,
+        "brand_memory_item_ids": brand_memory_item_ids,
+        "brand_memory_trace": brand_memory_trace,
         "provider": (planner_meta or {}).get("provider", "whatai"),
         "model": (planner_meta or {}).get("model", ""),
         "planner_profile": settings.planner_profile,
+        "prompt_profile": str((planner_meta or {}).get("prompt_profile") or settings.planner_prompt_mode),
+        "prompt_input_chars": int((planner_meta or {}).get("prompt_input_chars") or 0),
+        "planner_image_count": len(loaded_reference_images) + len(loaded_strategy_reference_images),
+        "cache_hit": False,
         "planner_primary_provider": (planner_meta or {}).get("planner_primary_provider"),
         "planner_primary_model": (planner_meta or {}).get("planner_primary_model"),
         "planner_fallback_provider": (planner_meta or {}).get("planner_fallback_provider"),
         "planner_fallback_model": (planner_meta or {}).get("planner_fallback_model"),
         "planner_attempt_count": int((planner_meta or {}).get("planner_attempt_count") or 0),
         "planner_final_source": (planner_meta or {}).get("planner_final_source"),
+        "planner_ms": int((planner_meta or {}).get("planner_ms") or 0),
+        "planner_fallback_reason": (planner_meta or {}).get("planner_fallback_reason"),
         "prompt_version": (planner_meta or {}).get("prompt_version", ""),
         "repair_round": int((planner_meta or {}).get("repair_round") or 0),
         "source": (planner_meta or {}).get("source", "rule_based"),
-        "text_design_source": _copy_design_source(copy_design_plan),
+        "text_design_source": text_design_source,
         "slot_preferences": list(resolved_slot_preferences.values()),
         "strategy_overrides": list(resolved_prompt_overrides.values()),
         "reference_manifest": reference_manifest,
         "strategy_reference_manifest": strategy_reference_manifest,
+        "resolved_copy_attribution": copy_resolution["copy_attribution"],
         "asset_plan": asset_plan,
         "prompt_plan": prompt_plan,
-        "input_hash": strategy_preview_input_hash(
-            confirmed_copy,
-            active_platform_id,
-            db=db,
-            session_images=session_images,
-            analysis_snapshot=analysis_snapshot,
-            parameter_snapshot=parameter_snapshot,
+        "supplementary_view_suggestions": supplementary_suggestions,
+    }
+    preview.update(
+        _main_preview_hash_bundle(
+            normalized_copy=normalized_copy,
+            active_platform_id=active_platform_id,
+            overlay=overlay,
+            slot_blueprints=get_main_gallery_slot_blueprints(active_platform_id, db=db),
+            analysis_snapshot=analysis_snapshot or {},
+            parameter_snapshot=parameter_snapshot or {},
             planner_instruction=planner_instruction,
-            slot_preferences=slot_preferences,
-            prompt_overrides=prompt_overrides,
-            strategy_reference_images=strategy_reference_images,
-            loaded_reference_images=loaded_reference_images,
-            loaded_strategy_reference_images=loaded_strategy_reference_images,
+            resolved_slot_preferences=resolved_slot_preferences,
+            resolved_prompt_overrides=resolved_prompt_overrides,
             reference_manifest=reference_manifest,
             strategy_reference_manifest=strategy_reference_manifest,
-        ),
-    }
+            planner_profile=settings.planner_profile,
+            planner_provider=client.llm_router.provider_for_task("main_planner"),
+            planner_model=client.llm_router.model_for_task("main_planner"),
+            brand_id=brand_id,
+            brand_memory_enabled=bool(brand_memory_enabled),
+            brand_memory_trace=brand_memory_trace,
+        )
+    )
+    return validate_contract_warn(
+        StrategyPreviewPayload,
+        preview,
+        context={"active_platform_id": active_platform_id, "stage": "build_strategy_preview"},
+    )
 
 
 def normalize_strategy_preview(
@@ -221,8 +555,14 @@ def normalize_strategy_preview(
     db: Session | None = None,
     prompt_overrides: list[dict[str, Any]] | None = None,
     parameter_snapshot: dict[str, Any] | None = None,
+    brand_id: str | None = None,
+    brand_memory_enabled: bool = False,
+    service_id: str | None = None,
 ) -> dict:
-    confirmed_copy = merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot)
+    confirmed_copy = sync_legacy_copy_fields(
+        merge_parameter_snapshot_into_copy(confirmed_copy, parameter_snapshot),
+        overwrite=True,
+    )
     existing_preferences = []
     if isinstance(strategy_preview, dict):
         existing_preferences = strategy_preview.get("slot_preferences") or []
@@ -234,12 +574,15 @@ def normalize_strategy_preview(
         slot_preferences=existing_preferences if isinstance(existing_preferences, list) else [],
         prompt_overrides=prompt_overrides,
         parameter_snapshot=parameter_snapshot,
+        brand_id=brand_id,
+        brand_memory_enabled=brand_memory_enabled,
+        service_id=service_id,
     )
     if not isinstance(strategy_preview, dict):
         return normalized
 
     for key, value in strategy_preview.items():
-        if key not in {"asset_plan", "prompt_plan", "reference_manifest", "slot_preferences"} and value is not None:
+        if key not in {"asset_plan", "prompt_plan", "reference_manifest", "slot_preferences", "input_hash", "hash_layers", "hash_policy_version"} and value is not None:
             normalized[key] = value
 
     normalized["slot_preferences"] = strategy_preview.get("slot_preferences", normalized["slot_preferences"])
@@ -256,10 +599,14 @@ def normalize_strategy_preview(
         parameter_snapshot=parameter_snapshot or {},
         active_platform_id=active_platform_id,
         planner_instruction=strategy_preview.get("planner_instruction"),
-        platform_overlay=normalized.get("platform_overlay") or get_platform_overlay(active_platform_id),
+        platform_overlay=normalized.get("platform_overlay") or get_platform_overlay(active_platform_id, db=db),
     )
     normalized["image_count"] = len(normalized["asset_plan"])
-    return normalized
+    return validate_contract_warn(
+        StrategyPreviewPayload,
+        normalized,
+        context={"active_platform_id": active_platform_id, "stage": "normalize_strategy_preview"},
+    )
 
 
 def _style_summary(confirmed_copy: dict[str, Any]) -> str:
@@ -308,7 +655,11 @@ def _build_asset_plan(
             or preset.get("default_expression_mode")
             or recommended_mode
         )
-        meta = expression_metadata(expression_mode)
+        meta = expression_metadata(expression_mode, db=db, platform_id=active_platform_id)
+        slot_layout = slot.get("layout_recipe", {})
+        expr_layout_override = meta.get("layout_recipe_override") if meta else None
+        grammar_family = get_grammar_family(active_platform_id)
+        resolved_layout = _resolve_layout_recipe(slot_layout, expr_layout_override, grammar_family)
         copy_blocks = build_copy_blocks(
             platform_id=active_platform_id,
             slot_blueprint=slot,
@@ -323,7 +674,9 @@ def _build_asset_plan(
         role = str(slot.get("compat_role") or slot["slot_id"])
         role_spec = get_prompt_role_spec(role)
         plan.append(
-            {
+            validate_contract_warn(
+                AssetPlanItem,
+                {
                 **slot,
                 **meta,
                 "role": role,
@@ -339,7 +692,10 @@ def _build_asset_plan(
                 "locked": bool(chosen.get("locked")),
                 "reference_image_limit": _reference_image_limit_for_plan(slot, analysis_snapshot, []),
                 "risk_flags": [str(item).strip() for item in (analysis_snapshot or {}).get("risk_flags", []) if str(item).strip()],
-            }
+                "resolved_layout_recipe": resolved_layout,
+                },
+                context={"active_platform_id": active_platform_id, "slot_id": slot["slot_id"], "stage": "asset_plan_item"},
+            )
         )
     return sorted(plan, key=lambda item: int(item.get("display_order") or 0))
 
@@ -371,15 +727,73 @@ def _build_prompt_plan(
         for plan_item in asset_plan
     ]
 
-    if not llm_plan:
-        return base_plan
+    if llm_plan:
+        base_by_slot = {item["slot_id"]: item for item in base_plan}
+        merged: list[dict[str, Any]] = []
+        for plan_item in asset_plan:
+            slot_id = str(plan_item["slot_id"])
+            merged.append(_merge_prompt_plan_item(base_by_slot[slot_id], llm_plan.get(slot_id) or llm_plan.get(plan_item["role"])))
+        base_plan = merged
 
-    base_by_slot = {item["slot_id"]: item for item in base_plan}
-    merged: list[dict[str, Any]] = []
-    for plan_item in asset_plan:
-        slot_id = str(plan_item["slot_id"])
-        merged.append(_merge_prompt_plan_item(base_by_slot[slot_id], llm_plan.get(slot_id) or llm_plan.get(plan_item["role"])))
-    return merged
+    return _allocate_exclusive_selling_points(base_plan, confirmed_copy)
+
+
+_SELLING_POINT_ELIGIBLE_SLOTS = frozenset({
+    "selling_point", "closing_selling_point", "reason_why",
+    "proof_authority", "benefit_scene_or_compare",
+})
+
+
+def _allocate_exclusive_selling_points(
+    prompt_plan: list[dict[str, Any]],
+    confirmed_copy: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Distribute selling points exclusively across eligible slots.
+
+    Each eligible slot gets a unique subset of selling points so the
+    generated gallery doesn't repeat the same point on every image.
+    """
+    normalized_copy = sync_legacy_copy_fields(confirmed_copy, overwrite=True)
+    all_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
+    if len(all_points) < 2:
+        return prompt_plan
+
+    eligible_indices = [
+        i for i, item in enumerate(prompt_plan)
+        if item.get("slot_id") in _SELLING_POINT_ELIGIBLE_SLOTS
+        or item.get("slot_family") in _SELLING_POINT_ELIGIBLE_SLOTS
+    ]
+    if not eligible_indices:
+        return prompt_plan
+
+    max_per_slot = 2
+    assigned: dict[int, list[str]] = {}
+    point_idx = 0
+    for slot_idx in eligible_indices:
+        batch = []
+        for _ in range(max_per_slot):
+            if point_idx < len(all_points):
+                batch.append(all_points[point_idx])
+                point_idx += 1
+        if batch:
+            assigned[slot_idx] = batch
+        if point_idx >= len(all_points):
+            point_idx = 0
+
+    for slot_idx, points in assigned.items():
+        item = prompt_plan[slot_idx]
+        others = [p for idx_points in assigned.values() for p in idx_points if idx_points is not points]
+        other_text = "、".join(others[:4]) if others else ""
+
+        item["assigned_selling_points"] = points
+        item["selling_point_binding"]["assigned_points"] = points
+
+        exclusivity_constraint = f"本图聚焦卖点：{'、'.join(points)}。"
+        if other_text:
+            exclusivity_constraint += f" 不要重复其他图已分配的卖点（{other_text}）。"
+        item["resolved_constraints"].append(exclusivity_constraint)
+
+    return prompt_plan
 
 
 def _plan_main_gallery(
@@ -436,19 +850,45 @@ def _apply_main_copy_design(
         slot_id = str(item.get("slot_id") or "")
         design = copy_design_plan.get(slot_id) or {}
         copy_blocks = dict(item.get("copy_blocks") or {})
+        copy_blocks_attribution = dict(item.get("copy_blocks_attribution") or {})
         merged_blocks = {
             **copy_blocks,
-            **{
-                "headline": design.get("headline") or copy_blocks.get("headline"),
-                "supporting": design.get("supporting") or copy_blocks.get("supporting"),
-                "proof_lines": design.get("proof_lines") or copy_blocks.get("proof_lines") or [],
-                "matrix_lines": design.get("matrix_lines") or copy_blocks.get("matrix_lines") or [],
-            },
         }
+        for key in ("headline", "supporting", "proof_lines", "matrix_lines"):
+            planner_value = design.get(key)
+            override_value = copy_blocks.get(key)
+            has_override = key in copy_blocks and override_value is not None
+            if has_override:
+                merged_blocks[key] = override_value
+                copy_blocks_attribution[key] = {
+                    "source": "session_override",
+                    "source_path": f"strategy_overrides.{slot_id}.copy_blocks_override.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(override_value),
+                    "sanitized": False,
+                }
+            elif planner_value:
+                merged_blocks[key] = planner_value
+                copy_blocks_attribution[key] = {
+                    "source": "planner_enriched",
+                    "source_path": f"copy_design_plan.{slot_id}.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(planner_value),
+                    "sanitized": False,
+                }
+            elif key not in copy_blocks_attribution:
+                copy_blocks_attribution[key] = {
+                    "source": "rule_based",
+                    "source_path": f"asset_plan.{slot_id}.copy_blocks.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(merged_blocks.get(key)),
+                    "sanitized": False,
+                }
         next_asset_plan.append(
             {
                 **item,
                 "copy_blocks": merged_blocks,
+                "copy_blocks_attribution": copy_blocks_attribution,
                 "text_density": design.get("text_density") or item.get("text_density"),
                 "visual_emphasis": design.get("visual_emphasis") or item.get("visual_emphasis"),
                 "global_consistency_note": design.get("global_consistency_note") or item.get("global_consistency_note"),
@@ -459,18 +899,43 @@ def _apply_main_copy_design(
         slot_id = str(item.get("slot_id") or "")
         design = copy_design_plan.get(slot_id) or {}
         copy_blocks = dict(item.get("copy_blocks") or {})
+        copy_blocks_attribution = dict(item.get("copy_blocks_attribution") or {})
+        merged_prompt_blocks = {**copy_blocks}
+        for key in ("headline", "supporting", "proof_lines", "matrix_lines"):
+            planner_value = design.get(key)
+            override_value = copy_blocks.get(key)
+            has_override = key in copy_blocks and override_value is not None
+            if has_override:
+                merged_prompt_blocks[key] = override_value
+                copy_blocks_attribution[key] = {
+                    "source": "session_override",
+                    "source_path": f"strategy_overrides.{slot_id}.copy_blocks_override.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(override_value),
+                    "sanitized": False,
+                }
+            elif planner_value:
+                merged_prompt_blocks[key] = planner_value
+                copy_blocks_attribution[key] = {
+                    "source": "planner_enriched",
+                    "source_path": f"copy_design_plan.{slot_id}.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(planner_value),
+                    "sanitized": False,
+                }
+            elif key not in copy_blocks_attribution:
+                copy_blocks_attribution[key] = {
+                    "source": "rule_based",
+                    "source_path": f"prompt_plan.{slot_id}.copy_blocks.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": not bool(merged_prompt_blocks.get(key)),
+                    "sanitized": False,
+                }
         next_prompt_plan.append(
             {
                 **item,
-                "copy_blocks": {
-                    **copy_blocks,
-                    **{
-                        "headline": design.get("headline") or copy_blocks.get("headline"),
-                        "supporting": design.get("supporting") or copy_blocks.get("supporting"),
-                        "proof_lines": design.get("proof_lines") or copy_blocks.get("proof_lines") or [],
-                        "matrix_lines": design.get("matrix_lines") or copy_blocks.get("matrix_lines") or [],
-                    },
-                },
+                "copy_blocks": merged_prompt_blocks,
+                "copy_blocks_attribution": copy_blocks_attribution,
                 "text_density": design.get("text_density") or item.get("text_density"),
                 "visual_emphasis": design.get("visual_emphasis") or item.get("visual_emphasis"),
                 "global_consistency_note": design.get("global_consistency_note") or item.get("global_consistency_note"),
@@ -488,13 +953,30 @@ def _copy_design_source(copy_design_plan: dict[str, dict[str, Any]]) -> str:
     return "rule_based"
 
 
-def _merge_asset_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | None) -> dict[str, Any]:
+def _copy_design_source_from_llm_plan(llm_plan: dict[str, dict[str, Any]] | None) -> str:
+    if not isinstance(llm_plan, dict):
+        return "rule_based"
+    for key, value in llm_plan.items():
+        if str(key).startswith("_") or not isinstance(value, dict):
+            continue
+        if value.get("copy_blocks") or value.get("text_density") or value.get("visual_emphasis") or value.get("global_consistency_note"):
+            return "planner_enriched"
+    return "rule_based"
+
+
+def _merge_asset_plan_item(
+    base: dict[str, Any],
+    llm_item: dict[str, Any] | None,
+    *,
+    active_platform_id: str,
+    db: Session | None = None,
+) -> dict[str, Any]:
     if not isinstance(llm_item, dict):
         return base
     merged = {**base}
     expression_mode = repair_broken_text(llm_item.get("expression_mode"))
     if expression_mode and expression_mode in set(base.get("candidate_expression_modes") or []):
-        meta = expression_metadata(expression_mode)
+        meta = expression_metadata(expression_mode, db=db, platform_id=active_platform_id)
         merged.update(meta)
         merged["expression_mode"] = expression_mode
     copy_focus = repair_broken_text(llm_item.get("copy_focus"))
@@ -503,7 +985,150 @@ def _merge_asset_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | None
     focus_selling_point = repair_broken_text(llm_item.get("focus_selling_point"))
     if focus_selling_point:
         merged["focus_selling_point"] = focus_selling_point
+    copy_blocks = llm_item.get("copy_blocks")
+    if isinstance(copy_blocks, dict) and copy_blocks:
+        merged_blocks = dict(merged.get("copy_blocks") or {})
+        attribution = dict(merged.get("copy_blocks_attribution") or {})
+        for key, value in copy_blocks.items():
+            if value:
+                merged_blocks[key] = value
+                attribution[key] = {
+                    "source": "planner_enriched",
+                    "source_path": f"main_planner.prompt_plan.{merged.get('slot_id')}.copy_blocks.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": False,
+                    "sanitized": True,
+                }
+        merged["copy_blocks"] = merged_blocks
+        merged["copy_blocks_attribution"] = attribution
+    for key in ("text_density", "visual_emphasis", "global_consistency_note"):
+        value = repair_broken_text(llm_item.get(key))
+        if value:
+            merged[key] = value
     return merged
+
+
+# --- Layout Recipe helpers ---
+
+_AVOID_PATTERN_LABELS = {
+    "pure_photo_no_structure": "禁止纯摄影无结构无导购骨架的画面",
+    "magazine_spread": "禁止杂志排版或双页对开式构图",
+    "collage_grid": "禁止拼贴网格或多图并列式排版",
+    "dense_text_overlay": "禁止密集文字覆盖或信息卡海报化",
+    "empty_center_composition": "禁止空洞的居中单体构图，需要有明确的导购承托层",
+    "lifestyle_magazine": "禁止生活方式杂志风，需要明确的销售导购结构",
+    "single_angle_repeat": "禁止重复角度的小图凑数",
+    "empty_white_bg": "禁止空洞纯白无信息背景",
+    "lifestyle_only": "禁止纯生活场景，需要有佐证/参数信息",
+    "empty_proof_area": "禁止空洞的证据区，必须有实质性参数或认证",
+    "empty_flat_display": "禁止平淡的白底陈列图",
+    "simple_reshoot": "禁止简单换背景重拍",
+    "hard_sell_layout": "禁止传统硬广电商排版",
+    "any_text_overlay": "禁止任何文字覆盖",
+    "scene_elements": "禁止场景元素出现",
+    "subtle_layout": "禁止过于含蓄没有冲击力的版式",
+    "information_overload": "禁止信息过载密集排列",
+    "dense_certificate_wall": "禁止密集证书墙堆砌",
+    "certificate_wall": "禁止证书墙堆砌",
+}
+
+_ANCHOR_LABELS = {
+    "center": "居中",
+    "left": "偏左",
+    "right": "偏右",
+    "center_bottom": "中下",
+}
+
+_TITLE_ZONE_LABELS = {
+    "top_left": "左上方",
+    "top_center": "顶部居中",
+    "top_right": "右上方",
+}
+
+_CONTAINER_LABELS = {
+    "none": "",
+    "pill": "pill式短标签",
+    "card": "卡片式容器",
+    "banner": "横幅式标题栏",
+    "floating": "浮层式标签",
+}
+
+_FRAME_STRENGTH_LABELS = {
+    "none": "无框架",
+    "light": "轻框架",
+    "medium": "中等框架感",
+    "strong": "强导购框架",
+}
+
+
+def _compile_layout_directive(layout_recipe: dict[str, Any]) -> str:
+    """Compile a layout_recipe dict into a Chinese layout directive string."""
+    if not layout_recipe:
+        return ""
+    parts: list[str] = []
+    anchor = layout_recipe.get("product_anchor", "center")
+    occupancy = layout_recipe.get("product_occupancy", [0.45, 0.60])
+    title_zone = layout_recipe.get("title_zone")
+    benefit_chips = layout_recipe.get("benefit_chip_count", 0)
+    proof_blocks = layout_recipe.get("proof_block_count", 0)
+    container = layout_recipe.get("text_container_style", "none")
+    frame = layout_recipe.get("frame_strength", "light")
+
+    anchor_label = _ANCHOR_LABELS.get(anchor, "居中")
+    frame_label = _FRAME_STRENGTH_LABELS.get(frame, "轻框架")
+    occ_lo = int(occupancy[0] * 100) if isinstance(occupancy, (list, tuple)) and len(occupancy) >= 2 else 45
+    occ_hi = int(occupancy[1] * 100) if isinstance(occupancy, (list, tuple)) and len(occupancy) >= 2 else 60
+
+    parts.append(f"版式骨架：产品主体{anchor_label}(占画面{occ_lo}-{occ_hi}%)")
+
+    if title_zone:
+        tz_label = _TITLE_ZONE_LABELS.get(title_zone, title_zone)
+        parts.append(f"{tz_label}留标题区")
+    if benefit_chips > 0:
+        container_label = _CONTAINER_LABELS.get(container, "")
+        chip_desc = f"{benefit_chips}个{container_label}利益标签" if container_label else f"{benefit_chips}个利益标签"
+        parts.append(chip_desc)
+    if proof_blocks > 0:
+        parts.append(f"{proof_blocks}个证据/参数信息块")
+    parts.append(f"框架感{frame_label}")
+
+    directive = "，".join(parts) + "。"
+
+    avoid = layout_recipe.get("avoid_patterns", [])
+    avoid_labels = [_AVOID_PATTERN_LABELS.get(p) for p in avoid if p in _AVOID_PATTERN_LABELS]
+    if avoid_labels:
+        directive += " " + "；".join(avoid_labels) + "。"
+
+    return directive
+
+
+def _resolve_layout_recipe(
+    slot_layout: dict[str, Any],
+    expression_override: dict[str, Any] | None,
+    grammar_family: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge slot layout_recipe with expression override and grammar family defaults."""
+    resolved = dict(slot_layout)
+    if expression_override:
+        resolved.update(expression_override)
+    if grammar_family:
+        # Apply grammar family defaults where the slot doesn't have an explicit value
+        if not resolved.get("frame_strength") or resolved.get("frame_strength") == "inherit":
+            resolved["frame_strength"] = grammar_family.get("default_frame_strength", "light")
+        # Merge avoid patterns (union)
+        family_avoids = grammar_family.get("family_avoid_patterns", [])
+        slot_avoids = resolved.get("avoid_patterns", [])
+        resolved["avoid_patterns"] = list(dict.fromkeys(slot_avoids + family_avoids))
+        # Apply copy weight caps/floors
+        if "default_copy_weight_cap" in grammar_family:
+            cap = grammar_family["default_copy_weight_cap"]
+            if resolved.get("copy_weight", 0) > cap:
+                resolved["copy_weight"] = cap
+        if "default_copy_weight_floor" in grammar_family:
+            floor = grammar_family["default_copy_weight_floor"]
+            if resolved.get("copy_weight", 0) < floor:
+                resolved["copy_weight"] = floor
+    return resolved
 
 
 def _build_default_prompt_plan_item(
@@ -517,6 +1142,7 @@ def _build_default_prompt_plan_item(
     planner_instruction: str | None,
     platform_overlay: dict[str, Any],
 ) -> dict[str, Any]:
+    normalized_copy = sync_legacy_copy_fields(confirmed_copy, overwrite=True)
     role_hint = str(plan_item.get("reference_role_hint") or plan_item["role"])
     reference_images = reference_images_used_for_role(
         reference_manifest,
@@ -531,19 +1157,27 @@ def _build_default_prompt_plan_item(
     feature_highlights = [str(item).strip() for item in (parameter_snapshot or {}).get("feature_highlights", []) if str(item).strip()]
 
     slot_id = str(plan_item["slot_id"])
-    product_name = confirmed_copy.get("product_name") or "商品"
+    layout_recipe = plan_item.get("resolved_layout_recipe") or plan_item.get("layout_recipe", {})
+    layout_structure_directive = _compile_layout_directive(layout_recipe)
+    product_name = normalized_copy.get("product_name") or "商品"
     copy_blocks = dict(plan_item.get("copy_blocks") or {})
-    selling_points = _split_points(confirmed_copy.get("selling_points"))
-    scenes = _split_points(confirmed_copy.get("usage_scenes"))
-    specs = _split_points(confirmed_copy.get("specs"))
+    selling_points = _split_points(normalized_copy.get("core_selling_points") or normalized_copy.get("selling_points"))
+    product_advantages = _split_points(normalized_copy.get("product_advantages"))
+    scenes = _split_points(normalized_copy.get("hero_scene") or normalized_copy.get("usage_scenes"))
+    specs = key_parameter_strings(normalized_copy.get("key_parameters")) or _split_points(normalized_copy.get("specs"))
+    raw_hero_scene_anchor = scenes[0] if scenes else ""
+    hero_scene_anchor = ""
+    if raw_hero_scene_anchor and not is_low_information_copy_text(raw_hero_scene_anchor, product_name=product_name):
+        hero_scene_anchor = raw_hero_scene_anchor
     top_point = (
         copy_blocks.get("headline")
         or copy_blocks.get("supporting")
         or (copy_blocks.get("matrix_lines") or [None])[0]
-        or (selling_points[0] if selling_points else "核心卖点")
+        or ((selling_points + product_advantages)[0] if (selling_points + product_advantages) else "核心卖点")
     )
     top_scene = (
-        (copy_blocks.get("matrix_lines") or [None])[0]
+        hero_scene_anchor
+        or (copy_blocks.get("matrix_lines") or [None])[0]
         or (scenes[0] if scenes else "真实使用场景")
     )
     top_spec = (
@@ -605,36 +1239,60 @@ def _build_default_prompt_plan_item(
         must_avoid.append("不要生成长段落文字、复杂参数墙、密集小字或平台 UI 截图")
 
     background_rule_map = {
-        "hero": "背景简洁高级，允许轻微摄影棚氛围，但不要复杂场景。",
+        "hero": (
+            f"首图优先把商品放进“{hero_scene_anchor}”对应的真实使用环境中，环境只做轻量场景承托，不能喧宾夺主。"
+            if hero_scene_anchor
+            else "背景简洁高级，允许轻微摄影棚氛围，但不要复杂场景。"
+        ),
         "white_bg": "纯白无缝背景，画面中只有单个商品主体，不出现人物和道具。",
         "selling_point": f"背景服务于卖点“{top_point}”，只保留最少的功能化辅助元素。",
         "scene": f"在 {top_scene} 中自然展示商品，但环境只能作为陪衬。",
         "detail": "背景简洁或轻微虚化，重点让材质、纹理、做工细节清晰可见。",
-        "primary_kv": "背景允许极简高级场景或轻材质层次，但不能只是纯空白渲染；必须衬托标题区和底部利益点。",
+        "primary_kv": (
+            f"首图优先把商品放进“{hero_scene_anchor}”对应的真实使用环境中，同时保留标题区和底部利益点的承托空间。"
+            if hero_scene_anchor
+            else "背景允许极简高级场景或轻材质层次，但不能只是纯空白渲染；必须衬托标题区和底部利益点。"
+        ),
         "reason_why": "背景支持理由卡、机制卡或分镜摘要，不做纯白无信息背景，也不要做重复生活场景。",
         "proof_authority": "背景只服务于参数、证书、面板特写或结构放大，避免人物、大场景和复杂合成。",
         "benefit_scene_or_compare": "背景必须带出利益场景或对比空间，并通过色块、光区或层次强化视觉重点。",
         "closing_selling_point": "背景保持干净但要有质感，可用优质场景收束卖点，不能只是平拍产品。",
     }
     composition_rule_map = {
-        "hero": "商品完整入镜，主体明确，适合做主图首图。",
+        "hero": (
+            f"商品完整入镜，主体明确，首图优先在“{hero_scene_anchor}”所表达的场景里展示，但不要被环境抢走注意力。"
+            if hero_scene_anchor
+            else "商品完整入镜，主体明确，适合做主图首图。"
+        ),
         "white_bg": "商品完整居中，保留适当留白，边缘清晰干净。",
         "selling_point": f"围绕“{top_point}”做近景或中近景功能化构图。",
         "scene": "构图真实自然，商品清晰可辨，不要让场景喧宾夺主。",
         "detail": f"做局部近景或微距表现，重点展示 {top_spec}。",
-        "primary_kv": "采用“标题区 + 产品主体 + 背景结构 + 底部利益点”结构，产品主体约占画面一半。",
+        "primary_kv": (
+            f"采用“标题区 + 产品主体 + 背景结构 + 底部利益点”结构，产品主体约占画面一半，并优先放在“{hero_scene_anchor}”场景中展示。"
+            if hero_scene_anchor
+            else "采用“标题区 + 产品主体 + 背景结构 + 底部利益点”结构，产品主体约占画面一半。"
+        ),
         "reason_why": "采用多理由卡、机制卡或小分镜结构，至少表达 2 个不同理由点，不要用重复角度凑画面。",
         "proof_authority": "采用信息卡式构图，主体卖点旁必须放参数、证书、面板特写或结构放大等证明性元素。",
         "benefit_scene_or_compare": "采用“颜色强化 + 核心利益点 + 场景/对比”结构，利益点必须直接可感知。",
         "closing_selling_point": "采用“优质场景 + 核心卖点 + 1-2 个辅助卖点”的收束式构图，不做简单平拍。",
     }
     final_prompt_base_map = {
-        "hero": f"以 {product_name} 为唯一主体，生成一张高转化电商主图，突出 {top_point}。",
+        "hero": (
+            f"让 {product_name} 作为首图主角，优先置于 {hero_scene_anchor} 场景中展示，同时突出 {top_point}。"
+            if hero_scene_anchor
+            else f"以 {product_name} 为唯一主体，生成一张高转化电商主图，突出 {top_point}。"
+        ),
         "white_bg": f"以 {product_name} 为唯一主体，生成标准电商白底图，完整展示外观。",
         "selling_point": f"以 {product_name} 为唯一主体，聚焦表达卖点 {top_point}。",
         "scene": f"让 {product_name} 自然置入 {top_scene}，突出真实使用感。",
         "detail": f"放大表现 {product_name} 的 {top_spec}，强调质感与做工。",
-        "primary_kv": f"让 {product_name} 一眼说明“产品是什么、解决什么问题”，形成强点击首图，而不是单纯白底渲染。",
+        "primary_kv": (
+            f"让 {product_name} 在 {hero_scene_anchor} 场景中一眼说明“产品是什么、解决什么问题”，形成强点击首图。"
+            if hero_scene_anchor
+            else f"让 {product_name} 一眼说明“产品是什么、解决什么问题”，形成强点击首图，而不是单纯白底渲染。"
+        ),
         "reason_why": f"解释为什么 {product_name} 能解决“{top_point}”，优先使用理由卡、机制卡或多理由分镜。",
         "proof_authority": f"把 {product_name} 的最强卖点“{top_point}”与参数、证书、面板特写或结构佐证绑定，提升可信度。",
         "benefit_scene_or_compare": f"用利益场景或对比方式说明 {product_name} 对消费者的实际收益，同时做强视觉重点。",
@@ -667,6 +1325,9 @@ def _build_default_prompt_plan_item(
         resolved_constraints.append("Visible copy must stay short, high-contrast and integrated into the layout.")
     if slot_id == "proof_authority":
         resolved_constraints.append("没有真实证书素材时，优先参数标签、面板特写或结构放大，不伪造权威认证。")
+    if slot_id in {"hero", "primary_kv"} and hero_scene_anchor:
+        resolved_constraints.append(f"首图场景锚点：优先在“{hero_scene_anchor}”对应的空间关系中展示商品，不要改成其他无关环境。")
+        resolved_constraints.append("如果场景证据不足，只允许做保守的场景暗示，不允许凭空添加强叙事人物互动或无关空间。")
     if slot_id == "primary_kv":
         resolved_constraints.append("首图优先形成一句明确中文主利益点，并搭配 0-2 个短辅助利益点；不要再叠长副标题或大段解释。")
         if requires_simplified_chinese_visible_copy(platform_overlay.get("overlay_id")):
@@ -684,8 +1345,15 @@ def _build_default_prompt_plan_item(
     if slot_id in {"detail", "proof_authority"}:
         resolved_constraints.append("局部图只能放大解释上传参考图里可验证的结构，不可杜撰不属于真实商品的内部细节。")
     resolved_constraints.extend(_truth_contract_constraints(slot_id, truth_contract))
+    # Add avoid pattern constraints from layout recipe
+    for pattern in layout_recipe.get("avoid_patterns", [])[:4]:
+        label = _AVOID_PATTERN_LABELS.get(pattern)
+        if label and label not in resolved_constraints:
+            resolved_constraints.append(label)
 
-    return {
+    return validate_contract_warn(
+        PromptPlanItem,
+        {
         "slot_id": slot_id,
         "slot_label": plan_item.get("slot_label"),
         "slot_family": plan_item.get("slot_family"),
@@ -728,7 +1396,11 @@ def _build_default_prompt_plan_item(
         "truth_contract": truth_contract,
         "resolved_constraints": resolved_constraints,
         "text_policy": plan_item.get("text_policy"),
-    }
+        "layout_structure_directive": layout_structure_directive,
+        "resolved_layout_recipe": layout_recipe,
+        },
+        context={"slot_id": slot_id, "role": plan_item["role"], "stage": "prompt_plan_item"},
+    )
 
 
 def _merge_prompt_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | None) -> dict[str, Any]:
@@ -772,6 +1444,26 @@ def _merge_prompt_plan_item(base: dict[str, Any], llm_item: dict[str, Any] | Non
         value = repair_broken_text(llm_item.get(key))
         if value:
             merged[key] = value
+    copy_blocks = llm_item.get("copy_blocks")
+    if isinstance(copy_blocks, dict) and copy_blocks:
+        merged_blocks = dict(merged.get("copy_blocks") or {})
+        attribution = dict(merged.get("copy_blocks_attribution") or {})
+        for key, value in copy_blocks.items():
+            if value:
+                merged_blocks[key] = value
+                attribution[key] = {
+                    "source": "planner_enriched",
+                    "source_path": f"main_planner.prompt_plan.{merged.get('slot_id')}.copy_blocks.{key}",
+                    "source_stage": "strategy_preview",
+                    "fallback_used": False,
+                    "sanitized": True,
+                }
+        merged["copy_blocks"] = merged_blocks
+        merged["copy_blocks_attribution"] = attribution
+    for key in ("text_density", "visual_emphasis", "global_consistency_note"):
+        value = repair_broken_text(llm_item.get(key))
+        if value:
+            merged[key] = value
     return merged
 
 
@@ -808,6 +1500,9 @@ def _normalize_asset_plan(existing_plan: Any, default_plan: list[dict[str, Any]]
                 "slot_id": slot_id,
                 "role": str(item.get("role") or base["role"]),
                 "display_order": int(item.get("display_order") or base.get("display_order") or index),
+                "copy_blocks": base.get("copy_blocks") or item.get("copy_blocks", {}),
+                "copy_blocks_attribution": base.get("copy_blocks_attribution") or item.get("copy_blocks_attribution", {}),
+                "raw_prompt_override": base.get("raw_prompt_override") or item.get("raw_prompt_override"),
             }
         )
         seen_slots.add(slot_id)
@@ -886,6 +1581,9 @@ def _normalize_prompt_plan(
                 "slot_id": slot_id,
                 "role": str(item.get("role") or base["role"]),
                 "display_order": int(item.get("display_order") or base["display_order"]),
+                "copy_blocks": base.get("copy_blocks") or item.get("copy_blocks", {}),
+                "copy_blocks_attribution": base.get("copy_blocks_attribution") or item.get("copy_blocks_attribution", {}),
+                "raw_prompt_override": base.get("raw_prompt_override") or item.get("raw_prompt_override"),
                 "reference_image_ids": [str(v) for v in item.get("reference_image_ids", base["reference_image_ids"])],
                 "reference_slots": _normalize_phrase_list(item.get("reference_slots", base["reference_slots"])),
                 "reference_image_limit": int(item.get("reference_image_limit") or base.get("reference_image_limit") or 2),
@@ -975,6 +1673,12 @@ def _truth_contract_constraints(slot_id: str, truth_contract: dict[str, Any]) ->
     if not isinstance(truth_contract, dict):
         return []
     constraints: list[str] = []
+
+    # --- v2: Fidelity tier top-priority constraint ---
+    fidelity_tier = str(truth_contract.get("fidelity_tier") or "").strip().lower()
+    if fidelity_tier in ("critical", "high"):
+        constraints.append("【绝对禁止】不要重建/美化/重新设计产品外观，必须严格保持参考图中产品的真实外观")
+
     immutable = [repair_broken_text(item) for item in truth_contract.get("immutable_features", []) if repair_broken_text(item)]
     forbidden = [repair_broken_text(item) for item in truth_contract.get("forbidden_drift", []) if repair_broken_text(item)]
     entities = [repair_broken_text(item) for item in truth_contract.get("required_entities", []) if repair_broken_text(item)]
@@ -982,6 +1686,24 @@ def _truth_contract_constraints(slot_id: str, truth_contract: dict[str, Any]) ->
         constraints.append("主体不可漂移：" + "；".join(immutable[:3]))
     if forbidden:
         constraints.append("关键结构不可换位：" + "；".join(forbidden[:3]))
+
+    # --- v2: Component-level locks ---
+    component_locks = truth_contract.get("component_locks") if isinstance(truth_contract.get("component_locks"), list) else []
+    for lock in component_locks[:5]:
+        if isinstance(lock, dict) and lock.get("component"):
+            pos = f"（位置：{lock['position']}）" if lock.get("position") else ""
+            constraints.append(f"【绝对禁止】不要改变 {lock['component']} 的形状或位置{pos}")
+
+    # --- v2: Color palette preservation ---
+    color_hex = truth_contract.get("color_palette_hex") if isinstance(truth_contract.get("color_palette_hex"), list) else []
+    if color_hex:
+        constraints.append(f"【绝对禁止】产品颜色必须保持为 {'、'.join(str(c) for c in color_hex[:4])}，不要改变产品的颜色、材质或表面光泽")
+
+    # --- v2: Brand marks preservation ---
+    brand_marks = truth_contract.get("brand_marks_preserve") if isinstance(truth_contract.get("brand_marks_preserve"), list) else []
+    if brand_marks:
+        constraints.append(f"保留产品上的品牌标识：{'、'.join(str(m) for m in brand_marks[:3])}，不要删除或替换")
+
     if truth_contract.get("scale_anchor"):
         constraints.append("比例与厚薄关系按参考图：" + repair_broken_text(truth_contract.get("scale_anchor")))
     if not truth_contract.get("allow_structure_extrapolation", True):
@@ -990,6 +1712,17 @@ def _truth_contract_constraints(slot_id: str, truth_contract: dict[str, Any]) ->
         constraints.append(repair_broken_text(truth_contract.get("scene_grounding_rule")))
     if entities:
         constraints.append("若表达卖点，必须出现这些真实视觉证据：" + "、".join(entities[:3]))
+
+    # Hardened fidelity locks (v3)
+    if truth_contract.get("logo_lock_mode") == "strict":
+        constraints.append("【绝对禁止】不得移动、旋转、缩放或去除任何品牌 logo 和商标，logo 位置和大小必须与参考图完全一致")
+    if truth_contract.get("text_on_product_lock"):
+        constraints.append("产品本体上的型号、按键标签、屏幕文字、铭牌丝印必须与原图完全一致，不得修改、替换或省略")
+    if truth_contract.get("color_drift_tolerance") == "zero":
+        constraints.append("色相、饱和度、明度必须与参考图一致，即使轻微色偏也不允许；环境光不得改变产品本体颜色")
+    elif truth_contract.get("color_drift_tolerance") == "low":
+        constraints.append("产品主色调和材质色必须与参考图一致，允许环境光带来的轻微色温变化但不允许明显色偏")
+
     return [item for item in constraints if item]
 
 

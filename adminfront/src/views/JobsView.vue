@@ -2,7 +2,7 @@
   <section class="page-stack">
     <div class="page-toolbar">
       <div>
-        <span class="eyebrow">Jobs</span>
+        <span class="eyebrow">任务队列管理</span>
         <h3>任务排障与事件时间线</h3>
       </div>
       <div class="toolbar-actions">
@@ -49,7 +49,7 @@
       <article class="surface-card" v-if="detail.job_id">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Job Detail</span>
+            <span class="eyebrow">任务执行详情</span>
             <h4>{{ detail.job_type }}</h4>
           </div>
           <button class="ghost-button" @click="retrySelectedJob">重试任务</button>
@@ -88,7 +88,7 @@
 
         <div class="surface-pane">
           <div class="surface-card__header">
-            <h4>事件时间线</h4>
+            <h4>事件流时间轴</h4>
             <span>{{ events.total || 0 }} events</span>
           </div>
           <div class="stack-list">

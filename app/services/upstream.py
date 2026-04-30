@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import random
+import re
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -22,7 +23,7 @@ from app.services.copy_normalization import (
     repair_broken_text,
 )
 from app.services.llm_router import LLMRouter
-from app.services.prompt_safety import prompt_matrix_guardrails, sanitize_generated_copy_fields, sanitize_parameter_snapshot
+from app.services.prompt_safety import has_planning_annotation, prompt_matrix_guardrails, sanitize_generated_copy_fields, sanitize_parameter_snapshot, sanitize_surface_text
 from app.services.quality_signals import (
     FIDELITY_ISSUE_TAXONOMY,
     extract_selling_point_entities,
@@ -59,6 +60,7 @@ DETAIL_STORY_BRIEF_KEYS = (
     "closing_cta",
 )
 ANALYSIS_PROMPT_VERSION = "analysis_v3_prompt_first"
+ANALYSIS_PARAMETER_COMBINED_PROMPT_VERSION = "analysis_parameter_combined_v1"
 MAIN_PLANNER_PROMPT_VERSION = "main_planner_v3_prompt_first"
 DETAIL_PLANNER_PROMPT_VERSION = "detail_planner_v4_prompt_first"
 PARAMETER_PROMPT_VERSION = "parameter_v2_prompt_first"
@@ -72,6 +74,10 @@ def _sanitize_planner_freeform_text(value: Any) -> str:
     cleaned = repair_broken_text(value)
     if not cleaned:
         return ""
+    # Strip 【】 / [] planning annotation brackets, preserving inner content.
+    # This ensures that even if the LLM wraps directives like 【核心目标】 they
+    # do not reach the final prompt with their brackets intact.
+    cleaned = re.sub(r"[【\[]([^】\]]*)[】\]]", r"\1", cleaned)
     return " ".join(cleaned.split()).strip(" ，,；;。")
 
 
@@ -84,6 +90,32 @@ def _normalize_planner_text_entries(value: Any) -> list[str]:
 
 def _prompt_matrix_guardrail_text() -> str:
     return " ".join(prompt_matrix_guardrails())
+
+
+def _product_name_correction_notice(
+    confirmed_copy: dict[str, Any],
+    analysis_snapshot: dict[str, Any] | None,
+) -> str:
+    """Return a planner prompt fragment when the user has overridden the product name.
+
+    If confirmed_copy.product_name differs from analysis_snapshot.recognized_product.product_name,
+    emit an explicit instruction so the LLM prioritises the user's correction over the
+    auto-detected name from the analysis stage.
+    """
+    user_name = str(confirmed_copy.get("product_name") or "").strip()
+    if not user_name or not isinstance(analysis_snapshot, dict):
+        return ""
+    recognized = analysis_snapshot.get("recognized_product")
+    if not isinstance(recognized, dict):
+        return ""
+    analysis_name = str(recognized.get("product_name") or "").strip()
+    if not analysis_name or analysis_name == user_name:
+        return ""
+    return (
+        f"重要：用户已将产品名称从「{analysis_name}」修正为「{user_name}」。"
+        f"所有 copy_focus、focus_selling_point、final_prompt_base 和图上可见文字必须以用户确认的「{user_name}」为准，"
+        f"不要使用分析阶段识别的旧产品名称「{analysis_name}」。"
+    )
 
 
 class WhataiClient:
@@ -141,6 +173,7 @@ class WhataiClient:
                 "sample_keywords": item["sample_keywords"],
                 "is_featured": item["is_featured"],
                 "notes": item["notes"],
+                "confusion_pairs": item.get("confusion_pairs", []),
             }
             for item in category_catalog
         ]
@@ -159,6 +192,12 @@ class WhataiClient:
                         "recognized_product 必须包含 product_name,category,image_type,confidence。"
                         "category_candidates 至少返回 3 个候选项，每项包含 category,confidence,reason，并按置信度排序。"
                         "category_candidates 必须优先从给定的全局品类库中选择，只有完全无法归类时才允许使用“其他”。"
+                        "每个品类条目包含 confusion_pairs 字段，列出外观相似的易混淡品类——识别时必须根据以下要点区分：\n"
+                        "  饮水机 vs 净水器：饮水机有出水龙头+加热功能；净水器有滤芝舟+出水管且无内置加热。\n"
+                        "  空气净化器 vs 加湿器：净化器有HEPA滤网+进出风口；加湿器有出雾口+水筱可见。\n"
+                        "  宠物饮水机 vs 普通饮水机：宠物饮水机有饮水槽/磗+循环泵，体积小，面向动物。\n"
+                        "  破壁机 vs 料理机 vs 养生壶：破壁机高速刀头+圆柱透明杯；养生壶有加热底座+玻璃内胆；料理机有多功能刀片组。\n"
+                        "  扫地机 vs 洗地机：扫地机扁圆形自动导航；洗地机手持推杆+双水筱。\n"
                         "不要把具体家电、个护、宠物、家具产品泛化成“家居用品”。"
                         "supplement_image_recommendations 每项必须包含 slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption。"
                         "slot_type 只能是 front,angle45,side,extra。priority 只能输出 1-10 的整数，不允许输出 high/medium/low。"
@@ -173,9 +212,22 @@ class WhataiClient:
                         "evidence_scores 必须包含 structure,proportion,scene,text，取值 0-100。"
                         "risk_flags 必须是数组，用于描述透明结构、控制面板、尺寸敏感、场景落地等风险。"
                         "selling_point_entities 必须是数组，只保留真实卖点实体，例如宠物、控制面板、透明水箱、滤芯。"
+                        "输出字段额外必须包含：fidelity_tier,product_identity_anchor,component_registry,image_semantic_tags。"
+                        "fidelity_tier 只能是 critical/high/standard/creative，表示当前商品需要多高级别的外观保真。"
+                        "涉及控制面板、精密结构、透明部件、机械组件的产品应为 critical；普通家电/日用品为 high；"
+                        "简单造型产品为 standard；纯设计/艺术类为 creative。"
+                        "product_identity_anchor 必须包含 brand_marks(品牌标识位置列表), "
+                        "control_interfaces(控制界面/面板/按键描述), distinguishing_geometry(辨识性几何特征), "
+                        "color_palette_hex(主体色 HEX 色号数组,至少2色)。"
+                        "component_registry 必须是数组，每项包含 name(部件名), position(位置描述), movable(bool是否可拆卸)。"
+                        "image_semantic_tags 必须是数组，每项包含 image_id 和 tags "
+                        "(如 main_body, accessory, front_panel, side_view, internal_structure, packaging, lifestyle_scene)。"
                         "如果某个候选品类置信度低，请在 reason 中明确指出不确定原因。"
                         "不要输出思考过程、推理过程、内部规划标签或流程说明。"
                         "copy_draft 和 example_caption 必须像可直接交给用户编辑或继续生成的最终候选，不要输出中间想法。"
+                        "You may also return copy_blocks,text_density,visual_emphasis,global_consistency_note for each prompt_plan item. "
+                        "copy_blocks may contain headline,supporting,proof_lines,matrix_lines. "
+                        "These fields are final visible copy for the image, not internal reasoning or layout instructions. "
                         f"{_prompt_matrix_guardrail_text()}"
                         f"当前平台：{active_platform_id or 'temu'}。"
                         f"当前全局品类库：{json.dumps(catalog_prompt, ensure_ascii=False)}。"
@@ -202,6 +254,159 @@ class WhataiClient:
         merged["analysis_source"] = "fallback" if meta["source"] == "fallback" else "llm"
         merged.update(meta)
         return merged
+
+    def analyze_images_with_parameters(
+        self,
+        reference_images: list[LoadedReferenceImage] | list[str],
+        active_platform_id: str | None,
+        *,
+        confirmed_copy: dict[str, Any] | None = None,
+        db: Session | None = None,
+    ) -> dict[str, Any]:
+        normalized_images = [item for item in reference_images if isinstance(item, LoadedReferenceImage)]
+        category_catalog = list_active_category_catalog(db=db)
+        analysis_fallback = self._fake_analysis(active_platform_id, normalized_images, category_catalog=category_catalog)
+        parameter_fallback = self._fake_parameter_snapshot(
+            confirmed_copy or {},
+            analysis_fallback,
+            active_platform_id,
+            normalized_images,
+            [],
+            [],
+        )
+        fallback = {
+            "analysis_snapshot": analysis_fallback,
+            "parameter_snapshot": parameter_fallback,
+        }
+        if not normalized_images or not self.llm_router.is_available("analysis"):
+            meta = {
+                "provider": self.llm_router.provider_for_task("analysis"),
+                "model": self.llm_router.model_for_task("analysis"),
+                "prompt_version": ANALYSIS_PARAMETER_COMBINED_PROMPT_VERSION,
+                "repair_round": 0,
+                "source": "fallback",
+            }
+            analysis_fallback["analysis_source"] = "fallback"
+            analysis_fallback["analysis_quality"] = "fallback"
+            analysis_fallback.update(meta)
+            parameter_fallback = sanitize_parameter_snapshot(parameter_fallback)
+            parameter_fallback["analysis_quality"] = "fallback"
+            parameter_fallback.update(meta)
+            return {
+                "analysis_snapshot": analysis_fallback,
+                "parameter_snapshot": parameter_fallback,
+            }
+
+        catalog_prompt = [
+            {
+                "name": item["name"],
+                "aliases": item["aliases"],
+                "sample_keywords": item["sample_keywords"],
+                "is_featured": item["is_featured"],
+                "notes": item["notes"],
+                "confusion_pairs": item.get("confusion_pairs", []),
+            }
+            for item in category_catalog
+        ]
+        product_manifest = [image.to_manifest_item() for image in normalized_images]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "你是 SmartPhoto 的商品视觉分析与参数提取联合 Agent。"
+                    "请严格按以下步骤推理，最终只返回一个 JSON 对象，顶层包含 analysis_snapshot 和 parameter_snapshot。\n"
+                    "\n"
+                    "阶段 1 - 视觉识别：\n"
+                    "识别图片中的商品品类、视角覆盖、外观结构、颜色、材质、控制面板、透明部件。\n"
+                    "从全局品类库中选择最匹配的品类，只有完全无法归类时才使用\"其他\"。\n"
+                    "recognized_product 必须包含 product_name,category,image_type,confidence。\n"
+                    "category_candidates 至少返回 3 个候选项，每项包含 category,confidence,reason，按置信度排序。\n"
+                    "\n"
+                    "阶段 2 - 风险与证据评估：\n"
+                    "基于阶段 1 的发现，评估证据强度(evidence_scores: structure,proportion,scene,text，取值 0-100)。\n"
+                    "标记风险(risk_flags 数组)：透明结构、控制面板、尺寸敏感、场景落地等。\n"
+                    "提取真实卖点实体(selling_point_entities 数组)，如宠物、控制面板、透明水箱、滤芯。\n"
+                    "确定保真等级(fidelity_tier: critical/high/standard/creative)。\n"
+                    "\n"
+                    "阶段 3 - 参数提取：\n"
+                    "基于阶段 1-2 的视觉发现，生成 parameter_snapshot，包含：\n"
+                    "relevance_status,rejection_reason,hero_scene,core_selling_points,key_parameters,product_advantages,"
+                    "feature_highlights,source_mode,evidence_priority,evidence_summary。\n"
+                    "本次联合调用 source_mode 固定为 analysis_only，evidence_priority 固定为 analysis_then_copy。\n"
+                    "key_parameters 必须是数组，每项拆为 key,label,value,unit，不要把'参数名：参数值'同时塞进 label 和 value。\n"
+                    "parameter_snapshot 中的文案必须严格基于图片可见事实，描述不出的参数标明来源为 analysis_only。\n"
+                    "\n"
+                    "阶段 4 - 组装输出：\n"
+                    "将以上结果组织为 analysis_snapshot 和 parameter_snapshot 两个顶层对象。\n"
+                    "analysis_snapshot 必须包含：recognized_product,image_assessment,missing_views,suggestions,copy_draft,"
+                    "key_parameters,suggested_styles,reference_summary,category_candidates,scene_tags,"
+                    "supplement_image_recommendations,detected_view_slots,evidence_scores,risk_flags,selling_point_entities,"
+                    "fidelity_tier,product_identity_anchor,component_registry,image_semantic_tags。\n"
+                    "missing_views 和 detected_view_slots 只能使用 front,angle45,side,extra。\n"
+                    "supplement_image_recommendations 每项必须包含 slot_type,label,reason,priority(1-10整数),upload_goal,must_show,framing_hint,example_caption。\n"
+                    "slot_type=extra 时可输出 image_kind，只能是 detail_closeup,water_tank,filter_structure,size_in_hand,use_scene_real 之一。\n"
+                    "reference_summary 必须包含 shape,colors,materials,structures,must_keep,proportion_note,"
+                    "control_panel_note,transparent_parts_note,structure_anchor_points,do_not_move_features,scene_fit_notes。\n"
+                    "product_identity_anchor 必须包含 brand_marks,control_interfaces,distinguishing_geometry,color_palette_hex(至少2色)。\n"
+                    "component_registry 必须是数组，每项包含 name,position,movable。\n"
+                    "image_semantic_tags 必须是数组，每项包含 image_id 和 tags。\n"
+                    f"{_prompt_matrix_guardrail_text()}"
+                    f"当前平台：{active_platform_id or 'temu'}。"
+                    f"当前 confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
+                    f"商品图 manifest：{json.dumps(product_manifest, ensure_ascii=False)}。"
+                    f"全局品类库：{json.dumps(catalog_prompt, ensure_ascii=False)}。"
+                ),
+            },
+            *self._build_chat_image_parts(normalized_images),
+        ]
+        outcome = self._run_structured_task(
+            task="analysis",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.2,
+            error_key="upstream_llm_error",
+            prompt_version=ANALYSIS_PARAMETER_COMBINED_PROMPT_VERSION,
+            validator=lambda parsed: self._validate_analysis_parameter_combined_result(parsed, category_catalog),
+            fallback_result=fallback,
+        )
+        parsed = outcome["result"] if isinstance(outcome["result"], dict) else fallback
+        raw_analysis = parsed.get("analysis_snapshot") if isinstance(parsed.get("analysis_snapshot"), dict) else parsed
+        raw_parameter = parsed.get("parameter_snapshot") if isinstance(parsed.get("parameter_snapshot"), dict) else {}
+        analysis_snapshot = self._merge_analysis_result(
+            analysis_fallback,
+            raw_analysis if isinstance(raw_analysis, dict) else {},
+            category_catalog=category_catalog,
+        )
+        parameter_base = self._fake_parameter_snapshot(
+            confirmed_copy or {},
+            analysis_snapshot,
+            active_platform_id,
+            normalized_images,
+            [],
+            [],
+        )
+        parameter_snapshot = self._merge_parameter_snapshot(
+            parameter_base,
+            raw_parameter if isinstance(raw_parameter, dict) else {},
+        )
+        parameter_snapshot = sanitize_parameter_snapshot(parameter_snapshot)
+        meta = outcome["meta"]
+        analysis_snapshot["analysis_source"] = "fallback" if meta["source"] == "fallback" else "llm"
+        analysis_snapshot["analysis_quality"] = analysis_snapshot["analysis_source"]
+        analysis_snapshot.update(meta)
+        parameter_snapshot["analysis_quality"] = analysis_snapshot["analysis_quality"]
+        parameter_snapshot.update(meta)
+        return {
+            "analysis_snapshot": analysis_snapshot,
+            "parameter_snapshot": parameter_snapshot,
+        }
+
+    def _should_skip_completion(self, parameter_snapshot: dict[str, Any] | None) -> bool:
+        if not isinstance(parameter_snapshot, dict):
+            return False
+        quality = str(parameter_snapshot.get("analysis_quality") or "").strip().lower()
+        if quality == "fallback":
+            return False
+        return quality == "llm" and str(parameter_snapshot.get("source_stage") or "") == "analysis_combined"
 
     def plan_prompt_plan(
         self,
@@ -231,25 +436,70 @@ class WhataiClient:
         ]
         manifest = [image.to_manifest_item() for image in reference_images]
         supplemental_manifest = [image.to_manifest_item() for image in supplemental_reference_images or []]
+        prompt_profile = self.settings.planner_prompt_mode
+        compact_prompt = (
+            "You are SmartPhoto's main gallery planner. Return only JSON: "
+            "{\"prompt_plan\":[...]}. One item per role in role_defs. Required fields: "
+            "role, copy_focus, focus_selling_point, reference_image_ids, must_keep, must_avoid, final_prompt_base. "
+            "Optional: expression_mode, background_rule, composition_rule, lighting_rule, fidelity_rule, copy_blocks. "
+            "Use only image ids from reference_images. Do not output reasoning or markdown. "
+            "Do not write concrete English brand/text tokens in must_keep or fidelity_rule; use abstract Chinese visual descriptions. "
+            "Keep roles distinct: hero attracts, white_bg is pure white single product, selling_point proves one benefit, "
+            "scene shows use context, detail shows structure/material. "
+            f"{_prompt_matrix_guardrail_text()}"
+            f"{_product_name_correction_notice(confirmed_copy, analysis_snapshot)}"
+            f"platform={active_platform_id}; "
+            f"confirmed_copy={json.dumps(confirmed_copy, ensure_ascii=False)}; "
+            f"role_defs={json.dumps(defaults, ensure_ascii=False)}; "
+            f"reference_images={json.dumps(manifest, ensure_ascii=False)}; "
+            f"supplemental_reference_images={json.dumps(supplemental_manifest, ensure_ascii=False)}; "
+            f"reference_summary={json.dumps(reference_summary or {}, ensure_ascii=False)}; "
+            f"risk_flags={json.dumps((analysis_snapshot or {}).get('risk_flags') or [], ensure_ascii=False)}; "
+            f"selling_point_entities={json.dumps((analysis_snapshot or {}).get('selling_point_entities') or [], ensure_ascii=False)}; "
+            f"evidence_scores={json.dumps((analysis_snapshot or {}).get('evidence_scores') or {}, ensure_ascii=False)}; "
+            f"planner_instruction={planner_instruction or 'none'}."
+        )
         messages = [{
             "role": "user",
             "content": [
                 {
                     "type": "text",
                     "text": (
-                        "你是 SmartPhoto 的电商主图规划 Agent。"
-                        "请根据商品 copy、平台信息、槽位定义和参考图，为 5 个主图槽位输出 JSON。"
-                        "只能返回 JSON 对象，顶层键必须是 prompt_plan，值是数组。"
-                        "每项必须包含：role,expression_mode,copy_focus,focus_selling_point,reference_image_ids,"
+                        "你是 SmartPhoto 的电商主图规划 Agent。请严格按以下步骤推理，最终只返回 JSON 对象。\n"
+                        "\n"
+                        "步骤 1 - 卖点清点与排序：\n"
+                        "从 confirmed_copy 和 selling_point_entities 中列出所有可用卖点，按 evidence_scores 可靠度从高到低排序。\n"
+                        "\n"
+                        "步骤 2 - 卖点与场景分配：\n"
+                        "将排名前 2 的卖点分别分配给 hero 和 selling_point 槽位。"
+                        "scene 槽位分配使用场景（非卖点），detail 槽位分配结构/材质细节。"
+                        "white_bg 槽位只做纯白标准展示，不分配卖点。"
+                        "每个卖点最多出现在 1 个槽位，先列出分配表再填充细节。\n"
+                        "\n"
+                        "步骤 3 - 图片分配：\n"
+                        "从可用参考图中为每个槽位选择最匹配的图片："
+                        "hero 选正面全貌图；white_bg 选白底/干净背景图；"
+                        "selling_point 选展示该卖点的图；scene 选生活场景图；detail 选细节/材质图。\n"
+                        "\n"
+                        "步骤 4 - 逐槽规划：\n"
+                        "按 hero->white_bg->selling_point->scene->detail 顺序，为每个槽位写:\n"
+                        "role, expression_mode, copy_focus, focus_selling_point, reference_image_ids,\n"
+                        "must_keep, must_avoid, background_rule, composition_rule, lighting_rule, fidelity_rule, final_prompt_base。\n"
+                        "must_keep 只写中文视觉描述（如'保留产品顶部橙色按钮'），品牌名和丝印一律写'产品本体原有标识保持不变'。\n"
+                        "fidelity_rule 只写: '颜色与参考图一致，比例准确，结构完整'，或补充材质保真要求。\n"
+                        "final_prompt_base 是给生图模型的核心目标描述，用中文描述画面目标。\n"
+                        "\n"
+                        "步骤 5 - 交叉验证：\n"
+                        "检查: 卖点是否跨槽位重复? 保真规则是否覆盖? must_keep 是否包含英文?\n"
+                        "需要白底的槽位必须严格纯白无缝背景、单主体，无人物和道具。\n"
+                        "所有角色以商品保真为最高优先级。\n"
+                        "\n"
+                        "最终输出 JSON 对象，顶层键为 prompt_plan，值为数组。"
+                        "每项包含: role,expression_mode,copy_focus,focus_selling_point,reference_image_ids,"
                         "must_keep,must_avoid,background_rule,composition_rule,lighting_rule,fidelity_rule,final_prompt_base。"
                         "reference_image_ids 只能从可用参考图 id 中选择。"
-                        "主图 5 槽位必须职责分开：hero 负责首屏吸引、white_bg 负责纯白标准展示、selling_point 负责单一卖点证明、scene 负责使用场景、detail 负责结构与材质细节。"
-                        "不要把同一个卖点重复铺满全部槽位，不要把详情页叙事写法搬进主图。"
-                        "需要白底的槽位必须严格强调纯白无缝背景、单主体、不要人物和道具。"
-                        "所有角色都必须以商品保真为最高优先级。"
-                        "不要输出思考过程、推理标签、内部规划字段或流程说明。"
-                        "copy_focus、focus_selling_point、must_keep、must_avoid 都只写最终策略结论。"
                         f"{_prompt_matrix_guardrail_text()}"
+                        f"{_product_name_correction_notice(confirmed_copy, analysis_snapshot)}"
                         f"平台：{active_platform_id}。"
                         f"商品 copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
                         f"角色定义：{json.dumps(defaults, ensure_ascii=False)}。"
@@ -266,14 +516,17 @@ class WhataiClient:
                 *self._build_chat_image_parts(supplemental_reference_images or []),
             ],
         }]
+        if prompt_profile == "compact":
+            messages[0]["content"][0]["text"] = compact_prompt
         outcome = self._run_structured_task(
             task="main_planner",
             messages=messages,
-            temperature=0.3,
+            temperature=self.settings.planner_temperature,
             error_key="upstream_llm_error",
             prompt_version=MAIN_PLANNER_PROMPT_VERSION,
             validator=lambda parsed: self._validate_main_planner_result(parsed, asset_plan, reference_images),
             fallback_result={},
+            prompt_profile=prompt_profile,
         )
         parsed = outcome["result"]
         if not isinstance(parsed, dict):
@@ -307,10 +560,32 @@ class WhataiClient:
                 "fidelity_rule": _sanitize_planner_freeform_text(item.get("fidelity_rule")),
                 "final_prompt_base": _sanitize_planner_freeform_text(item.get("final_prompt_base")),
                 "reference_slots": normalize_phrase_list(item.get("reference_slots")),
+                "copy_blocks": self._normalize_main_planner_copy_blocks(item.get("copy_blocks")),
+                "text_density": repair_broken_text(item.get("text_density")),
+                "visual_emphasis": repair_broken_text(item.get("visual_emphasis")),
+                "global_consistency_note": repair_broken_text(item.get("global_consistency_note")),
             }
         if by_role:
             by_role["_planner_meta"] = outcome["meta"]
         return by_role
+
+    def _normalize_main_planner_copy_blocks(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, Any] = {}
+        for key in ("headline", "supporting"):
+            text = sanitize_surface_text(value.get(key))
+            if text:
+                normalized[key] = text
+        for key in ("proof_lines", "matrix_lines"):
+            lines = [
+                item
+                for item in [sanitize_surface_text(entry) for entry in self._normalize_string_list(value.get(key), [])]
+                if item
+            ]
+            if lines:
+                normalized[key] = lines
+        return normalized
 
     def plan_detail_page_narrative(
         self,
@@ -329,6 +604,7 @@ class WhataiClient:
             return {}
 
         copy_language = visible_copy_language_for_platform(active_platform_id)
+        prompt_profile = self.settings.detail_planner_prompt_mode
         platform_copy_instruction = (
             "当前平台属于中文电商站点。"
             f"{' '.join(simplified_chinese_visible_copy_constraints())}"
@@ -343,18 +619,43 @@ class WhataiClient:
                 "text": (
                     "你是 SmartPhoto 的详情页叙事规划 Agent。"
                     "图片 1 是商品多视角参考图拼板，图片 2 是可选的风格/字体参考图拼板。"
-                    "只能返回 JSON 对象，顶层字段必须是 detail_story_brief 和 panel_plan。"
+                    "请严格按以下步骤推理，最终只返回 JSON 对象。\n"
+                    "\n"
+                    "步骤 1 - 产品理解：\n"
+                    "从图片和 confirmed_copy 理解：产品品类、核心卖点、关键参数、差异化优势。\n"
+                    "\n"
+                    "步骤 2 - 叙事弧设计：\n"
+                    "设计 8 段叙事链：trust_overview(信任建立) -> mechanism(原理机制) -> "
+                    "feature_a(核心功能) -> feature_b(附加功能) -> usage_scene(使用场景) -> "
+                    "parameter_proof(参数佐证) -> differentiator(差异化) -> closing_cta(行动号召)。\n"
+                    "\n"
+                    "步骤 3 - 面板分配：\n"
+                    "将 8 段叙事映射到 8 个 panel，确定每个 panel 的 panel_type、visual_truth_mode、"
+                    "product_reference_ids、style_reference_ids。\n"
+                    "8 个 panel 必须包含：至少 2 个信息卡(panel_type 含 card)、至少 1 个场景图、"
+                    "至少 1 个参数/证据面板、至少 1 个细节面板。形成清晰的详情页叙事链。\n"
+                    "visual_truth_mode 只能是 faithful_closeup,mechanism_illustration,scene_reconstruction,parameter_board。\n"
+                    "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释真实性边界。\n"
+                    "\n"
+                    "步骤 4 - 文案撰写：\n"
+                    "为每个 panel 写 copy_lines 和 planner_prompt_base。\n"
+                    "copy_lines 必须是适合直接上图或给用户编辑的最终短文案候选。\n"
+                    "copy_lines 正确示例：[\"高效净化率 99.9%\", \"双层过滤系统\", \"适用面积 30m2\"]。\n"
+                    "copy_lines 错误示例：[\"【产品品类：结构工艺】\", \"【侧边标题】净化系统\"]。copy_lines 中不能出现【】标注。\n"
+                    "Proof、panel_goal、copy_focus、narrative_section、设计证明、布局模板等内部标签只用于对应结构字段，不能出现在 copy_lines 中。\n"
+                    "\n"
+                    "步骤 5 - 约束检查：\n"
+                    "检查：叙事是否连贯？copy_lines 是否有【】标签？visual_truth_mode 是否合理？\n"
+                    "reference_ids 是否都指向有效的参考图？\n"
+                    "\n"
+                    "最终输出 JSON 对象，顶层字段必须是 detail_story_brief 和 panel_plan。"
                     "detail_story_brief 必须且只包含 trust_overview,mechanism,feature_a,feature_b,usage_scene,parameter_proof,differentiator,closing_cta 这 8 个键。"
                     "panel_plan 必须是长度为 8 的数组。"
                     "每项必须包含：panel_id,panel_label,narrative_section,panel_goal,copy_focus,panel_type,layout_template,"
                     "planner_prompt_base,copy_lines,layout_notes,product_reference_ids,style_reference_ids,visual_truth_mode,origin_note。"
-                    "copy_lines 必须是适合直接上图或给用户编辑的最终短文案候选，不要输出思考过程、推理标签、内部规划字段或流程说明。"
-                    "visual_truth_mode 只能是 faithful_closeup,mechanism_illustration,scene_reconstruction,parameter_board。"
-                    "如果 panel 更偏机制示意而非真实局部图，要明确写成 mechanism_illustration，并在 origin_note 解释真实性边界。"
-                    "不要把 Proof、panel_goal、copy_focus、narrative_section、设计证明、布局模板、规则模块、【...】等内部标签写进可见文案。"
-                    "不要让 8 个 panel 都像横向主图，必须形成清晰的详情页叙事链。"
                     f"{platform_copy_instruction}"
                     f"{_prompt_matrix_guardrail_text()}"
+                    f"{_product_name_correction_notice(confirmed_copy, analysis_snapshot)}"
                     f"当前 confirmed_copy：{json.dumps(confirmed_copy, ensure_ascii=False)}。"
                     f"当前 parameter_snapshot：{json.dumps(parameter_snapshot or {}, ensure_ascii=False)}。"
                     f"商品参考图 manifest：{json.dumps(product_manifest, ensure_ascii=False)}。"
@@ -366,6 +667,26 @@ class WhataiClient:
             {"type": "text", "text": "图片 1 是商品多视角参考图拼板。"},
             {"type": "image_url", "image_url": {"url": self._optimized_data_uri(product_grid)}},
         ]
+        compact_text = (
+            "You are SmartPhoto's ecommerce detail-page planner. Return only JSON with "
+            "detail_story_brief and panel_plan. panel_plan must contain exactly 8 items in final display order. "
+            "For each panel return only: panel_id, panel_goal, copy_focus, copy_lines, planner_prompt_base, "
+            "visual_truth_mode, origin_note, product_reference_ids, style_reference_ids. "
+            "Optional: narrative_section or panel_type only when you intentionally override the local rule plan. "
+            "visual_truth_mode must be faithful_closeup, mechanism_illustration, scene_reconstruction, or parameter_board. "
+            "copy_lines must be final visible copy, no brackets, no internal labels, no reasoning. "
+            f"{platform_copy_instruction}"
+            f"{_prompt_matrix_guardrail_text()}"
+            f"{_product_name_correction_notice(confirmed_copy, analysis_snapshot)}"
+            f"confirmed_copy={json.dumps(confirmed_copy, ensure_ascii=False)}; "
+            f"parameter_snapshot={json.dumps(parameter_snapshot or {}, ensure_ascii=False)}; "
+            f"product_manifest={json.dumps(product_manifest, ensure_ascii=False)}; "
+            f"style_manifest={json.dumps(style_manifest, ensure_ascii=False)}; "
+            f"reference_summary={json.dumps((analysis_snapshot or {}).get('reference_summary') or {}, ensure_ascii=False)}; "
+            f"planner_instruction={planner_instruction or 'none'}."
+        )
+        if prompt_profile == "compact":
+            content[0]["text"] = compact_text
         if style_grid is not None:
             content.extend(
                 [
@@ -377,11 +698,12 @@ class WhataiClient:
         outcome = self._run_structured_task(
             task="detail_planner",
             messages=[{"role": "user", "content": content}],
-            temperature=0.4,
+            temperature=self.settings.detail_planner_temperature,
             error_key="upstream_llm_error",
             prompt_version=DETAIL_PLANNER_PROMPT_VERSION,
             validator=lambda parsed: self._validate_detail_planner_result(parsed, product_manifest, style_manifest),
             fallback_result={},
+            prompt_profile=prompt_profile,
         )
         parsed = outcome["result"]
         if not isinstance(parsed, dict):
@@ -394,14 +716,16 @@ class WhataiClient:
         valid_style_ids = {str(item["image_id"]) for item in style_manifest if item.get("image_id")}
         normalized: list[dict[str, Any]] = []
         for item in panel_plan:
+            item_index = len(normalized)
             if not isinstance(item, dict):
                 continue
             panel_id = str(item.get("panel_id") or "").strip()
             if not panel_id:
-                continue
+                panel_id = f"__index_{item_index}"
             normalized.append(
                 {
                     "panel_id": panel_id,
+                    "_index": item_index,
                     "panel_label": str(item.get("panel_label") or "").strip(),
                     "narrative_section": str(item.get("narrative_section") or "").strip(),
                     "panel_goal": str(item.get("panel_goal") or "").strip(),
@@ -635,6 +959,12 @@ class WhataiClient:
                     "global_consistency_note 需要指出本商品哪些结构细节绝对不能画错，尤其适用于局部图。"
                     "不要改写商品事实，不要替代视觉识别。"
                     "headline、supporting、proof_lines、matrix_lines 必须像最终上图文案，不要输出思考过程、推理标签、内部规划字段或流程说明。"
+                    "proof_lines 必须是消费者能直接阅读的商品卖点短标签，如产品特性数值、性能参数、功能名称。"
+                    "proof_lines 正确示例：[\"吸湿量 800ml/天\", \"静音 ≤35dB\", \"便携提手\", \"1.2L 水箱\"]。"
+                    "proof_lines 错误示例（构图指令不是文案）：[\"保留原有丝印\", \"材质特写\", \"可视化大水箱\", \"ABS 材质外壳\"]。"
+                    "proof_lines 错误示例（内部组件命名）：[\"核心物理吸湿环\", \"高颗粒吸附材质\"]——请改用消费者易懂的表达。"
+                    "正确示例：headline=\"高效净化 99.9%\"，proof_lines=[\"双层过滤\",\"低噪运行\"]。"
+                    "错误示例：headline=\"【主标题】高效净化\"，proof_lines=[\"【卖点】双层过滤\"]——绝对不能在可见文案中出现【】标注。"
                     f"{_prompt_matrix_guardrail_text()}"
                     f"analysis_snapshot：{json.dumps(analysis_snapshot or {}, ensure_ascii=False)}。"
                     f"confirmed_copy：{json.dumps(confirmed_copy or {}, ensure_ascii=False)}。"
@@ -666,10 +996,10 @@ class WhataiClient:
             if not slot_id:
                 continue
             by_slot[slot_id] = {
-                "headline": repair_broken_text(item.get("headline")),
-                "supporting": repair_broken_text(item.get("supporting")),
-                "proof_lines": self._normalize_string_list(item.get("proof_lines"), []),
-                "matrix_lines": self._normalize_string_list(item.get("matrix_lines"), []),
+                "headline": sanitize_surface_text(item.get("headline")),
+                "supporting": sanitize_surface_text(item.get("supporting")),
+                "proof_lines": [s for s in [sanitize_surface_text(l) for l in self._normalize_string_list(item.get("proof_lines"), [])] if s],
+                "matrix_lines": [s for s in [sanitize_surface_text(l) for l in self._normalize_string_list(item.get("matrix_lines"), [])] if s],
                 "text_density": repair_broken_text(item.get("text_density")),
                 "visual_emphasis": repair_broken_text(item.get("visual_emphasis")),
                 "global_consistency_note": repair_broken_text(item.get("global_consistency_note")),
@@ -839,18 +1169,9 @@ class WhataiClient:
                 {key: self._regenerated_text(current_copy.get(key, ""), instruction) for key in targets}
             )
 
-        prompt = (
-            f"你是 SmartPhoto 的文案重写器。请基于现有文案，只重写字段 {targets}。"
-            f"要求：{instruction or '保持电商风格'}。"
-            "返回结果必须是可直接给用户编辑或给生图参考的最终候选，不要输出思考过程、推理标签、内部规划字段或流程说明。"
-            f"{_prompt_matrix_guardrail_text()}"
-        )
-        payload = {
-            "model": self.settings.whatai_chat_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.5,
-        }
-        self._post_chat_json(payload, "upstream_llm_error")
+        # NOTE: A previous LLM call was made here but its response was never used.
+        # The rule-based _regenerated_text below was always the actual output.
+        # Removed the dead LLM call to eliminate wasted latency (1-5s per invocation).
         return sanitize_generated_copy_fields(
             {key: self._regenerated_text(current_copy.get(key, ""), instruction) for key in targets}
         )
@@ -1130,7 +1451,7 @@ class WhataiClient:
                 502,
             )
         headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
-        files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:2]]
+        files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:8]]
         data = {
             "model": self.settings.whatai_image_model,
             "prompt": prompt,
@@ -1498,6 +1819,7 @@ class WhataiClient:
         prompt_version: str,
         validator,
         fallback_result: dict[str, Any],
+        prompt_profile: str | None = None,
     ) -> dict[str, Any]:
         provider = self.llm_router.provider_for_task(task)
         model = self.llm_router.model_for_task(task)
@@ -1517,6 +1839,8 @@ class WhataiClient:
             "planner_transport_fallback_reason": None,
             "rate_limit_retry_count": 0,
             "rate_limit_final_source": None,
+            "prompt_profile": prompt_profile,
+            "prompt_input_chars": self._estimate_prompt_input_chars(messages),
         }
         try:
             completion = self.llm_router.complete_json_with_meta(
@@ -1541,6 +1865,10 @@ class WhataiClient:
         if not errors:
             meta["source"] = "primary"
             return {"result": parsed, "meta": meta}
+        if not self._should_repair_validation_errors(task, errors):
+            meta["source"] = "primary"
+            meta["validation_ignored_count"] = len(errors)
+            return {"result": parsed, "meta": meta}
         if task in {"main_planner", "detail_planner"} and int(meta.get("planner_attempt_count") or 0) > 1:
             meta["source"] = "fallback"
             return {"result": fallback_result, "meta": meta}
@@ -1552,17 +1880,38 @@ class WhataiClient:
                 "content": json.dumps(parsed or {}, ensure_ascii=False),
             }
         )
-        repair_messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "上一个 JSON 输出未通过结构校验。"
-                    "请只根据下列错误清单修正 JSON，并保持原任务语义不变。"
-                    "不要补充解释，不要输出 markdown，只返回修正后的 JSON 对象。"
-                    f"错误清单：{json.dumps(errors, ensure_ascii=False)}"
-                ),
-            }
-        )
+        # Use a targeted repair prompt when the only errors are planning-annotation
+        # contamination — a specific message is more effective than a generic one.
+        annotation_errors = [e for e in errors if e.get("rule") in ("planning_annotation", "instruction_leakage")]
+        if annotation_errors:
+            repair_content = (
+                "你的输出中有字段包含了不应出现的内���，这必须修正。\n"
+            )
+            has_annotation = any(e.get("rule") == "planning_annotation" for e in annotation_errors)
+            has_leakage = any(e.get("rule") == "instruction_leakage" for e in annotation_errors)
+            if has_annotation:
+                repair_content += (
+                    "问题1：可见文案字段混入了【】规划标注格式。规划标注只用于内部推理，"
+                    "绝对不能出现在 copy_lines / headline / proof_lines / matrix_lines 等可见文案字段里。\n"
+                )
+            if has_leakage:
+                repair_content += (
+                    "问题2：must_keep 或 fidelity_rule 中包含了具体英文单词或品牌名。"
+                    "图片模型会把这些英文渲染到图上。请改为抽象的中文视觉描述"
+                    "（如'产品本体原有丝印保持不变'），不要写出具体英文单词。\n"
+                )
+            repair_content += (
+                "请只修正以下字段，保持其他内容不变，直接返回修正后的完整 JSON：\n"
+                + "\n".join(f"- {e['field']}：{e['message']}" for e in annotation_errors)
+            )
+        else:
+            repair_content = (
+                "上一个 JSON 输出未通过结构校验。"
+                "请只根据下列错误清单修正 JSON，并保持原任务语义��变。"
+                "不要补充解释，不要输出 markdown，只返回修正后的 JSON 对象。"
+                f"错误清单：{json.dumps(errors, ensure_ascii=False)}"
+            )
+        repair_messages.append({"role": "user", "content": repair_content})
         try:
             repaired_completion = self.llm_router.complete_json_with_meta(
                 task=task,
@@ -1593,6 +1942,42 @@ class WhataiClient:
         meta["repair_round"] = 1
         meta["source"] = "fallback"
         return {"result": fallback_result, "meta": meta}
+
+    def _estimate_prompt_input_chars(self, messages: list[dict[str, Any]]) -> int:
+        def _count(value: Any) -> int:
+            if isinstance(value, str):
+                return 0 if value.startswith("data:image/") else len(value)
+            if isinstance(value, list):
+                return sum(_count(item) for item in value)
+            if isinstance(value, dict):
+                return sum(_count(item) for item in value.values())
+            return 0
+
+        return _count(messages)
+
+    def _should_repair_validation_errors(self, task: str, errors: list[dict[str, Any]]) -> bool:
+        if task not in {"main_planner", "detail_planner"}:
+            return True
+        if self.settings.planner_repair_strictness != "critical_only":
+            return True
+        for error in errors:
+            field = str(error.get("field") or "")
+            rule = str(error.get("rule") or "")
+            if rule in {"json_object", "coverage", "unique", "subset", "planning_annotation", "instruction_leakage", "length"}:
+                return True
+            if task == "main_planner" and field == "prompt_plan" and rule == "list":
+                return True
+            if task == "main_planner" and field.startswith("prompt_plan[") and rule == "object":
+                return True
+            if task == "detail_planner" and field == "panel_plan" and rule in {"list", "length"}:
+                return True
+            if task == "detail_planner" and field.startswith("panel_plan[") and rule == "object":
+                return True
+            if task == "detail_planner" and field.endswith("visual_truth_mode") and rule == "enum":
+                return True
+            if task == "main_planner" and field.endswith(".role") and rule == "enum":
+                return True
+        return False
 
     def _should_use_planner_transport_fallback(self, exc: AppError) -> bool:
         return bool(exc.retryable or exc.http_status in {429, 502, 503, 504})
@@ -1712,6 +2097,28 @@ class WhataiClient:
                 errors.append(self._validation_error(key, "list", f"{key} 必须是数组", value))
         return errors
 
+    def _validate_analysis_parameter_combined_result(
+        self,
+        parsed: Any,
+        category_catalog: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return [self._validation_error("$", "json_object", "combined analysis must return a JSON object", parsed)]
+        errors: list[dict[str, Any]] = []
+        analysis_snapshot = parsed.get("analysis_snapshot")
+        parameter_snapshot = parsed.get("parameter_snapshot")
+        if not isinstance(analysis_snapshot, dict):
+            errors.append(self._validation_error("analysis_snapshot", "required_object", "analysis_snapshot is required", analysis_snapshot))
+        else:
+            for error in self._validate_analysis_result(analysis_snapshot, category_catalog):
+                errors.append({**error, "field": f"analysis_snapshot.{error.get('field')}"})
+        if not isinstance(parameter_snapshot, dict):
+            errors.append(self._validation_error("parameter_snapshot", "required_object", "parameter_snapshot is required", parameter_snapshot))
+        else:
+            for error in self._validate_parameter_result(parameter_snapshot):
+                errors.append({**error, "field": f"parameter_snapshot.{error.get('field')}"})
+        return errors
+
     def _validate_main_planner_result(
         self,
         parsed: Any,
@@ -1741,6 +2148,33 @@ class WhataiClient:
             seen_roles.add(role)
             if not repair_broken_text(item.get("expression_mode")):
                 errors.append(self._validation_error(f"prompt_plan[{index}].expression_mode", "required", "expression_mode 不能为空", item.get("expression_mode")))
+            copy_blocks = item.get("copy_blocks")
+            if copy_blocks is not None:
+                if not isinstance(copy_blocks, dict):
+                    errors.append(self._validation_error(f"prompt_plan[{index}].copy_blocks", "object", "copy_blocks must be an object", copy_blocks))
+                else:
+                    for text_key in ("headline", "supporting"):
+                        text_value = copy_blocks.get(text_key)
+                        if isinstance(text_value, str) and has_planning_annotation(text_value):
+                            errors.append(self._validation_error(
+                                f"prompt_plan[{index}].copy_blocks.{text_key}",
+                                "planning_annotation",
+                                f"{text_key} must not contain planning annotations",
+                                text_value,
+                            ))
+                    for list_key in ("proof_lines", "matrix_lines"):
+                        list_value = copy_blocks.get(list_key)
+                        if list_value is not None and not isinstance(list_value, list):
+                            errors.append(self._validation_error(f"prompt_plan[{index}].copy_blocks.{list_key}", "list", f"{list_key} must be a list", list_value))
+                        elif isinstance(list_value, list):
+                            contaminated = [line for line in list_value if isinstance(line, str) and has_planning_annotation(line)]
+                            if contaminated:
+                                errors.append(self._validation_error(
+                                    f"prompt_plan[{index}].copy_blocks.{list_key}",
+                                    "planning_annotation",
+                                    f"{list_key} must not contain planning annotations",
+                                    contaminated,
+                                ))
             copy_focus = repair_broken_text(item.get("copy_focus"))
             if not copy_focus:
                 errors.append(self._validation_error(f"prompt_plan[{index}].copy_focus", "required", "copy_focus 不能为空", item.get("copy_focus")))
@@ -1753,6 +2187,25 @@ class WhataiClient:
                 invalid_ids = [value for value in reference_ids if str(value) not in valid_image_ids]
                 if invalid_ids:
                     errors.append(self._validation_error(f"prompt_plan[{index}].reference_image_ids", "subset", "reference_image_ids 只能引用可用商品图", invalid_ids))
+            # --- Detect instruction leakage: must_keep should not contain specific English words ---
+            must_keep_entries = item.get("must_keep") or []
+            if isinstance(must_keep_entries, list):
+                for entry in must_keep_entries:
+                    if isinstance(entry, str) and re.search(r"[a-zA-Z]{3,}", entry):
+                        errors.append(self._validation_error(
+                            f"prompt_plan[{index}].must_keep", "instruction_leakage",
+                            f"must_keep 中包含了具体英文单词 '{entry}'，图片模型可能将其渲染到图上。"
+                            "请改为抽象的中文视觉描述（如'产品本体原有丝印保持不变'），不要写出具体英文。",
+                            entry,
+                        ))
+            fidelity_val = item.get("fidelity_rule")
+            if isinstance(fidelity_val, str) and re.search(r"[a-zA-Z]{3,}", fidelity_val):
+                errors.append(self._validation_error(
+                    f"prompt_plan[{index}].fidelity_rule", "instruction_leakage",
+                    f"fidelity_rule 中包含了具体英文单词，图片模型可能将其渲染到图上。"
+                    "请改为抽象保真约束（如'产品本体原有丝印和标识保持不变'），不要写出具体英文。",
+                    fidelity_val,
+                ))
         if seen_roles != expected_roles:
             errors.append(self._validation_error("prompt_plan", "coverage", "prompt_plan 必须完整覆盖当前主图槽位", {"expected": sorted(expected_roles), "actual": sorted(seen_roles)}))
         if len(set(focus_values)) <= 2 and len(focus_values) >= 4:
@@ -1817,6 +2270,26 @@ class WhataiClient:
                 invalid_ids = [value for value in style_ids if str(value) not in valid_style_ids]
                 if invalid_ids:
                     errors.append(self._validation_error(f"panel_plan[{index}].style_reference_ids", "subset", "style_reference_ids 只能引用风格图", invalid_ids))
+            # Detect planning-annotation contamination in visible-copy fields.
+            copy_lines = item.get("copy_lines", [])
+            if isinstance(copy_lines, list):
+                contaminated = [line for line in copy_lines if isinstance(line, str) and has_planning_annotation(line)]
+                if contaminated:
+                    errors.append(self._validation_error(
+                        f"panel_plan[{index}].copy_lines",
+                        "planning_annotation",
+                        f"copy_lines 是最终可见文案，不能包含【】规划标注。请将以下项改写为干净的上图短句：{contaminated}",
+                        contaminated,
+                    ))
+            for vis_field in ("panel_goal", "copy_focus"):
+                vis_val = str(item.get(vis_field) or "")
+                if vis_val and has_planning_annotation(vis_val):
+                    errors.append(self._validation_error(
+                        f"panel_plan[{index}].{vis_field}",
+                        "planning_annotation",
+                        f"{vis_field} 不能包含【】规划标注，请写清晰的中文策略短语",
+                        vis_val,
+                    ))
         if len(set(narrative_sections)) <= 3:
             errors.append(self._validation_error("panel_plan.narrative_section", "sequence_diversity", "详情页不能退化成重复主图，8 个 panel 需要形成叙事链", narrative_sections))
         return errors
@@ -1902,6 +2375,26 @@ class WhataiClient:
                 value = item.get(key)
                 if value is not None and not isinstance(value, list):
                     errors.append(self._validation_error(f"copy_design_plan[{index}].{key}", "list", f"{key} 必须是数组", value))
+            # Detect planning-annotation contamination in visible-copy fields.
+            for txt_key in ("headline", "supporting"):
+                txt_val = str(item.get(txt_key) or "")
+                if txt_val and has_planning_annotation(txt_val):
+                    errors.append(self._validation_error(
+                        f"copy_design_plan[{index}].{txt_key}",
+                        "planning_annotation",
+                        f"{txt_key} 不能包含【】规划标注，直接写最终上图短句",
+                        txt_val,
+                    ))
+            for list_key in ("proof_lines", "matrix_lines"):
+                lines = item.get(list_key) or []
+                bad = [ln for ln in lines if isinstance(ln, str) and has_planning_annotation(ln)]
+                if bad:
+                    errors.append(self._validation_error(
+                        f"copy_design_plan[{index}].{list_key}",
+                        "planning_annotation",
+                        f"{list_key} 中有项包含【】规划标注，请将以下项改写为干净的短标签：{bad}",
+                        bad,
+                    ))
         return errors
 
     def _validate_visible_text_language_result(self, parsed: Any) -> list[dict[str, Any]]:

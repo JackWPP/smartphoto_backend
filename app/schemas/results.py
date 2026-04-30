@@ -88,6 +88,8 @@ class DetailPanelAssetItem(BaseModel):
     carry_forward: bool = Field(default=False, description="该 panel 是否为从旧版本沿用而来。")
     source_version_no: int | None = Field(default=None, description="若为沿用 panel，来源版本号。")
     fidelity_validation_status: str | None = Field(default=None, description="保真校验状态。")
+    is_preview: bool = Field(default=False, description="是否为预览版。")
+    preview_watermarked: bool = Field(default=False, description="预览版是否已嵌入水印。")
 
 
 class DetailStitchedAssetItem(BaseModel):
@@ -99,6 +101,8 @@ class DetailStitchedAssetItem(BaseModel):
     width: int = Field(description="图片宽度。")
     height: int = Field(description="图片高度。")
     version_no: int = Field(description="结果版本号。")
+    is_preview: bool = Field(default=False, description="是否为预览版。")
+    preview_watermarked: bool = Field(default=False, description="预览版是否已嵌入水印。")
 
 
 class DetailResultsData(BaseModel):

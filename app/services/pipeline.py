@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
+import hashlib
 import tempfile
 import time
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,10 @@ from PIL import Image
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from app.contracts.parameter import ParameterSnapshotPayload
+from app.contracts.strategy import AssetPlanItem, StrategyPreviewPayload
+from app.contracts.detail_strategy import DetailPanelPlanItem, DetailStrategyPreviewPayload
+from app.contracts.validation import validate_contract_warn
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.models.asset import AssetModel
@@ -29,29 +34,78 @@ from app.services.copy_normalization import (
     normalize_copy_payload,
     normalize_copy_text,
 )
+from app.services.copy_resolution import apply_analysis_defaults_with_attribution, resolve_session_copy
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
-    detail_strategy_preview_input_hash,
-    detail_strategy_preview_needs_rebuild,
-    build_detail_reference_grids,
     build_detail_strategy_preview,
     compose_detail_panel_prompt,
 )
-from app.services.jobs import append_job_event, now_utc, update_job_status
+from app.services.jobs import append_job_event, create_job, now_utc, update_job_status
 from app.services.locking import release_locks
-from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy, merge_parameter_snapshot_into_copy
+from app.services.parameter_snapshot import apply_parameter_snapshot_to_copy
+from app.services.pipeline_orchestration import (
+    apply_main_gallery_post_validations as orchestration_apply_main_gallery_post_validations,
+    build_detail_reference_inputs,
+    execute_detail_generation_flow,
+    execute_main_generation_flow,
+    execute_text_edit_flow,
+    finalize_detail_rendered_panel,
+    finalize_detail_result_payload,
+    finalize_main_rendered_asset,
+    finalize_main_result_payload,
+    finalize_text_edit_result_payload,
+    load_generated_asset_reference,
+    plan_detail_generation_strategy,
+    plan_main_generation_strategy,
+    prepare_detail_generation_inputs,
+    prepare_detail_plan,
+    prepare_detail_render_spec,
+    prepare_main_generation_inputs,
+    prepare_main_plan,
+    prepare_main_render_spec,
+    prepare_text_edit_inputs,
+    project_detail_panel_events,
+    project_main_asset_events,
+    render_single_detail_panel_sync,
+    render_single_main_asset_sync,
+    resolve_detail_reference_images,
+)
+from app.services.pipeline_persistence import (
+    clone_asset_for_version,
+    create_failed_main_placeholder,
+    persist_detail_version_outputs,
+    persist_main_version_outputs,
+    persist_text_edit_version_outputs,
+    resolve_regenerate_carry_forward_version,
+    save_detail_rendered_panel,
+    save_main_rendered_asset,
+    save_stitched_detail_asset,
+    stitch_detail_panels,
+    version_assets,
+)
 from app.services.prompts import compose_prompt
 from app.services.repo import list_visible_prompt_presets_by_ids
-from app.services.reference_images import build_reference_manifest, load_reference_images, select_reference_images_for_role
+from app.services.reference_images import LoadedReferenceImage, load_reference_images, select_reference_images_for_role
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter
-from app.services.strategy import build_strategy_preview, strategy_preview_input_hash
 from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
 from app.services.user_accounts import create_job_completion_notification, refresh_session_search_cache, update_session_last_generated_at
 from app.services.white_bg import strengthen_white_bg_instruction, validate_white_background
 from app.services.prompt_safety import sanitize_generated_copy_fields
+from app.services.pipeline_rendering import (
+    generate_image_with_asset_retry as rendering_generate_image_with_asset_retry,
+    download_single_render_spec as rendering_download_single_render_spec,
+    materialize_render_specs as rendering_materialize_render_specs,
+    render_assets_concurrently as rendering_render_assets_concurrently,
+    render_detail_panels_concurrently as rendering_render_detail_panels_concurrently,
+    rescue_failed_render_spec as rendering_rescue_failed_render_spec,
+    submit_image_request_with_retry as rendering_submit_image_request_with_retry,
+    submit_render_specs as rendering_submit_render_specs,
+    submit_single_render_spec as rendering_submit_single_render_spec,
+)
+from app.services.pipeline_review import dispatch_quality_review_job, execute_quality_review_flow, run_quality_review_flow
 
 COPY_TARGETS = {
     "headline",
@@ -109,6 +163,70 @@ def _parameter_attachments(db: Session, session_id: str) -> list[ParameterAttach
     )
 
 
+def _parameter_input_image_ids(images: list[SessionImageModel]) -> list[str]:
+    return [str(image.id) for image in images]
+
+
+def _parameter_input_hash(images: list[SessionImageModel]) -> str:
+    payload = [
+        {
+            "id": image.id,
+            "slot_type": image.slot_type,
+            "display_order": image.display_order,
+            "source_url": image.source_url,
+            "width": image.width,
+            "height": image.height,
+            "mime_type": image.mime_type,
+            "file_size": image.file_size,
+        }
+        for image in images
+    ]
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _mark_parameter_snapshot_fresh(
+    snapshot: dict[str, Any],
+    *,
+    session: SessionModel,
+    images: list[SessionImageModel],
+    source_stage: str,
+    source_job_id: str,
+) -> dict[str, Any]:
+    marked = dict(snapshot or {})
+    marked.update(
+        {
+            "source_stage": source_stage,
+            "analysis_version": session.analysis_version,
+            "input_image_ids": _parameter_input_image_ids(images),
+            "input_hash": _parameter_input_hash(images),
+            "parameter_source_job_id": source_job_id,
+        }
+    )
+    return marked
+
+
+def _parameter_snapshot_is_fresh(session: SessionModel, images: list[SessionImageModel]) -> bool:
+    snapshot = session.parameter_snapshot
+    if not isinstance(snapshot, dict) or not snapshot:
+        return False
+    if snapshot.get("source_stage") != "analysis_combined":
+        return False
+    if int(snapshot.get("analysis_version") or -1) != int(session.analysis_version or 0):
+        return False
+    return str(snapshot.get("input_hash") or "") == _parameter_input_hash(images)
+
+
+def _parameter_applied_copy_fields(confirmed_copy: dict[str, Any] | None) -> dict[str, Any]:
+    copy_data = confirmed_copy or {}
+    return {
+        "hero_scene": copy_data.get("hero_scene", ""),
+        "core_selling_points": copy_data.get("core_selling_points", []),
+        "key_parameters": copy_data.get("key_parameters", []),
+        "product_advantages": copy_data.get("product_advantages", []),
+    }
+
+
 def _copy_regenerate_source_text(current_copy: dict[str, Any], target: str) -> str:
     normalized = normalize_copy_payload(current_copy)
     if target == "key_parameters":
@@ -153,9 +271,11 @@ def _session_prompt_overrides(db: Session, session_id: str) -> list[dict[str, An
 
 
 def _resolved_copy_for_session(db: Session, session: SessionModel, *, include_parameter_snapshot: bool = True) -> dict[str, Any]:
-    copy_data = normalize_copy_payload(session.confirmed_copy or {})
-    if include_parameter_snapshot and session.parameter_snapshot:
-        copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
+    resolution = resolve_session_copy(
+        session.confirmed_copy or {},
+        parameter_snapshot=session.parameter_snapshot if include_parameter_snapshot else None,
+    )
+    copy_data = resolution["copy"]
     preset_id = copy_data.get("style_preset_id")
     if preset_id:
         presets = list_visible_prompt_presets_by_ids(db, [str(preset_id)], user_id=session.user_id or "")
@@ -278,17 +398,8 @@ def _apply_analysis_defaults_to_copy(
     confirmed_copy: dict[str, Any] | None,
     snapshot: dict[str, Any],
 ) -> dict[str, Any]:
-    normalized = normalize_copy_payload(confirmed_copy or {})
     defaults = _analysis_defaults_from_snapshot(snapshot)
-
-    for field in ("product_name", "category", "headline", "hero_scene", "selling_points", "usage_scenes", "specs", "style_choice"):
-        if not normalized.get(field) and defaults.get(field):
-            normalized[field] = defaults[field]
-    for field in ("core_selling_points", "key_parameters", "product_advantages"):
-        if not normalized.get(field) and defaults.get(field):
-            normalized[field] = defaults[field]
-
-    return normalize_copy_payload(normalized)
+    return apply_analysis_defaults_with_attribution(confirmed_copy, defaults)
 
 
 def run_analysis_job(db: Session, job_id: str) -> None:
@@ -333,8 +444,22 @@ def run_analysis_job(db: Session, job_id: str) -> None:
         load_ms,
     )
 
+    settings = get_settings()
     analyze_started_at = time.perf_counter()
-    snapshot = client.analyze_images(loaded_images, session.active_platform_id, db=db)
+    combined_result: dict[str, Any] | None = None
+    if settings.parameter_extraction_mode == "combined" and hasattr(client, "analyze_images_with_parameters"):
+        combined_result = client.analyze_images_with_parameters(
+            loaded_images,
+            session.active_platform_id,
+            confirmed_copy=_resolved_copy_for_session(db, session, include_parameter_snapshot=False),
+            db=db,
+        )
+        snapshot = combined_result.get("analysis_snapshot") if isinstance(combined_result, dict) else None
+        if not isinstance(snapshot, dict):
+            snapshot = client.analyze_images(loaded_images, session.active_platform_id, db=db)
+            combined_result = None
+    else:
+        snapshot = client.analyze_images(loaded_images, session.active_platform_id, db=db)
     analyze_ms = int((time.perf_counter() - analyze_started_at) * 1000)
     logger.info(
         "analysis_job upstream analysis completed: job_id=%s session_id=%s analyze_ms=%s",
@@ -347,11 +472,25 @@ def run_analysis_job(db: Session, job_id: str) -> None:
     update_job_status(db, job, status="running", progress=80, stage="finalizing")
     append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 80, "stage": "finalizing"})
 
-    session.analysis_snapshot = snapshot
-    session.confirmed_copy = _apply_analysis_defaults_to_copy(session.confirmed_copy, snapshot)
-    refresh_session_search_cache(session)
     session.analysis_version = (session.analysis_version or 0) + 1
     session.analysis_updated_at = now_utc()
+    session.analysis_snapshot = snapshot
+    session.confirmed_copy = _apply_analysis_defaults_to_copy(session.confirmed_copy, snapshot)
+    parameter_snapshot = None
+    if isinstance(combined_result, dict) and isinstance(combined_result.get("parameter_snapshot"), dict):
+        parameter_snapshot = _mark_parameter_snapshot_fresh(
+            combined_result["parameter_snapshot"],
+            session=session,
+            images=images,
+            source_stage="analysis_combined",
+            source_job_id=job.id,
+        )
+        session.parameter_snapshot = parameter_snapshot
+        session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, parameter_snapshot, overwrite=True)
+        session.latest_parameter_job_id = job.id
+        session.strategy_preview = None
+        session.detail_strategy_preview = None
+    refresh_session_search_cache(session)
 
     ensure_session_transition(session.status, "analyzed")
     session.status = "analyzed"
@@ -364,6 +503,15 @@ def run_analysis_job(db: Session, job_id: str) -> None:
         "analysis_updated_at": session.analysis_updated_at.isoformat() if session.analysis_updated_at else None,
         "latest_analysis_job_id": session.latest_analysis_job_id,
     }
+    if parameter_snapshot is not None:
+        result_payload.update(
+            {
+                "parameter_snapshot": parameter_snapshot,
+                "parameter_source_job_id": job.id,
+                "latest_parameter_job_id": session.latest_parameter_job_id,
+                "applied_copy_fields": _parameter_applied_copy_fields(session.confirmed_copy),
+            }
+        )
     update_job_status(db, job, status="succeeded", progress=100, stage="done", result_payload=result_payload)
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
     logger.info(
@@ -389,6 +537,27 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
     append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
 
     image_attachments = [attachment for attachment in attachments if attachment.mime_type.startswith("image/")]
+    if get_settings().parameter_extraction_mode == "combined" and not attachments and _parameter_snapshot_is_fresh(session, session_images):
+        snapshot = session.parameter_snapshot or {}
+        session.latest_parameter_job_id = job.id
+        session.current_step = max(session.current_step, 3)
+        update_job_status(
+            db,
+            job,
+            status="succeeded",
+            progress=100,
+            stage="done",
+            result_payload={
+                "parameter_snapshot": snapshot,
+                "reused_parameter_snapshot": True,
+                "parameter_source_job_id": snapshot.get("parameter_source_job_id"),
+                "applied_copy_fields": _parameter_applied_copy_fields(session.confirmed_copy),
+                "overwrite_mode": "replace_all",
+            },
+        )
+        append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
+        return
+
     loaded_product_images = load_reference_images(session_images, storage=storage, max_edge=1280) if session_images else []
     loaded_images = load_reference_images(image_attachments, storage=storage, max_edge=1280) if image_attachments else []
     file_attachments = []
@@ -415,8 +584,14 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
         file_attachments=file_attachments,
     )
 
-    session.parameter_snapshot = snapshot
-    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, snapshot, overwrite=True)
+    session.parameter_snapshot = _mark_parameter_snapshot_fresh(
+        snapshot,
+        session=session,
+        images=session_images,
+        source_stage="parameter_extract",
+        source_job_id=job.id,
+    )
+    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
     session.latest_parameter_job_id = job.id
     session.current_step = max(session.current_step, 3)
     session.strategy_preview = None
@@ -430,13 +605,10 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
         progress=100,
         stage="done",
         result_payload={
-            "parameter_snapshot": snapshot,
-            "applied_copy_fields": {
-                "hero_scene": session.confirmed_copy.get("hero_scene", ""),
-                "core_selling_points": session.confirmed_copy.get("core_selling_points", []),
-                "key_parameters": session.confirmed_copy.get("key_parameters", []),
-                "product_advantages": session.confirmed_copy.get("product_advantages", []),
-            },
+            "parameter_snapshot": session.parameter_snapshot,
+            "reused_parameter_snapshot": False,
+            "parameter_source_job_id": job.id,
+            "applied_copy_fields": _parameter_applied_copy_fields(session.confirmed_copy),
             "overwrite_mode": "replace_all",
         },
     )
@@ -471,160 +643,69 @@ def run_regenerate_copy_job(db: Session, job_id: str) -> None:
     append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
 
 
-def _prepare_assets_plan(db: Session, job: JobModel, strategy_preview: dict, session: SessionModel) -> list[dict]:
-    payload = job.input_payload or {}
+_EDIT_CONSTRAINT_CHANGE_MAP: dict[str, str] = {
+    "pure_white": "背景必须是纯白无缝背景，不要任何道具或场景",
+    "dark": "背景采用深色或纯黑色调",
+    "real_scene": "背景围绕真实使用场景搭建",
+    "gradient": "背景采用柔和渐变色调",
+    "no_text": "画面上不要出现任何营销文字",
+    "minimal_text": "画面上文案控制在极少量",
+    "dense_text": "画面上增加文案密度",
+    "enlarge": "产品主体占比增大",
+    "shrink": "产品主体适当缩小",
+}
 
-    if job.job_type == "regenerate_asset":
-        plan_item = payload["asset_plan_item"]
-        base_by_slot = {
-            str(item.get("slot_id") or item.get("role")): item
-            for item in strategy_preview.get("asset_plan", [])
-            if isinstance(item, dict) and (item.get("slot_id") or item.get("role"))
-        }
-        base = base_by_slot.get(str(plan_item.get("slot_id") or plan_item.get("role") or ""), {})
-        return [{**base, **plan_item}]
+_EDIT_CONSTRAINT_KEEP_MAP: dict[str, str] = {
+    "product_identity": "必须严格保持产品外观、颜色、结构完全一致",
+    "composition": "保持当前构图布局不变",
+    "style": "保持当前整体风格不变",
+    "text": "保持当前文案内容和位置不变",
+    "background": "保持当前背景不变",
+    "color": "保持产品颜色完全一致",
+}
 
-    plan = strategy_preview.get("asset_plan") or []
-    if not plan:
-        plan = build_strategy_preview(
-            session.confirmed_copy or {},
-            session.active_platform_id or "temu",
-            db=db,
-            parameter_snapshot=session.parameter_snapshot or {},
-            planner_instruction=(strategy_preview or {}).get("planner_instruction"),
-            slot_preferences=(strategy_preview or {}).get("slot_preferences") or [],
-        ).get("asset_plan", [])
-    requested_slot_ids = {
-        str(value).strip()
-        for value in payload.get("slot_ids", [])
-        if str(value).strip()
-    }
-    if requested_slot_ids:
-        plan = [
-            item
-            for item in plan
-            if str(item.get("slot_id") or item.get("role") or "").strip() in requested_slot_ids
-        ]
-    return sorted(plan, key=lambda item: int(item.get("display_order") or 0))
+_EDIT_CONSTRAINT_REMOVE_MAP: dict[str, str] = {
+    "visible_text": "移除画面上所有营销文字",
+    "watermark": "移除所有水印",
+    "background_elements": "移除背景中的所有装饰和道具元素",
+    "reflection": "移除底部反射效果",
+    "shadow": "移除所有阴影效果",
+}
 
 
-def _mark_superseded_assets(
-    db: Session,
-    session_id: str,
-    version_no: int,
-    *,
-    asset_family: str = "main_gallery",
-    include_all: bool = True,
-    asset_ids: Iterable[str] | None = None,
-) -> None:
-    query = db.query(AssetModel).filter(
-        AssetModel.session_id == session_id,
-        AssetModel.version_no == version_no,
-        AssetModel.asset_family == asset_family,
-        AssetModel.status == "ready",
-        AssetModel.visibility_status == "visible",
-    )
-    if not include_all and asset_ids:
-        query = query.filter(AssetModel.id.in_(list(asset_ids)))
-    for asset in query.all():
-        asset.status = "superseded"
+def _merge_edit_constraints_into_instruction(
+    instruction: str | None,
+    edit_constraints: dict,
+) -> str:
+    """Convert structured edit_constraints into enhanced instruction text."""
+    parts: list[str] = []
+    if instruction and str(instruction).strip():
+        parts.append(str(instruction).strip())
 
+    keep = edit_constraints.get("keep") or []
+    change = edit_constraints.get("change") or {}
+    remove = edit_constraints.get("remove") or []
 
-def _version_assets(
-    db: Session,
-    session_id: str,
-    version_no: int,
-    *,
-    asset_family: str = "main_gallery",
-) -> list[AssetModel]:
-    return (
-        db.query(AssetModel)
-        .filter(
-            AssetModel.session_id == session_id,
-            AssetModel.version_no == version_no,
-            AssetModel.asset_family == asset_family,
-            AssetModel.status == "ready",
-            AssetModel.visibility_status == "visible",
-        )
-        .order_by(AssetModel.display_order.asc())
-        .all()
-    )
+    for item in keep:
+        mapped = _EDIT_CONSTRAINT_KEEP_MAP.get(str(item).strip())
+        if mapped:
+            parts.append(mapped)
 
+    for key, value in change.items():
+        key_s = str(key).strip()
+        value_s = str(value).strip()
+        mapped = _EDIT_CONSTRAINT_CHANGE_MAP.get(value_s)
+        if mapped:
+            parts.append(mapped)
+        elif value_s:
+            parts.append(f"{key_s}改为{value_s}")
 
-def _resolve_regenerate_carry_forward_version(
-    db: Session,
-    *,
-    session_id: str,
-    asset_family: str,
-    parent_asset_id: str | None,
-    last_version: int,
-) -> int:
-    if last_version <= 0:
-        raise AppError("invalid_request", "regenerate job requires an existing result version", 400)
-    if not parent_asset_id:
-        raise AppError("invalid_request", "regenerate job missing parent_asset_id", 400)
+    for item in remove:
+        mapped = _EDIT_CONSTRAINT_REMOVE_MAP.get(str(item).strip())
+        if mapped:
+            parts.append(mapped)
 
-    parent_asset = (
-        db.query(AssetModel)
-        .filter(
-            AssetModel.id == parent_asset_id,
-            AssetModel.session_id == session_id,
-            AssetModel.asset_family == asset_family,
-        )
-        .one_or_none()
-    )
-    if not parent_asset:
-        raise AppError("invalid_request", "parent asset not found for regenerate job", 400)
-
-    return parent_asset.version_no
-
-
-def _clone_asset_for_version(
-    source_asset: AssetModel,
-    *,
-    job_id: str,
-    round_no: int,
-    version_no: int,
-    edit_instruction: str | None,
-) -> AssetModel:
-    snapshot = dict(source_asset.generation_snapshot or {})
-    snapshot.update(
-        {
-            "carry_forward": True,
-            "source_asset_id": source_asset.id,
-            "source_version_no": source_asset.version_no,
-            "source_round_no": source_asset.round_no,
-        }
-    )
-    return AssetModel(
-        session_id=source_asset.session_id,
-        job_id=job_id,
-        round_no=round_no,
-        version_no=version_no,
-        parent_asset_id=None,
-        platform_id=source_asset.platform_id,
-        asset_family=source_asset.asset_family,
-        asset_kind=source_asset.asset_kind,
-        asset_role=source_asset.asset_role,
-        slot_id=source_asset.slot_id,
-        expression_mode=source_asset.expression_mode,
-        rule_pack_id=source_asset.rule_pack_id,
-        display_order=source_asset.display_order,
-        image_url=source_asset.image_url,
-        thumbnail_url=source_asset.thumbnail_url,
-        width=source_asset.width,
-        height=source_asset.height,
-        mime_type=source_asset.mime_type,
-        file_size=source_asset.file_size,
-        prompt_snapshot=source_asset.prompt_snapshot,
-        edit_instruction=edit_instruction,
-        generation_snapshot=snapshot,
-        status="ready",
-        visibility_status=source_asset.visibility_status,
-        archived_at=source_asset.archived_at,
-        archived_by=source_asset.archived_by,
-        archive_reason=source_asset.archive_reason,
-    )
+    return "；".join(parts) if parts else (instruction or "")
 
 
 def run_generate_family_job(db: Session, job_id: str) -> None:
@@ -638,287 +719,29 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
     try:
         update_job_status(db, job, status="running", progress=3, stage="preparing")
         append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
-
-        if not session.confirmed_copy:
-            raise AppError("invalid_session_status", "confirmed_copy missing", 400)
-        if not session.active_platform_id:
-            raise AppError("invalid_platform", "active_platform_id missing", 400)
-
-        ensure_session_transition(session.status, "generating")
-        session.status = "generating"
-        session.current_step = 6
-
-        instruction = payload.get("instruction")
-        last_version = session.latest_result_version
-        round_no = session.generation_round or 1
-        images = _session_images(db, session.id)
-        if not images:
-            raise AppError("missing_required_images", http_status=400)
-        loaded_reference_images = load_reference_images(images, storage=storage)
-        update_job_status(db, job, status="running", progress=8, stage="planning")
-        effective_strategy_preview = _ensure_generation_strategy_preview(db, session, images)
-
-        if job.job_type in {"generate_gallery", "regenerate_gallery", "global_edit"}:
-            round_no = session.generation_round + 1
-
-        version_no = last_version + 1
-        plan = _prepare_assets_plan(db, job, effective_strategy_preview, session)
-        carry_forward_sources: list[AssetModel] = []
-        if job.job_type == "regenerate_asset" and last_version > 0:
-            parent_asset_id = payload.get("parent_asset_id")
-            carry_forward_version = _resolve_regenerate_carry_forward_version(
-                db,
-                session_id=session.id,
-                asset_family="main_gallery",
-                parent_asset_id=parent_asset_id,
-                last_version=last_version,
-            )
-            regenerated_slot_ids = {
-                str(item.get("slot_id") or item.get("role") or "").strip()
-                for item in plan
-                if isinstance(item, dict)
-            }
-            for asset in _version_assets(db, session.id, carry_forward_version, asset_family="main_gallery"):
-                if asset.id == parent_asset_id:
-                    continue
-                slot_id = str(asset.slot_id or asset.asset_role or "").strip()
-                if slot_id in regenerated_slot_ids:
-                    continue
-                carry_forward_sources.append(asset)
-        elif job.job_type == "generate_gallery" and payload.get("slot_ids") and last_version > 0:
-            regenerated_slot_ids = {
-                str(item.get("slot_id") or item.get("role") or "").strip()
-                for item in plan
-                if isinstance(item, dict)
-            }
-            for asset in _version_assets(db, session.id, last_version, asset_family="main_gallery"):
-                slot_id = str(asset.slot_id or asset.asset_role or "").strip()
-                if slot_id in regenerated_slot_ids:
-                    continue
-                carry_forward_sources.append(asset)
-
-        render_bundle = _render_assets_concurrently(
-            confirmed_copy=_resolved_copy_for_session(db, session),
-            strategy_preview=effective_strategy_preview,
-            plan=plan,
-            instruction=instruction,
-            loaded_reference_images=loaded_reference_images,
+        flow_result = execute_main_generation_flow(
+            db=db,
+            job=job,
+            session=session,
+            payload=payload,
+            storage=storage,
+            session_images_fn=_session_images,
+            load_reference_images_fn=load_reference_images,
+            resolved_copy_for_session_fn=_resolved_copy_for_session,
+            session_prompt_overrides_fn=_session_prompt_overrides,
+            strategy_reference_images_fn=_strategy_reference_images,
+            render_assets_concurrently_fn=_render_assets_concurrently,
+            dispatch_quality_review_fn=_dispatch_quality_review,
+            ensure_session_transition_fn=ensure_session_transition,
+            merge_edit_constraints_into_instruction_fn=_merge_edit_constraints_into_instruction,
+            load_constraint_escalation_memory_fn=_load_constraint_escalation_memory,
+            append_job_event_fn=append_job_event,
+            update_job_status_fn=update_job_status,
+            update_session_last_generated_at_fn=update_session_last_generated_at,
+            refresh_session_search_cache_fn=refresh_session_search_cache,
+            create_job_completion_notification_fn=create_job_completion_notification,
         )
-        for batch in render_bundle.get("submit_batches", []):
-            append_job_event(
-                db,
-                job.id,
-                "job_progress",
-                {
-                    "event": "submit_batch_completed",
-                    "submit_batch_index": int(batch.get("batch_index") or 0),
-                    "submit_batch_size": int(batch.get("batch_size") or 0),
-                    "submit_strategy_version": render_bundle.get("submit_strategy_version"),
-                },
-            )
-        append_job_event(
-            db,
-            job.id,
-            "job_progress",
-            {
-                "event": "poll_delay_applied",
-                "poll_initial_delay_ms": int(render_bundle.get("poll_initial_delay_ms") or 0),
-                "submit_strategy_version": render_bundle.get("submit_strategy_version"),
-            },
-        )
-        rendered_assets = list(render_bundle["rendered_assets"])
-        missing_slots = list(render_bundle["missing_slots"])
-        expected_slot_order = {
-            str(item.get("slot_id") or item.get("role") or "").strip(): int(item.get("display_order") or 0)
-            for item in plan
-            if str(item.get("slot_id") or item.get("role") or "").strip()
-        }
-        if carry_forward_sources:
-            for asset in carry_forward_sources:
-                slot_id = str(asset.slot_id or asset.asset_role or "").strip()
-                if slot_id and slot_id not in expected_slot_order:
-                    expected_slot_order[slot_id] = int(asset.display_order or 0)
-        expected_slot_ids = [slot_id for slot_id, _ in sorted(expected_slot_order.items(), key=lambda item: item[1])]
-
-        if not rendered_assets and not carry_forward_sources:
-            raise AppError("upstream_image_error", "no ready assets produced for current version", 502)
-
-        total = max(len(rendered_assets) + len(carry_forward_sources), 1)
-        created_assets: list[AssetModel] = []
-        progress_index = 0
-
-        for rendered in sorted(rendered_assets, key=lambda item: item["display_order"]):
-            image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
-                session_id=session.id,
-                round_no=round_no,
-                version_no=version_no,
-                role=rendered["role"],
-                display_order=rendered["display_order"],
-                image_bytes=rendered["image_bytes"],
-                ext=".jpg",
-            )
-
-            asset = AssetModel(
-                session_id=session.id,
-                job_id=job.id,
-                round_no=round_no,
-                version_no=version_no,
-                parent_asset_id=payload.get("parent_asset_id"),
-                platform_id=session.active_platform_id,
-                asset_family="main_gallery",
-                asset_kind="panel",
-                asset_role=rendered["role"],
-                slot_id=rendered.get("slot_id"),
-                expression_mode=rendered.get("expression_mode"),
-                rule_pack_id=rendered.get("rule_pack_id"),
-                display_order=rendered["display_order"],
-                image_url=image_url,
-                thumbnail_url=thumb_url,
-                width=width,
-                height=height,
-                mime_type=mime_type,
-                file_size=file_size,
-                prompt_snapshot=rendered["prompt_payload"]["final_prompt"],
-                edit_instruction=instruction,
-                generation_snapshot=rendered["generation_snapshot"],
-                status="ready",
-            )
-            db.add(asset)
-            db.flush()
-            created_assets.append(asset)
-
-            progress_index += 1
-            progress = int((progress_index / total) * 90)
-            update_job_status(db, job, status="running", progress=progress, stage="generating")
-            append_job_event(
-                db,
-                job.id,
-                "asset_ready",
-                {
-                    "event": "asset_ready",
-                    "asset_id": asset.id,
-                    "display_order": rendered["display_order"],
-                    "render_total_ms": (rendered.get("generation_snapshot") or {}).get("timing", {}).get("render_total_ms"),
-                },
-            )
-            if (rendered.get("generation_snapshot") or {}).get("download_retry_count"):
-                append_job_event(
-                    db,
-                    job.id,
-                    "asset_download_retry",
-                    {
-                        "event": "asset_download_retry",
-                        "asset_id": asset.id,
-                        "slot_id": rendered.get("slot_id"),
-                        "retry_count": (rendered.get("generation_snapshot") or {}).get("download_retry_count"),
-                    },
-                )
-            if (rendered.get("generation_snapshot") or {}).get("download_rescued"):
-                append_job_event(
-                    db,
-                    job.id,
-                    "asset_download_rescued",
-                    {
-                        "event": "asset_download_rescued",
-                        "asset_id": asset.id,
-                        "slot_id": rendered.get("slot_id"),
-                        "reason": (rendered.get("generation_snapshot") or {}).get("download_rescue_reason"),
-                    },
-                )
-
-        for source_asset in carry_forward_sources:
-            asset = _clone_asset_for_version(
-                source_asset,
-                job_id=job.id,
-                round_no=round_no,
-                version_no=version_no,
-                edit_instruction=instruction,
-            )
-            db.add(asset)
-            db.flush()
-            created_assets.append(asset)
-
-            progress_index += 1
-            progress = int((progress_index / total) * 90)
-            update_job_status(db, job, status="running", progress=progress, stage="generating")
-            append_job_event(
-                db,
-                job.id,
-                "asset_ready",
-                {
-                    "event": "asset_ready",
-                    "asset_id": asset.id,
-                    "display_order": asset.display_order,
-                    "carry_forward": True,
-                    "render_total_ms": 0,
-                },
-            )
-
-        session.generation_round = max(session.generation_round, round_no)
-        session.latest_result_version = version_no
-        session.latest_generate_job_id = job.id
-        session.status = "completed"
-        session.current_step = 6
-        update_session_last_generated_at(session)
-        refresh_session_search_cache(session)
-
-        missing_slot_set = {str(item.get("slot_id") or "") for item in missing_slots if str(item.get("slot_id") or "")}
-        missing_slot_ids = [slot_id for slot_id in expected_slot_ids if slot_id in missing_slot_set]
-        result_payload = {
-            "asset_ids": [asset.id for asset in created_assets],
-            "generation_round": session.generation_round,
-            "version_no": version_no,
-            "expected_slot_ids": expected_slot_ids,
-            "missing_slot_ids": missing_slot_ids,
-            "expected_count": len(expected_slot_ids),
-        }
-        terminal_status = "partial_succeeded" if missing_slot_ids else "succeeded"
-        update_job_status(db, job, status=terminal_status, progress=100, stage="done", result_payload=result_payload)
-        if missing_slot_ids:
-            for missing in missing_slots:
-                append_job_event(
-                    db,
-                    job.id,
-                    "asset_missing",
-                    {
-                        "event": "asset_missing",
-                        "slot_id": missing.get("slot_id"),
-                        "display_order": missing.get("display_order"),
-                        "error": missing.get("error_message"),
-                        "retry_count": missing.get("retry_count"),
-                    },
-                )
-                append_job_event(
-                    db,
-                    job.id,
-                    "asset_download_failed",
-                    {
-                        "event": "asset_download_failed",
-                        "slot_id": missing.get("slot_id"),
-                        "display_order": missing.get("display_order"),
-                        "error": missing.get("error_message"),
-                    },
-                )
-            append_job_event(
-                db,
-                job.id,
-                "job_partial_succeeded",
-                {
-                    "event": "job_partial_succeeded",
-                    "job_id": job.id,
-                    "missing_slot_ids": missing_slot_ids,
-                },
-            )
-        else:
-            append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
-        if session.user_id:
-            create_job_completion_notification(
-                db,
-                user_id=session.user_id,
-                session_id=session.id,
-                job_type=job.job_type,
-                succeeded=True,
-            )
+        return dict(flow_result.get("post_commit_dispatch") or {})
     except AppError as exc:
         update_job_status(
             db,
@@ -949,48 +772,176 @@ def run_generate_family_job(db: Session, job_id: str) -> None:
         release_locks(lock_keys)
 
 
-def _ensure_generation_strategy_preview(db: Session, session: SessionModel, session_images: list[SessionImageModel]) -> dict:
-    existing_preview = session.strategy_preview or {}
-    prompt_overrides = _session_prompt_overrides(db, session.id)
-    strategy_reference_images = _strategy_reference_images(db, session.id)
-    resolved_copy = _resolved_copy_for_session(db, session)
-    if isinstance(existing_preview, dict) and existing_preview.get("reference_manifest") and existing_preview.get("prompt_plan") and existing_preview.get("asset_plan"):
-        current_input_hash = strategy_preview_input_hash(
-            resolved_copy,
-            session.active_platform_id or "temu",
-            db=db,
-            session_images=session_images,
-            analysis_snapshot=session.analysis_snapshot or {},
-            parameter_snapshot=session.parameter_snapshot or {},
-            planner_instruction=existing_preview.get("planner_instruction"),
-            slot_preferences=existing_preview.get("slot_preferences") or [],
-            prompt_overrides=prompt_overrides,
-            strategy_reference_images=strategy_reference_images,
-        )
-        if existing_preview.get("input_hash") in {None, "", current_input_hash}:
-            if existing_preview.get("input_hash") != current_input_hash:
-                session.strategy_preview = {**existing_preview, "input_hash": current_input_hash}
-            logger.info(
-                "Reusing persisted strategy_preview during generation: session_id=%s input_hash=%s",
-                session.id,
-                current_input_hash,
-            )
-            return session.strategy_preview or existing_preview
+def _user_readable_failure_reason(error: str | None) -> str:
+    """Convert internal error message to user-facing Chinese failure reason."""
+    if not error:
+        return "该图生成失败，请点击重试"
+    error_lower = (error or "").lower()
+    if "timeout" in error_lower:
+        return "生成超时，请稍后重试"
+    if "rate_limit" in error_lower or "429" in error_lower:
+        return "服务繁忙，请稍后重试"
+    if "content_policy" in error_lower or "safety" in error_lower:
+        return "图片内容未通过安全审核，请调整描述后重试"
+    return "该图生成失败，请点击重试"
 
-    rebuilt = build_strategy_preview(
-        resolved_copy,
-        session.active_platform_id or "temu",
+
+def _dispatch_quality_review(
+    db: Session,
+    session: SessionModel,
+    parent_job: JobModel,
+    assets: list[AssetModel],
+) -> str | None:
+    return dispatch_quality_review_job(
         db=db,
-        session_images=session_images,
-        analysis_snapshot=session.analysis_snapshot or {},
-        parameter_snapshot=session.parameter_snapshot or {},
-        planner_instruction=existing_preview.get("planner_instruction"),
-        slot_preferences=existing_preview.get("slot_preferences") or [],
-        prompt_overrides=prompt_overrides,
-        strategy_reference_images=strategy_reference_images,
+        session=session,
+        parent_job=parent_job,
+        assets=assets,
+        create_job_fn=create_job,
+        append_job_event_fn=append_job_event,
+        settings=get_settings(),
     )
-    session.strategy_preview = rebuilt
-    return rebuilt
+
+
+def run_quality_review_job(db: Session, job_id: str) -> dict[str, Any] | None:
+    """Async quality review worker entrypoint."""
+    job = _require_job(db, job_id)
+    payload = job.input_payload or {}
+
+    try:
+        flow_result = execute_quality_review_flow(
+            db=db,
+            job=job,
+            payload=payload,
+            load_assets_fn=lambda _db, asset_ids: _db.query(AssetModel).filter(AssetModel.id.in_(asset_ids)).all(),
+            client_factory=WhataiClient,
+            storage=get_storage_adapter(),
+            settings=get_settings(),
+            load_session_images_fn=_session_images,
+            load_reference_images_fn=load_reference_images,
+            logger=logger,
+            append_job_event_fn=append_job_event,
+            save_constraint_escalation_if_retry_fn=_save_constraint_escalation_if_retry,
+            build_retry_instruction_fn=_build_quality_retry_instruction,
+            create_job_fn=create_job,
+            update_job_status_fn=update_job_status,
+        )
+        return {"retry_job_ids": flow_result.get("retry_job_ids", [])}
+    except Exception as exc:
+        update_job_status(
+            db,
+            job,
+            status="failed",
+            progress=100,
+            stage="failed",
+            error_code="quality_review_error",
+            error_message=str(exc),
+        )
+        raise
+
+def _build_quality_retry_instruction(asset: AssetModel) -> str:
+    """Build a targeted constraint escalation instruction from quality review failures."""
+    parts: list[str] = []
+    scores = asset.quality_scores or {}
+    async_check = scores.get("async_check") or {}
+
+    # Color drift
+    color_result = async_check.get("color_fidelity")
+    if isinstance(color_result, dict) and not color_result.get("passed", True):
+        from app.services.color_validation import build_color_escalation_instruction
+        color_instr = build_color_escalation_instruction(color_result.get("violations", []))
+        if color_instr:
+            parts.append(color_instr)
+
+    # Fidelity issues
+    fidelity_result = async_check.get("fidelity")
+    if isinstance(fidelity_result, dict) and not fidelity_result.get("passed", True):
+        issues = fidelity_result.get("issues", [])
+        if issues:
+            parts.append(f"产品保真度问题：{'、'.join(str(i) for i in issues[:3])}。请严格参照参考图，不要改变产品结构和外观。")
+        else:
+            parts.append("产品保真度不足，请严格参照参考图中的产品外观、结构和细节。")
+
+    # Text language
+    text_result = async_check.get("text_language")
+    if isinstance(text_result, dict) and not text_result.get("passed", True):
+        disallowed = text_result.get("disallowed_latin_tokens", [])
+        if disallowed:
+            parts.append(f"文字语言违规，请移除以下英文词汇：{'、'.join(str(t) for t in disallowed[:5])}。所有新增文案必须符合平台语言要求。")
+        else:
+            parts.append("文字语言不合规，请确保所有新增文案符合平台语言要求。")
+
+    if not parts:
+        return "请参照参考图重新生成，提升整体质量。"
+    return " ".join(parts)
+
+
+def _save_constraint_escalation_if_retry(
+    db: Session, session: SessionModel, asset: AssetModel
+) -> None:
+    """If this asset was produced by a quality-retry and passed, save the
+    effective instruction into session-level constraint escalation memory."""
+    if not asset.parent_asset_id:
+        return
+    parent_job = (
+        db.query(JobModel)
+        .filter(JobModel.id == asset.job_id)
+        .first()
+    )
+    if not parent_job or not isinstance(parent_job.input_payload, dict):
+        return
+    if parent_job.input_payload.get("retry_source") != "quality_review":
+        return
+    effective_instruction = str(parent_job.input_payload.get("instruction") or "").strip()
+    if not effective_instruction:
+        return
+    slot_id = asset.slot_id or asset.asset_role or ""
+    memory = (session.strategy_preview or {}).get("constraint_escalation_memory") or []
+    if not isinstance(memory, list):
+        memory = []
+    # Check for duplicates
+    for entry in memory:
+        if isinstance(entry, dict) and entry.get("instruction") == effective_instruction:
+            return
+    memory.append({
+        "slot_id": slot_id,
+        "instruction": effective_instruction,
+        "asset_id": asset.id,
+    })
+    # Keep memory bounded
+    memory = memory[-10:]
+    preview = dict(session.strategy_preview or {})
+    preview["constraint_escalation_memory"] = memory
+    session.strategy_preview = preview
+    db.flush()
+
+
+def _load_constraint_escalation_memory(
+    db: Session, session: SessionModel, parent_asset_id: str | None
+) -> list[str]:
+    """Load effective constraint escalation instructions from session memory
+    that are relevant to the slot being regenerated."""
+    memory = (session.strategy_preview or {}).get("constraint_escalation_memory")
+    if not isinstance(memory, list) or not memory:
+        return []
+    # If we know the parent asset, find its slot
+    target_slot = ""
+    if parent_asset_id:
+        parent = db.query(AssetModel).filter(AssetModel.id == parent_asset_id).first()
+        if parent:
+            target_slot = parent.slot_id or parent.asset_role or ""
+    instructions: list[str] = []
+    for entry in memory:
+        if not isinstance(entry, dict):
+            continue
+        instr = str(entry.get("instruction") or "").strip()
+        if not instr:
+            continue
+        entry_slot = str(entry.get("slot_id") or "").strip()
+        # Include slot-specific memory or general memory
+        if not target_slot or not entry_slot or entry_slot == target_slot:
+            instructions.append(instr)
+    return instructions[:3]
 
 
 def _planner_stage_for_failure(job: JobModel) -> str | None:
@@ -1046,81 +997,19 @@ def _render_assets_concurrently(
     instruction: str | None,
     loaded_reference_images: list,
 ) -> dict[str, Any]:
-    if not plan:
-        return {"rendered_assets": [], "expected_slot_ids": [], "missing_slots": []}
-
-    client = WhataiClient()
-    settings = get_settings()
-    expected_slot_ids = [
-        str(plan_item.get("slot_id") or plan_item.get("role") or "").strip()
-        for plan_item in sorted(plan, key=lambda item: int(item.get("display_order") or 0))
-        if str(plan_item.get("slot_id") or plan_item.get("role") or "").strip()
-    ]
-    render_specs = [
-        _prepare_main_render_spec(
-            confirmed_copy=confirmed_copy,
-            strategy_preview=strategy_preview,
-            plan_item=plan_item,
-            instruction=instruction,
-            loaded_reference_images=loaded_reference_images,
-        )
-        for plan_item in plan
-    ]
-    submit_bundle = _submit_render_specs(
-        client=client,
-        render_specs=render_specs,
-        max_workers=settings.generation_submit_concurrency,
-        batch_size=settings.image_submit_batch_size,
-        batch_interval_seconds=settings.image_submit_batch_interval_seconds,
+    return rendering_render_assets_concurrently(
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        plan=plan,
+        instruction=instruction,
+        loaded_reference_images=loaded_reference_images,
+        client_factory=WhataiClient,
+        settings=get_settings(),
+        prepare_render_spec_fn=_prepare_main_render_spec,
+        submit_render_specs_fn=_submit_render_specs,
+        materialize_render_specs_fn=_materialize_render_specs,
+        finalize_rendered_asset_fn=_finalize_main_rendered_asset,
     )
-    submitted_specs = submit_bundle["submitted_specs"]
-    submit_failed_specs = list(submit_bundle.get("failed_specs") or [])
-    poll_started = time.perf_counter()
-    results_by_submission = (
-        client.poll_image_tasks(
-            [spec["submission"] for spec in submitted_specs],
-            "upstream_image_error",
-            initial_delay_seconds=settings.image_poll_initial_delay_seconds,
-        )
-        if submitted_specs
-        else {}
-    )
-    poll_ms = int((time.perf_counter() - poll_started) * 1000)
-    rendered_specs = _materialize_render_specs(
-        client=client,
-        render_specs=[
-            {
-                **spec,
-                "timing": {
-                    **dict(spec.get("timing") or {}),
-                    "poll_ms": poll_ms,
-                    "poll_started_after_ms": int(settings.image_poll_initial_delay_seconds * 1000),
-                },
-            }
-            for spec in submitted_specs
-        ],
-        results_by_submission=results_by_submission,
-        max_workers=settings.main_generation_concurrency,
-    )
-    finalized: list[dict[str, object]] = []
-    for render_spec in rendered_specs["rendered_specs"]:
-        finalized.append(
-            _finalize_main_rendered_asset(
-                client=client,
-                confirmed_copy=confirmed_copy,
-                strategy_preview=strategy_preview,
-                render_spec=render_spec,
-                instruction=instruction,
-            )
-        )
-    return {
-        "rendered_assets": finalized,
-        "expected_slot_ids": expected_slot_ids,
-        "missing_slots": submit_failed_specs + rendered_specs["failed_specs"],
-        "submit_batches": submit_bundle["submit_batches"],
-        "submit_strategy_version": submit_bundle["submit_strategy_version"],
-        "poll_initial_delay_ms": int(settings.image_poll_initial_delay_seconds * 1000),
-    }
 
 
 def _prepare_main_render_spec(
@@ -1131,37 +1020,17 @@ def _prepare_main_render_spec(
     instruction: str | None,
     loaded_reference_images: list,
 ) -> dict[str, Any]:
-    role = str(plan_item["role"])
-    slot_id = str(plan_item.get("slot_id") or role)
-    display_order = int(plan_item["display_order"])
-    aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
-    image_size = _resolve_image_size(aspect_ratio)
-    reference_role = str(plan_item.get("reference_role_hint") or slot_id or role)
-    reference_images = select_reference_images_for_role(
-        loaded_reference_images,
-        reference_role,
-        max_images=int(plan_item.get("reference_image_limit") or 2),
-    )
-    prompt_payload = compose_prompt(
+    return prepare_main_render_spec(
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
-        asset_role=role,
-        instruction=instruction,
         plan_item=plan_item,
+        instruction=instruction,
+        loaded_reference_images=loaded_reference_images,
+        resolve_image_size_fn=_resolve_image_size,
+        resolve_fidelity_ref_limit_fn=_resolve_fidelity_ref_limit,
+        select_reference_images_for_role_fn=select_reference_images_for_role,
+        compose_prompt_fn=compose_prompt,
     )
-    return {
-        "submission_id": f"main:{slot_id}:{display_order}",
-        "role": role,
-        "slot_id": slot_id,
-        "display_order": display_order,
-        "aspect_ratio": aspect_ratio,
-        "image_size": image_size,
-        "plan_item": plan_item,
-        "prompt_payload": prompt_payload,
-        "reference_images": reference_images,
-        "planner_instruction": str(strategy_preview.get("planner_instruction") or "") or None,
-        "instruction": instruction,
-    }
 
 
 def _submit_render_specs(
@@ -1172,81 +1041,17 @@ def _submit_render_specs(
     batch_size: int,
     batch_interval_seconds: int,
 ) -> dict[str, Any]:
-    if not render_specs:
-        return {
-            "submitted_specs": [],
-            "failed_specs": [],
-            "submit_batches": [],
-            "submit_strategy_version": SUBMIT_STRATEGY_VERSION,
-        }
-
-    submitted: list[dict[str, Any]] = []
-    failed_specs: list[dict[str, Any]] = []
-    submit_batches: list[dict[str, int]] = []
-    normalized_batch_size = max(1, min(batch_size, len(render_specs)))
-    worker_limit = max(1, min(max_workers, normalized_batch_size, len(render_specs)))
-    total_batches = (len(render_specs) + normalized_batch_size - 1) // normalized_batch_size
-    for batch_index, start in enumerate(range(0, len(render_specs), normalized_batch_size), start=1):
-        batch = render_specs[start : start + normalized_batch_size]
-        logger.info(
-            "Submitting render batch: batch=%s/%s batch_size=%s internal_concurrency=%s",
-            batch_index,
-            total_batches,
-            len(batch),
-            min(worker_limit, len(batch)),
-        )
-        with ThreadPoolExecutor(max_workers=max(1, min(worker_limit, len(batch)))) as executor:
-            future_map = {
-                executor.submit(
-                    _submit_single_render_spec,
-                    client=client,
-                    render_spec={
-                        **render_spec,
-                        "submission_batch_no": batch_index,
-                        "submission_batch_size": len(batch),
-                        "submit_strategy_version": SUBMIT_STRATEGY_VERSION,
-                    },
-                ): render_spec
-                for render_spec in batch
-            }
-            for future in as_completed(future_map):
-                render_spec = future_map[future]
-                try:
-                    submitted.append(future.result())
-                except AppError as exc:
-                    logger.warning(
-                        "Render submission failed: submission_id=%s slot_id=%s display_order=%s batch=%s/%s status=%s retryable=%s error=%s",
-                        render_spec.get("submission_id"),
-                        render_spec.get("slot_id") or render_spec.get("panel_id") or render_spec.get("role"),
-                        render_spec.get("display_order"),
-                        batch_index,
-                        total_batches,
-                        exc.http_status,
-                        exc.retryable,
-                        exc.message,
-                    )
-                    failed_specs.append(
-                        _failed_render_spec_payload(
-                            render_spec,
-                            exc,
-                            failure_stage="submit",
-                        )
-                    )
-        submit_batches.append({"batch_index": batch_index, "batch_size": len(batch)})
-        if batch_index < total_batches and batch_interval_seconds > 0:
-            logger.info(
-                "Sleeping between render batches: completed_batch=%s/%s delay_seconds=%s",
-                batch_index,
-                total_batches,
-                batch_interval_seconds,
-            )
-            time.sleep(batch_interval_seconds)
-    return {
-        "submitted_specs": submitted,
-        "failed_specs": failed_specs,
-        "submit_batches": submit_batches,
-        "submit_strategy_version": SUBMIT_STRATEGY_VERSION,
-    }
+    return rendering_submit_render_specs(
+        client=client,
+        render_specs=render_specs,
+        max_workers=max_workers,
+        batch_size=batch_size,
+        batch_interval_seconds=batch_interval_seconds,
+        submit_single_render_spec_fn=_submit_single_render_spec,
+        logger=logger,
+        sleep_fn=time.sleep,
+        submit_strategy_version=SUBMIT_STRATEGY_VERSION,
+    )
 
 
 def _submit_single_render_spec(
@@ -1254,27 +1059,12 @@ def _submit_single_render_spec(
     client: WhataiClient,
     render_spec: dict[str, Any],
 ) -> dict[str, Any]:
-    submit_started = time.perf_counter()
-    submission = _submit_image_request_with_retry(
+    return rendering_submit_single_render_spec(
         client=client,
-        prompt=render_spec["prompt_payload"]["final_prompt"],
-        image_size=render_spec["image_size"],
-        aspect_ratio=render_spec["aspect_ratio"],
-        reference_images=render_spec["reference_images"],
-        role=render_spec["role"],
-        display_order=render_spec["display_order"],
-        submission_id=render_spec["submission_id"],
+        render_spec=render_spec,
+        submit_request_with_retry_fn=_submit_image_request_with_retry,
+        submit_strategy_version=SUBMIT_STRATEGY_VERSION,
     )
-    return {
-        **render_spec,
-        "submission": submission,
-        "submission_batch_no": int(render_spec.get("submission_batch_no") or 1),
-        "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
-        "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
-        "timing": {
-            "submit_ms": int((time.perf_counter() - submit_started) * 1000),
-        },
-    }
 
 
 def _materialize_render_specs(
@@ -1284,55 +1074,14 @@ def _materialize_render_specs(
     results_by_submission: dict[str, dict[str, Any]],
     max_workers: int,
 ) -> dict[str, Any]:
-    if not render_specs:
-        return {"rendered_specs": [], "failed_specs": []}
-
-    rendered: list[dict[str, Any]] = []
-    failed_specs: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(render_specs)))) as executor:
-        future_map = {
-            executor.submit(
-                _download_single_render_spec,
-                client=client,
-                render_spec=render_spec,
-                result=results_by_submission.get(str(render_spec["submission_id"])),
-            ): render_spec
-            for render_spec in render_specs
-        }
-        for future in as_completed(future_map):
-            render_spec = future_map[future]
-            try:
-                rendered.append(future.result())
-            except AppError as exc:
-                failed_specs.append(
-                    {"render_spec": render_spec, **_failed_render_spec_payload(render_spec, exc, failure_stage="download")}
-                )
-
-    rescued: list[dict[str, Any]] = []
-    remaining_failures: list[dict[str, Any]] = []
-    for failed_spec in failed_specs:
-        try:
-            rescued_spec = _rescue_failed_render_spec(
-                client=client,
-                render_spec=failed_spec["render_spec"],
-            )
-            rescued_spec["download_retry_count"] = 1
-            rescued_spec["download_rescued"] = True
-            rescued_spec["download_rescue_reason"] = failed_spec["error_message"]
-            rescued.append(rescued_spec)
-        except AppError as rescue_exc:
-            render_spec = failed_spec["render_spec"]
-            remaining_failures.append(
-                _failed_render_spec_payload(
-                    render_spec,
-                    rescue_exc,
-                    failure_stage="download",
-                    retry_count=1,
-                )
-            )
-
-    rendered.extend(rescued)
-    return {"rendered_specs": rendered, "failed_specs": remaining_failures}
+    return rendering_materialize_render_specs(
+        client=client,
+        render_specs=render_specs,
+        results_by_submission=results_by_submission,
+        max_workers=max_workers,
+        download_single_render_spec_fn=_download_single_render_spec,
+        rescue_failed_render_spec_fn=_rescue_failed_render_spec,
+    )
 
 
 def _rescue_failed_render_spec(
@@ -1340,15 +1089,11 @@ def _rescue_failed_render_spec(
     client: WhataiClient,
     render_spec: dict[str, Any],
 ) -> dict[str, Any]:
-    resubmitted_spec = _submit_single_render_spec(client=client, render_spec=render_spec)
-    results_by_submission = client.poll_image_tasks(
-        [resubmitted_spec["submission"]],
-        "upstream_image_error",
-    )
-    return _download_single_render_spec(
+    return rendering_rescue_failed_render_spec(
         client=client,
-        render_spec=resubmitted_spec,
-        result=results_by_submission.get(str(resubmitted_spec["submission_id"])),
+        render_spec=render_spec,
+        submit_single_render_spec_fn=_submit_single_render_spec,
+        download_single_render_spec_fn=_download_single_render_spec,
     )
 
 
@@ -1358,22 +1103,14 @@ def _download_single_render_spec(
     render_spec: dict[str, Any],
     result: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    download_started = time.perf_counter()
-    image_bytes = client.download_image_bytes(render_spec["submission"], result, "upstream_image_error")
-    timing = dict(render_spec.get("timing") or {})
-    timing["download_ms"] = int((time.perf_counter() - download_started) * 1000)
-    timing["render_total_ms"] = int(sum(timing.get(key, 0) for key in ("submit_ms", "poll_ms", "download_ms")))
-    return {
-        **render_spec,
-        "image_bytes": image_bytes,
-        "timing": timing,
-        "submission_batch_no": int(render_spec.get("submission_batch_no") or 1),
-        "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
-        "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
-        "download_retry_count": int(render_spec.get("download_retry_count") or 0),
-        "download_rescued": bool(render_spec.get("download_rescued") or False),
-        "download_rescue_reason": render_spec.get("download_rescue_reason"),
-    }
+    rendered = rendering_download_single_render_spec(
+        client=client,
+        render_spec=render_spec,
+        result=result,
+    )
+    if not rendered.get("submit_strategy_version"):
+        rendered["submit_strategy_version"] = SUBMIT_STRATEGY_VERSION
+    return rendered
 
 
 def _apply_main_gallery_post_validations(
@@ -1392,45 +1129,27 @@ def _apply_main_gallery_post_validations(
     aspect_ratio: str,
     reference_images: list,
 ) -> tuple[dict[str, Any], bytes, dict[str, Any] | None]:
-    current_prompt_payload = prompt_payload
-    current_image_bytes = image_bytes
-    white_bg_validation = None
-
-    if bool(plan_item.get("requires_white_bg_validation")) and getattr(getattr(client, "settings", None), "whatai_api_key", ""):
-        passed, diagnostics = validate_white_background(current_image_bytes)
-        white_bg_validation = diagnostics
-        if not passed:
-            retry_instruction = _merge_instructions(instruction, strengthen_white_bg_instruction())
-            retry_prompt_payload = compose_prompt(
-                confirmed_copy=confirmed_copy,
-                strategy_preview=strategy_preview,
-                asset_role=role,
-                instruction=retry_instruction,
-                plan_item=plan_item,
-            )
-            current_image_bytes = _generate_image_with_asset_retry(
-                client=client,
-                prompt=retry_prompt_payload["final_prompt"],
-                image_size=image_size,
-                aspect_ratio=aspect_ratio,
-                reference_images=reference_images,
-                role=role,
-                display_order=display_order,
-            )
-            passed, diagnostics = validate_white_background(current_image_bytes)
-            diagnostics["retry_applied"] = True
-            white_bg_validation = diagnostics
-            current_prompt_payload = retry_prompt_payload
-            if not passed:
-                diagnostics["soft_failed"] = True
-                logger.warning(
-                    "white background validation soft-failed after retry: role=%s slot_id=%s diagnostics=%s",
-                    role,
-                    slot_id,
-                    diagnostics,
-                )
-
-    return current_prompt_payload, current_image_bytes, white_bg_validation
+    return orchestration_apply_main_gallery_post_validations(
+        client=client,
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        plan_item=plan_item,
+        role=role,
+        slot_id=slot_id,
+        display_order=display_order,
+        instruction=instruction,
+        prompt_payload=prompt_payload,
+        image_bytes=image_bytes,
+        image_size=image_size,
+        aspect_ratio=aspect_ratio,
+        reference_images=reference_images,
+        validate_white_background_fn=validate_white_background,
+        merge_instructions_fn=_merge_instructions,
+        strengthen_white_bg_instruction_fn=strengthen_white_bg_instruction,
+        compose_prompt_fn=compose_prompt,
+        generate_image_with_asset_retry_fn=_generate_image_with_asset_retry,
+        logger=logger,
+    )
 
 
 def _inspect_visible_text_language(
@@ -1481,74 +1200,16 @@ def _finalize_main_rendered_asset(
     render_spec: dict[str, Any],
     instruction: str | None,
 ) -> dict[str, object]:
-    prompt_payload = render_spec["prompt_payload"]
-    image_bytes = render_spec["image_bytes"]
-    plan_item = render_spec["plan_item"]
-    reference_images = render_spec["reference_images"]
-    prompt_payload, image_bytes, white_bg_validation = _apply_main_gallery_post_validations(
+    return finalize_main_rendered_asset(
         client=client,
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
-        plan_item=plan_item,
-        role=render_spec["role"],
-        slot_id=render_spec["slot_id"],
-        display_order=render_spec["display_order"],
+        render_spec=render_spec,
         instruction=instruction,
-        prompt_payload=prompt_payload,
-        image_bytes=image_bytes,
-        image_size=render_spec["image_size"],
-        aspect_ratio=render_spec["aspect_ratio"],
-        reference_images=reference_images,
+        apply_main_gallery_post_validations_fn=_apply_main_gallery_post_validations,
+        submit_strategy_version=SUBMIT_STRATEGY_VERSION,
+        logger=logger,
     )
-
-    generation_snapshot = {
-        "final_prompt": prompt_payload["final_prompt"],
-        "prompt_blocks": prompt_payload["blocks"],
-        "copy_blocks": prompt_payload.get("copy_blocks") or {},
-        "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
-        "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
-        "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
-        "applied_preset_id": prompt_payload.get("applied_preset_id"),
-        "style_preset_id": confirmed_copy.get("style_preset_id"),
-        "resolved_style_preset": confirmed_copy.get("resolved_style_preset"),
-        "style_custom": confirmed_copy.get("style_custom"),
-        "reference_image_ids": [image.image_id for image in reference_images],
-        "reference_slots": [image.slot_type for image in reference_images],
-        "upstream_endpoint": render_spec["submission"].get("upstream_endpoint"),
-        "planner_instruction": render_spec["planner_instruction"],
-        "aspect_ratio": render_spec["aspect_ratio"],
-        "size": render_spec["image_size"],
-        "planner_source": prompt_payload.get("planner_source"),
-        "white_bg_validation": white_bg_validation,
-        "language_validation": None,
-        "truth_contract": prompt_payload.get("truth_contract") or {},
-        "risk_flags": prompt_payload.get("risk_flags") or [],
-        "fidelity_validation": None,
-        "slot_id": render_spec["slot_id"],
-        "expression_mode": prompt_payload.get("expression_mode") or plan_item.get("expression_mode"),
-        "selling_point_binding": prompt_payload.get("selling_point_binding") or {},
-        "rule_pack_id": plan_item.get("platform_rule_pack"),
-        "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
-        "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
-        "platform_overlay": prompt_payload.get("platform_overlay"),
-        "timing": dict(render_spec.get("timing") or {}),
-        "submission_batch_no": int(render_spec.get("submission_batch_no") or 1),
-        "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
-        "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
-        "download_retry_count": int(render_spec.get("download_retry_count") or 0),
-        "download_rescued": bool(render_spec.get("download_rescued") or False),
-        "download_rescue_reason": render_spec.get("download_rescue_reason"),
-    }
-    return {
-        "role": render_spec["role"],
-        "slot_id": render_spec["slot_id"],
-        "display_order": render_spec["display_order"],
-        "expression_mode": generation_snapshot["expression_mode"],
-        "rule_pack_id": generation_snapshot["rule_pack_id"],
-        "image_bytes": image_bytes,
-        "prompt_payload": prompt_payload,
-        "generation_snapshot": generation_snapshot,
-    }
 
 
 def _render_single_asset(
@@ -1559,97 +1220,31 @@ def _render_single_asset(
     instruction: str | None,
     loaded_reference_images: list,
 ) -> dict[str, object]:
-    role = str(plan_item["role"])
-    slot_id = str(plan_item.get("slot_id") or role)
-    display_order = int(plan_item["display_order"])
-    planner_instruction = str(strategy_preview.get("planner_instruction") or "") or None
-    aspect_ratio = str(plan_item.get("aspect_ratio") or "1:1")
-    image_size = _resolve_image_size(aspect_ratio)
-    reference_role = str(plan_item.get("reference_role_hint") or slot_id or role)
-    reference_images = select_reference_images_for_role(
-        loaded_reference_images,
-        reference_role,
-        max_images=int(plan_item.get("reference_image_limit") or 2),
+    strategy_preview = validate_contract_warn(
+        StrategyPreviewPayload,
+        strategy_preview,
+        context={"stage": "pipeline_render_single_asset_strategy_preview"},
     )
-    prompt_payload = compose_prompt(
-        confirmed_copy=confirmed_copy,
-        strategy_preview=strategy_preview,
-        asset_role=role,
-        instruction=instruction,
-        plan_item=plan_item,
+    plan_item = validate_contract_warn(
+        AssetPlanItem,
+        plan_item,
+        context={"slot_id": plan_item.get("slot_id"), "role": plan_item.get("role"), "stage": "pipeline_render_single_asset_plan_item"},
     )
-    client = WhataiClient()
-    started_at = time.perf_counter()
-    image_bytes = _generate_image_with_asset_retry(
-        client=client,
-        prompt=prompt_payload["final_prompt"],
-        image_size=image_size,
-        aspect_ratio=aspect_ratio,
-        reference_images=reference_images,
-        role=role,
-        display_order=display_order,
-    )
-    prompt_payload, image_bytes, white_bg_validation = _apply_main_gallery_post_validations(
-        client=client,
+    return render_single_main_asset_sync(
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
         plan_item=plan_item,
-        role=role,
-        slot_id=slot_id,
-        display_order=display_order,
         instruction=instruction,
-        prompt_payload=prompt_payload,
-        image_bytes=image_bytes,
-        image_size=image_size,
-        aspect_ratio=aspect_ratio,
-        reference_images=reference_images,
+        loaded_reference_images=loaded_reference_images,
+        resolve_image_size_fn=_resolve_image_size,
+        resolve_fidelity_ref_limit_fn=_resolve_fidelity_ref_limit,
+        select_reference_images_for_role_fn=select_reference_images_for_role,
+        compose_prompt_fn=compose_prompt,
+        client_factory=WhataiClient,
+        generate_image_with_asset_retry_fn=_generate_image_with_asset_retry,
+        apply_main_gallery_post_validations_fn=_apply_main_gallery_post_validations,
+        perf_counter_fn=time.perf_counter,
     )
-
-    generation_snapshot = {
-        "final_prompt": prompt_payload["final_prompt"],
-        "prompt_blocks": prompt_payload["blocks"],
-        "copy_blocks": prompt_payload.get("copy_blocks") or {},
-        "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
-        "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
-        "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
-        "applied_preset_id": prompt_payload.get("applied_preset_id"),
-        "style_preset_id": confirmed_copy.get("style_preset_id"),
-        "resolved_style_preset": confirmed_copy.get("resolved_style_preset"),
-        "style_custom": confirmed_copy.get("style_custom"),
-        "reference_image_ids": [image.image_id for image in reference_images],
-        "reference_slots": [image.slot_type for image in reference_images],
-        "upstream_endpoint": "/v1/images/edits" if reference_images else "/v1/images/generations",
-        "planner_instruction": planner_instruction,
-        "aspect_ratio": aspect_ratio,
-        "size": image_size,
-        "planner_source": prompt_payload.get("planner_source"),
-        "white_bg_validation": white_bg_validation,
-        "language_validation": None,
-        "truth_contract": prompt_payload.get("truth_contract") or {},
-        "risk_flags": prompt_payload.get("risk_flags") or [],
-        "fidelity_validation": None,
-        "slot_id": slot_id,
-        "expression_mode": prompt_payload.get("expression_mode") or plan_item.get("expression_mode"),
-        "selling_point_binding": prompt_payload.get("selling_point_binding") or {},
-        "rule_pack_id": plan_item.get("platform_rule_pack"),
-        "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
-        "resolved_constraints": prompt_payload.get("resolved_constraints") or [],
-        "platform_overlay": prompt_payload.get("platform_overlay"),
-        "timing": {"render_total_ms": int((time.perf_counter() - started_at) * 1000)},
-        "download_retry_count": 0,
-        "download_rescued": False,
-        "download_rescue_reason": None,
-    }
-    return {
-        "role": role,
-        "slot_id": slot_id,
-        "display_order": display_order,
-        "expression_mode": generation_snapshot["expression_mode"],
-        "rule_pack_id": generation_snapshot["rule_pack_id"],
-        "image_bytes": image_bytes,
-        "prompt_payload": prompt_payload,
-        "generation_snapshot": generation_snapshot,
-    }
 
 
 def run_generate_detail_page_job(db: Session, job_id: str) -> None:
@@ -1662,400 +1257,25 @@ def run_generate_detail_page_job(db: Session, job_id: str) -> None:
     try:
         update_job_status(db, job, status="running", progress=3, stage="preparing")
         append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
-
-        if not session.confirmed_copy:
-            raise AppError("invalid_session_status", "confirmed_copy missing", 400)
-        if not session.active_platform_id:
-            raise AppError("invalid_platform", "active_platform_id missing", 400)
-
-        session_images = _session_images(db, session.id)
-        if not session_images:
-            raise AppError("missing_required_images", http_status=400)
-        style_images = _detail_style_images(db, session.id)
-
-        update_job_status(db, job, status="running", progress=8, stage="planning")
-        effective_strategy_preview = _ensure_detail_strategy_preview(db, session, session_images, style_images)
-        update_job_status(db, job, status="running", progress=10, stage="planning")
-        append_job_event(
-            db,
-            job.id,
-            "detail_strategy_ready",
-            {
-                "event": "detail_strategy_ready",
-                "job_id": job.id,
-                "panel_count": len(effective_strategy_preview.get("panel_plan") or []),
-                "input_hash": effective_strategy_preview.get("input_hash"),
-                "detail_rule_pack": effective_strategy_preview.get("detail_rule_pack"),
-                "detail_planner_ms": effective_strategy_preview.get("detail_planner_ms"),
-                "detail_reviewer_ms": effective_strategy_preview.get("detail_reviewer_ms"),
-                "planner_primary_model": effective_strategy_preview.get("planner_primary_model"),
-                "planner_fallback_model": effective_strategy_preview.get("planner_fallback_model"),
-                "planner_attempt_count": effective_strategy_preview.get("planner_attempt_count"),
-                "planner_final_source": effective_strategy_preview.get("planner_final_source"),
-            },
-        )
-        loaded_product_images = load_reference_images(session_images, storage=storage)
-        loaded_style_images = load_reference_images(style_images, storage=storage) if style_images else []
-        product_grid, style_grid = build_detail_reference_grids(loaded_product_images, loaded_style_images)
-
-        last_version = session.detail_latest_result_version
-        version_no = last_version + 1
-        round_no = session.detail_generation_round + 1
-        full_plan = [
-            item
-            for item in (effective_strategy_preview.get("panel_plan") or [])
-            if isinstance(item, dict)
-        ]
-        expected_panel_order = {
-            str(item.get("slot_id") or item.get("panel_id") or "").strip(): int(item.get("display_order") or 0)
-            for item in full_plan
-            if str(item.get("slot_id") or item.get("panel_id") or "").strip()
-        }
-        expected_panel_ids = [slot_id for slot_id, _ in sorted(expected_panel_order.items(), key=lambda item: item[1])]
-        plan = list(full_plan)
-        carry_forward_sources: list[AssetModel] = []
-        if job.job_type == "regenerate_detail_panel" and last_version > 0:
-            requested = payload.get("panel_plan_item") or {}
-            requested_slot_id = str(requested.get("slot_id") or requested.get("panel_id") or "").strip()
-            plan = [
-                item
-                for item in plan
-                if str(item.get("slot_id") or item.get("panel_id") or "").strip() == requested_slot_id
-            ]
-            parent_asset_id = payload.get("parent_asset_id")
-            carry_forward_version = _resolve_regenerate_carry_forward_version(
-                db,
-                session_id=session.id,
-                asset_family="detail_page",
-                parent_asset_id=parent_asset_id,
-                last_version=last_version,
-            )
-            for asset in _version_assets(db, session.id, carry_forward_version, asset_family="detail_page"):
-                if asset.asset_kind != "panel":
-                    continue
-                if asset.id == parent_asset_id:
-                    continue
-                slot_id = str(asset.slot_id or asset.asset_role or "").strip()
-                if slot_id == requested_slot_id:
-                    continue
-                carry_forward_sources.append(asset)
-                if slot_id and slot_id not in expected_panel_order:
-                    expected_panel_order[slot_id] = int(asset.display_order or 0)
-            expected_panel_ids = [slot_id for slot_id, _ in sorted(expected_panel_order.items(), key=lambda item: item[1])]
-
-        for item in plan:
-            if not isinstance(item, dict):
-                continue
-            append_job_event(
-                db,
-                job.id,
-                "detail_panel_render_started",
-                {
-                    "event": "detail_panel_render_started",
-                    "panel_id": item.get("panel_id"),
-                    "slot_id": item.get("slot_id"),
-                    "display_order": item.get("display_order"),
-                    "panel_type": item.get("panel_type"),
-                    "narrative_section": item.get("narrative_section"),
-                    "panel_goal": item.get("panel_goal"),
-                    "copy_focus": item.get("copy_focus"),
-                },
-            )
-
-        detail_render_bundle = _render_detail_panels_concurrently(
+        flow_result = execute_detail_generation_flow(
             db=db,
-            confirmed_copy=_resolved_copy_for_session(db, session),
-            strategy_preview=effective_strategy_preview,
-            plan=plan,
-            instruction=payload.get("instruction"),
-            loaded_product_images=loaded_product_images,
-            loaded_style_images=loaded_style_images,
-            product_grid=product_grid,
-            style_grid=style_grid,
+            job=job,
+            session=session,
+            payload=payload,
+            storage=storage,
+            session_images_fn=_session_images,
+            detail_style_images_fn=_detail_style_images,
+            load_reference_images_fn=load_reference_images,
+            resolved_copy_for_session_fn=_resolved_copy_for_session,
+            session_prompt_overrides_fn=_session_prompt_overrides,
+            render_detail_panels_concurrently_fn=_render_detail_panels_concurrently,
+            append_job_event_fn=append_job_event,
+            update_job_status_fn=update_job_status,
+            update_session_last_generated_at_fn=update_session_last_generated_at,
+            refresh_session_search_cache_fn=refresh_session_search_cache,
+            create_job_completion_notification_fn=create_job_completion_notification,
         )
-        for batch in detail_render_bundle.get("submit_batches", []):
-            append_job_event(
-                db,
-                job.id,
-                "job_progress",
-                {
-                    "event": "submit_batch_completed",
-                    "submit_batch_index": int(batch.get("batch_index") or 0),
-                    "submit_batch_size": int(batch.get("batch_size") or 0),
-                    "submit_strategy_version": detail_render_bundle.get("submit_strategy_version"),
-                },
-            )
-        append_job_event(
-            db,
-            job.id,
-            "job_progress",
-            {
-                "event": "poll_delay_applied",
-                "poll_initial_delay_ms": int(detail_render_bundle.get("poll_initial_delay_ms") or 0),
-                "submit_strategy_version": detail_render_bundle.get("submit_strategy_version"),
-            },
-        )
-        rendered_panels = list(detail_render_bundle["rendered_panels"])
-        missing_panels = list(detail_render_bundle.get("missing_panels") or [])
-        detail_render_ms = int(
-            sum(
-                int(((item.get("generation_snapshot") or {}).get("timing") or {}).get("render_total_ms") or 0)
-                for item in rendered_panels
-            )
-        )
-
-        if not rendered_panels and not carry_forward_sources:
-            raise AppError("upstream_image_error", "no ready detail panels produced for current version", 502)
-
-        missing_panel_set = {str(item.get("slot_id") or item.get("panel_id") or "").strip() for item in missing_panels if str(item.get("slot_id") or item.get("panel_id") or "").strip()}
-        missing_panel_ids = [slot_id for slot_id in expected_panel_ids if slot_id in missing_panel_set]
-        should_stitch = not missing_panel_ids
-
-        total_assets = max(len(rendered_panels) + len(carry_forward_sources) + (1 if should_stitch else 0), 1)
-        created_assets: list[AssetModel] = []
-        panel_bytes_for_stitch: list[tuple[int, bytes]] = []
-        progress_index = 0
-
-        for rendered in sorted(rendered_panels, key=lambda item: item["display_order"]):
-            image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
-                session_id=session.id,
-                round_no=round_no,
-                version_no=version_no,
-                role=rendered["panel_id"],
-                display_order=rendered["display_order"],
-                image_bytes=rendered["image_bytes"],
-                ext=".jpg",
-            )
-            asset = AssetModel(
-                session_id=session.id,
-                job_id=job.id,
-                round_no=round_no,
-                version_no=version_no,
-                parent_asset_id=None,
-                platform_id=session.active_platform_id,
-                asset_family="detail_page",
-                asset_kind="panel",
-                asset_role=rendered["panel_id"],
-                slot_id=rendered.get("slot_id"),
-                expression_mode=None,
-                rule_pack_id=rendered.get("rule_pack_id"),
-                display_order=rendered["display_order"],
-                image_url=image_url,
-                thumbnail_url=thumb_url,
-                width=width,
-                height=height,
-                mime_type=mime_type,
-                file_size=file_size,
-                prompt_snapshot=rendered["prompt_payload"]["final_prompt"],
-                edit_instruction=payload.get("instruction"),
-                generation_snapshot=rendered["generation_snapshot"],
-                status="ready",
-            )
-            db.add(asset)
-            db.flush()
-            created_assets.append(asset)
-            panel_bytes_for_stitch.append((asset.display_order, rendered["image_bytes"]))
-            progress_index += 1
-            update_job_status(db, job, status="running", progress=int((progress_index / total_assets) * 85), stage="generating")
-            append_job_event(
-                db,
-                job.id,
-                "asset_ready",
-                {
-                    "event": "asset_ready",
-                    "asset_id": asset.id,
-                    "asset_kind": "panel",
-                    "panel_id": rendered["panel_id"],
-                    "display_order": rendered["display_order"],
-                    "render_total_ms": (rendered.get("generation_snapshot") or {}).get("timing", {}).get("render_total_ms"),
-                },
-            )
-            append_job_event(
-                db,
-                job.id,
-                "detail_panel_render_succeeded",
-                {
-                    "event": "detail_panel_render_succeeded",
-                    "asset_id": asset.id,
-                    "panel_id": rendered["panel_id"],
-                    "slot_id": rendered.get("slot_id"),
-                    "display_order": rendered["display_order"],
-                    "panel_type": rendered.get("panel_type"),
-                    "render_total_ms": (rendered.get("generation_snapshot") or {}).get("timing", {}).get("render_total_ms"),
-                },
-            )
-
-        for source_asset in carry_forward_sources:
-            asset = _clone_asset_for_version(
-                source_asset,
-                job_id=job.id,
-                round_no=round_no,
-                version_no=version_no,
-                edit_instruction=payload.get("instruction"),
-            )
-            db.add(asset)
-            db.flush()
-            created_assets.append(asset)
-            panel_bytes_for_stitch.append((asset.display_order, storage.read_bytes(source_asset.image_url)))
-            progress_index += 1
-            update_job_status(db, job, status="running", progress=int((progress_index / total_assets) * 85), stage="generating")
-            append_job_event(
-                db,
-                job.id,
-                "asset_ready",
-                {
-                    "event": "asset_ready",
-                    "asset_id": asset.id,
-                    "asset_kind": "panel",
-                    "panel_id": asset.asset_role,
-                    "display_order": asset.display_order,
-                    "carry_forward": True,
-                    "render_total_ms": 0,
-                },
-            )
-            append_job_event(
-                db,
-                job.id,
-                "detail_panel_render_succeeded",
-                {
-                    "event": "detail_panel_render_succeeded",
-                    "asset_id": asset.id,
-                    "panel_id": asset.asset_role,
-                    "slot_id": asset.slot_id,
-                    "display_order": asset.display_order,
-                    "carry_forward": True,
-                    "render_total_ms": 0,
-                },
-            )
-
-        stitched_asset: AssetModel | None = None
-        if should_stitch:
-            update_job_status(db, job, status="running", progress=90, stage="stitching")
-            append_job_event(db, job.id, "job_progress", {"event": "job_progress", "progress": 90, "stage": "stitching"})
-
-            stitched_bytes = _stitch_detail_panels([item[1] for item in sorted(panel_bytes_for_stitch, key=lambda value: value[0])])
-            image_url, thumb_url, width, height, mime_type, file_size = storage.save_generated_image(
-                session_id=session.id,
-                round_no=round_no,
-                version_no=version_no,
-                role="detail_page_long",
-                display_order=len(panel_bytes_for_stitch) + 1,
-                image_bytes=stitched_bytes,
-                ext=".jpg",
-            )
-            stitched_asset = AssetModel(
-                session_id=session.id,
-                job_id=job.id,
-                round_no=round_no,
-                version_no=version_no,
-                parent_asset_id=None,
-                platform_id=session.active_platform_id,
-                asset_family="detail_page",
-                asset_kind="stitched",
-                asset_role="detail_page_long",
-                slot_id=None,
-                expression_mode=None,
-                rule_pack_id=effective_strategy_preview.get("detail_rule_pack"),
-                display_order=len(panel_bytes_for_stitch) + 1,
-                image_url=image_url,
-                thumbnail_url=thumb_url,
-                width=width,
-                height=height,
-                mime_type=mime_type,
-                file_size=file_size,
-                prompt_snapshot=None,
-                edit_instruction=payload.get("instruction"),
-                generation_snapshot={
-                    "asset_family": "detail_page",
-                    "asset_kind": "stitched",
-                    "source_panel_asset_ids": [asset.id for asset in created_assets],
-                    "panel_count": len(created_assets),
-                    "aspect_ratio": DETAIL_PAGE_ASPECT_RATIO,
-                    "rule_pack_id": effective_strategy_preview.get("detail_rule_pack"),
-                },
-                status="ready",
-            )
-            db.add(stitched_asset)
-            db.flush()
-            created_assets.append(stitched_asset)
-            append_job_event(
-                db,
-                job.id,
-                "detail_stitched_ready",
-                {
-                    "event": "detail_stitched_ready",
-                    "asset_id": stitched_asset.id,
-                    "asset_kind": "stitched",
-                    "display_order": stitched_asset.display_order,
-                    "detail_render_ms": detail_render_ms,
-                },
-            )
-
-        session.detail_generation_round = round_no
-        session.detail_latest_result_version = version_no
-        session.latest_detail_generate_job_id = job.id
-        update_session_last_generated_at(session)
-        refresh_session_search_cache(session)
-
-        result_payload = {
-            "asset_ids": [asset.id for asset in created_assets if asset.asset_kind == "panel"],
-            "stitched_asset_id": stitched_asset.id if stitched_asset is not None else None,
-            "detail_generation_round": round_no,
-            "version_no": version_no,
-            "detail_render_ms": detail_render_ms,
-            "detail_planner_ms": effective_strategy_preview.get("detail_planner_ms"),
-            "detail_reviewer_ms": effective_strategy_preview.get("detail_reviewer_ms"),
-            "expected_panel_ids": expected_panel_ids,
-            "missing_panel_ids": missing_panel_ids,
-            "expected_panel_count": len(expected_panel_ids),
-        }
-        terminal_status = "partial_succeeded" if missing_panel_ids else "succeeded"
-        update_job_status(
-            db,
-            job,
-            status=terminal_status,
-            progress=100,
-            stage="done",
-            result_payload=result_payload,
-        )
-        if missing_panel_ids:
-            for missing in missing_panels:
-                append_job_event(
-                    db,
-                    job.id,
-                    "detail_panel_render_failed",
-                    {
-                        "event": "detail_panel_render_failed",
-                        "panel_id": missing.get("panel_id"),
-                        "slot_id": missing.get("slot_id"),
-                        "display_order": missing.get("display_order"),
-                        "error": missing.get("error_message"),
-                        "error_code": missing.get("error_code"),
-                        "upstream_http_status": missing.get("upstream_http_status"),
-                        "retry_count": missing.get("retry_count"),
-                        "failure_stage": missing.get("failure_stage"),
-                    },
-                )
-            append_job_event(
-                db,
-                job.id,
-                "job_partial_succeeded",
-                {
-                    "event": "job_partial_succeeded",
-                    "job_id": job.id,
-                    "missing_panel_ids": missing_panel_ids,
-                },
-            )
-        else:
-            append_job_event(db, job.id, "job_succeeded", {"event": "job_succeeded", "job_id": job.id})
-        if session.user_id:
-            create_job_completion_notification(
-                db,
-                user_id=session.user_id,
-                session_id=session.id,
-                job_type=job.job_type,
-                succeeded=True,
-            )
+        return dict(flow_result.get("post_commit_dispatch") or {})
     except AppError as exc:
         update_job_status(
             db,
@@ -2095,32 +1315,19 @@ def _generate_image_with_asset_retry(
     role: str,
     display_order: int,
 ) -> bytes:
-    last_error: AppError | None = None
-    for attempt in range(1, ASSET_RENDER_ATTEMPTS + 1):
-        try:
-            return client.generate_image(
-                prompt,
-                image_size,
-                aspect_ratio=aspect_ratio,
-                reference_images=reference_images,
-            )
-        except AppError as exc:
-            last_error = exc
-            if not (exc.key == "upstream_image_error" and exc.retryable) or attempt == ASSET_RENDER_ATTEMPTS:
-                raise
-            delay = min(10 * attempt, 30)
-            logger.warning(
-                "Retrying single asset render after transient upstream image error: role=%s display_order=%s attempt=%s/%s error=%s",
-                role,
-                display_order,
-                attempt,
-                ASSET_RENDER_ATTEMPTS,
-                exc.message,
-            )
-            time.sleep(delay)
-    if last_error is not None:  # pragma: no cover
-        raise last_error
-    raise AppError("upstream_image_error", "unknown asset render error", 502)
+    return rendering_generate_image_with_asset_retry(
+        client=client,
+        prompt=prompt,
+        image_size=image_size,
+        aspect_ratio=aspect_ratio,
+        reference_images=reference_images,
+        role=role,
+        display_order=display_order,
+        asset_render_attempts=ASSET_RENDER_ATTEMPTS,
+        logger=logger,
+        sleep_fn=time.sleep,
+        app_error_cls=AppError,
+    )
 
 
 def _submit_image_request_with_retry(
@@ -2134,54 +1341,38 @@ def _submit_image_request_with_retry(
     display_order: int,
     submission_id: str,
 ) -> dict[str, Any]:
-    supports_submit_api = hasattr(client, "submit_image_request")
-    api_key = getattr(getattr(client, "settings", None), "whatai_api_key", "")
-    if not supports_submit_api or not api_key:
-        image_bytes = _generate_image_with_asset_retry(
-            client=client,
-            prompt=prompt,
-            image_size=image_size,
-            aspect_ratio=aspect_ratio,
-            reference_images=reference_images,
-            role=role,
-            display_order=display_order,
-        )
-        return {
-            "submission_id": submission_id,
-            "task_id": None,
-            "upstream_endpoint": "/v1/images/edits" if reference_images else "/v1/images/generations",
-            "result": {"fake_bytes": image_bytes},
-        }
+    return rendering_submit_image_request_with_retry(
+        client=client,
+        prompt=prompt,
+        image_size=image_size,
+        aspect_ratio=aspect_ratio,
+        reference_images=reference_images,
+        role=role,
+        display_order=display_order,
+        submission_id=submission_id,
+        generate_image_with_asset_retry_fn=_generate_image_with_asset_retry,
+        asset_render_attempts=ASSET_RENDER_ATTEMPTS,
+        logger=logger,
+        sleep_fn=time.sleep,
+        app_error_cls=AppError,
+    )
 
-    last_error: AppError | None = None
-    for attempt in range(1, ASSET_RENDER_ATTEMPTS + 1):
-        try:
-            submission = client.submit_image_request(
-                prompt=prompt,
-                size=image_size,
-                aspect_ratio=aspect_ratio,
-                reference_images=reference_images,
-                error_key="upstream_image_error",
-            )
-            submission["submission_id"] = submission_id
-            return submission
-        except AppError as exc:
-            last_error = exc
-            if not (exc.key == "upstream_image_error" and exc.retryable) or attempt == ASSET_RENDER_ATTEMPTS:
-                raise
-            delay = min(10 * attempt, 30)
-            logger.warning(
-                "Retrying image submission after transient upstream error: role=%s display_order=%s attempt=%s/%s error=%s",
-                role,
-                display_order,
-                attempt,
-                ASSET_RENDER_ATTEMPTS,
-                exc.message,
-            )
-            time.sleep(delay)
-    if last_error is not None:  # pragma: no cover
-        raise last_error
-    raise AppError("upstream_image_error", "unknown asset submission error", 502)
+
+def _resolve_fidelity_ref_limit(plan_item: dict, strategy_preview: dict) -> int:
+    """Resolve reference image limit from plan_item or strategy_preview fidelity tier."""
+    explicit_limit = plan_item.get("reference_image_limit")
+    if explicit_limit:
+        return int(explicit_limit)
+    fidelity_tier = str(
+        (strategy_preview.get("prompt_plan", {}) or {}).get("fidelity_tier")
+        or (strategy_preview.get("analysis_snapshot", {}) or {}).get("fidelity_tier")
+        or "standard"
+    ).strip().lower()
+    if fidelity_tier == "critical":
+        return 4
+    elif fidelity_tier == "high":
+        return 3
+    return 2
 
 
 def _resolve_image_size(aspect_ratio: str) -> str:
@@ -2200,61 +1391,6 @@ def _merge_instructions(instruction: str | None, appended: str) -> str:
     return f"{instruction}；{appended}"
 
 
-def _ensure_detail_strategy_preview(
-    db: Session,
-    session: SessionModel,
-    session_images: list[SessionImageModel],
-    style_images: list[DetailStyleImageModel],
-) -> dict:
-    prompt_overrides = _session_prompt_overrides(db, session.id)
-    resolved_copy = _resolved_copy_for_session(db, session)
-    existing_preview = session.detail_strategy_preview or {}
-    if isinstance(existing_preview, dict) and existing_preview.get("product_reference_manifest") and existing_preview.get("panel_plan"):
-        product_manifest = build_reference_manifest(load_reference_images(session_images or []))
-        style_manifest = build_reference_manifest(load_reference_images(style_images or []))
-        current_input_hash = detail_strategy_preview_input_hash(
-            resolved_copy,
-            product_manifest=product_manifest,
-            style_manifest=style_manifest,
-            planner_instruction=existing_preview.get("planner_instruction"),
-            panel_preferences={
-                str(item.get("slot_id")): item
-                for item in (existing_preview.get("panel_preferences") or [])
-                if isinstance(item, dict) and item.get("slot_id")
-            },
-            active_platform_id=session.active_platform_id,
-        )
-        if not detail_strategy_preview_needs_rebuild(
-            existing_preview,
-            confirmed_copy=resolved_copy,
-            active_platform_id=session.active_platform_id,
-            current_input_hash=current_input_hash,
-        ):
-            if existing_preview.get("input_hash") != current_input_hash:
-                session.detail_strategy_preview = {**existing_preview, "input_hash": current_input_hash}
-            logger.info(
-                "Reusing persisted detail_strategy_preview during generation: session_id=%s input_hash=%s",
-                session.id,
-                current_input_hash,
-            )
-            return session.detail_strategy_preview or existing_preview
-
-    rebuilt = build_detail_strategy_preview(
-        resolved_copy,
-        db=db,
-        product_images=session_images,
-        style_images=style_images,
-        analysis_snapshot=session.analysis_snapshot or {},
-        parameter_snapshot=session.parameter_snapshot or {},
-        planner_instruction=(session.detail_strategy_preview or {}).get("planner_instruction"),
-        panel_preferences=(session.detail_strategy_preview or {}).get("panel_preferences") or [],
-        active_platform_id=session.active_platform_id,
-        prompt_overrides=prompt_overrides,
-    )
-    session.detail_strategy_preview = rebuilt
-    return rebuilt
-
-
 def _render_detail_panels_concurrently(
     *,
     db: Session | None = None,
@@ -2267,68 +1403,23 @@ def _render_detail_panels_concurrently(
     product_grid,
     style_grid,
 ) -> dict[str, Any]:
-    if not plan:
-        return []
-
-    client = WhataiClient()
-    settings = get_settings()
-    render_specs = [
-        _prepare_detail_render_spec(
-            db=db,
-            confirmed_copy=confirmed_copy,
-            strategy_preview=strategy_preview,
-            plan_item=plan_item,
-            instruction=instruction,
-            loaded_product_images=loaded_product_images,
-            loaded_style_images=loaded_style_images,
-            product_grid=product_grid,
-            style_grid=style_grid,
-        )
-        for plan_item in plan
-    ]
-    submit_bundle = _submit_render_specs(
-        client=client,
-        render_specs=render_specs,
-        max_workers=settings.detail_generation_submit_concurrency,
-        batch_size=settings.detail_image_submit_batch_size,
-        batch_interval_seconds=settings.image_submit_batch_interval_seconds,
+    return rendering_render_detail_panels_concurrently(
+        db=db,
+        confirmed_copy=confirmed_copy,
+        strategy_preview=strategy_preview,
+        plan=plan,
+        instruction=instruction,
+        loaded_product_images=loaded_product_images,
+        loaded_style_images=loaded_style_images,
+        product_grid=product_grid,
+        style_grid=style_grid,
+        client_factory=WhataiClient,
+        settings=get_settings(),
+        prepare_render_spec_fn=_prepare_detail_render_spec,
+        submit_render_specs_fn=_submit_render_specs,
+        materialize_render_specs_fn=_materialize_render_specs,
+        finalize_rendered_panel_fn=_finalize_detail_rendered_panel,
     )
-    submitted_specs = submit_bundle["submitted_specs"]
-    submit_failed_specs = list(submit_bundle.get("failed_specs") or [])
-    poll_started = time.perf_counter()
-    results_by_submission = (
-        client.poll_image_tasks(
-            [spec["submission"] for spec in submitted_specs],
-            "upstream_image_error",
-            initial_delay_seconds=settings.image_poll_initial_delay_seconds,
-        )
-        if submitted_specs
-        else {}
-    )
-    poll_ms = int((time.perf_counter() - poll_started) * 1000)
-    rendered_specs = _materialize_render_specs(
-        client=client,
-        render_specs=[
-            {
-                **spec,
-                "timing": {
-                    **dict(spec.get("timing") or {}),
-                    "poll_ms": poll_ms,
-                    "poll_started_after_ms": int(settings.image_poll_initial_delay_seconds * 1000),
-                },
-            }
-            for spec in submitted_specs
-        ],
-        results_by_submission=results_by_submission,
-        max_workers=settings.detail_generation_concurrency,
-    )
-    return {
-        "rendered_panels": [_finalize_detail_rendered_panel(render_spec, strategy_preview) for render_spec in rendered_specs["rendered_specs"]],
-        "missing_panels": submit_failed_specs + rendered_specs["failed_specs"],
-        "submit_batches": submit_bundle["submit_batches"],
-        "submit_strategy_version": submit_bundle["submit_strategy_version"],
-        "poll_initial_delay_ms": int(settings.image_poll_initial_delay_seconds * 1000),
-    }
 
 
 def _prepare_detail_render_spec(
@@ -2343,103 +1434,30 @@ def _prepare_detail_render_spec(
     product_grid,
     style_grid,
 ) -> dict[str, Any]:
-    panel_id = str(plan_item["panel_id"])
-    slot_id = str(plan_item.get("slot_id") or panel_id)
-    display_order = int(plan_item["display_order"])
-    aspect_ratio = str(strategy_preview.get("aspect_ratio") or DETAIL_PAGE_ASPECT_RATIO)
-    prompt_payload = compose_detail_panel_prompt(
+    return prepare_detail_render_spec(
+        db=db,
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
-        panel_id=panel_id,
-        instruction=instruction,
-        panel_plan_item=plan_item,
-        db=db,
-    )
-    reference_images = _resolve_detail_reference_images(
         plan_item=plan_item,
+        instruction=instruction,
         loaded_product_images=loaded_product_images,
         loaded_style_images=loaded_style_images,
         product_grid=product_grid,
         style_grid=style_grid,
+        compose_detail_panel_prompt_fn=compose_detail_panel_prompt,
+        resolve_detail_reference_images_fn=_resolve_detail_reference_images,
     )
-    return {
-        "submission_id": f"detail:{slot_id}:{display_order}",
-        "role": panel_id,
-        "panel_id": panel_id,
-        "slot_id": slot_id,
-        "display_order": display_order,
-        "aspect_ratio": aspect_ratio,
-        "image_size": DETAIL_PAGE_IMAGE_SIZE,
-        "confirmed_copy": confirmed_copy,
-        "plan_item": plan_item,
-        "prompt_payload": prompt_payload,
-        "reference_images": reference_images,
-        "planner_instruction": str(strategy_preview.get("planner_instruction") or "") or None,
-    }
 
 
 def _finalize_detail_rendered_panel(
     render_spec: dict[str, Any],
     strategy_preview: dict[str, object],
 ) -> dict[str, object]:
-    plan_item = render_spec["plan_item"]
-    prompt_payload = render_spec["prompt_payload"]
-    confirmed_copy = render_spec.get("confirmed_copy") or {}
-    image_bytes = render_spec["image_bytes"]
-    generation_snapshot = {
-        "asset_family": "detail_page",
-        "asset_kind": "panel",
-        "use_case": strategy_preview.get("use_case"),
-        "aspect_ratio": render_spec["aspect_ratio"],
-        "image_size": DETAIL_PAGE_IMAGE_SIZE,
-        "size": DETAIL_PAGE_IMAGE_SIZE,
-        "panel_label": plan_item.get("panel_label"),
-        "final_prompt": prompt_payload["final_prompt"],
-        "prompt_blocks": prompt_payload["blocks"],
-        "copy_blocks": prompt_payload.get("copy_blocks") or {},
-        "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
-        "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
-        "truth_contract": prompt_payload.get("truth_contract") or {},
-        "risk_flags": prompt_payload.get("risk_flags") or [],
-        "fidelity_validation": None,
-        "selling_point_binding": prompt_payload.get("selling_point_binding") or {},
-        "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
-        "applied_preset_id": prompt_payload.get("applied_preset_id"),
-        "style_preset_id": confirmed_copy.get("style_preset_id"),
-        "resolved_style_preset": confirmed_copy.get("resolved_style_preset"),
-        "style_custom": confirmed_copy.get("style_custom"),
-        "product_reference_image_ids": [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)],
-        "style_reference_image_ids": [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)],
-        "reference_grid_ids": [image.image_id for image in render_spec["reference_images"] if str(image.image_id).startswith("detail_")],
-        "effective_reference_image_ids": [image.image_id for image in render_spec["reference_images"]],
-        "upstream_endpoint": render_spec["submission"].get("upstream_endpoint"),
-        "planner_instruction": render_spec["planner_instruction"],
-        "planner_source": prompt_payload.get("planner_source"),
-        "slot_id": render_spec["slot_id"],
-        "narrative_section": plan_item.get("narrative_section"),
-        "panel_goal": plan_item.get("panel_goal"),
-        "copy_focus": plan_item.get("copy_focus"),
-        "visual_truth_mode": plan_item.get("visual_truth_mode"),
-        "origin_note": plan_item.get("origin_note"),
-        "panel_type": prompt_payload.get("panel_type"),
-        "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
-        "display_order": render_spec["display_order"],
-        "layout_template": prompt_payload.get("layout_template"),
-        "timing": dict(render_spec.get("timing") or {}),
-        "submission_batch_no": int(render_spec.get("submission_batch_no") or 1),
-        "submission_batch_size": int(render_spec.get("submission_batch_size") or 1),
-        "submit_strategy_version": str(render_spec.get("submit_strategy_version") or SUBMIT_STRATEGY_VERSION),
-    }
-    return {
-        "panel_id": render_spec["panel_id"],
-        "slot_id": render_spec["slot_id"],
-        "display_order": render_spec["display_order"],
-        "panel_type": prompt_payload.get("panel_type"),
-        "rule_pack_id": strategy_preview.get("detail_rule_pack"),
-        "image_bytes": image_bytes,
-        "prompt_payload": prompt_payload,
-        "generation_snapshot": generation_snapshot,
-    }
+    return finalize_detail_rendered_panel(
+        render_spec=render_spec,
+        strategy_preview=strategy_preview,
+        submit_strategy_version=SUBMIT_STRATEGY_VERSION,
+    )
 
 
 def _resolve_detail_reference_images(
@@ -2450,35 +1468,13 @@ def _resolve_detail_reference_images(
     product_grid,
     style_grid,
 ) -> list:
-    product_by_id = {image.image_id: image for image in loaded_product_images}
-    style_by_id = {image.image_id: image for image in loaded_style_images}
-    selected: list = []
-    seen: set[str] = set()
-    max_images = 3 if str(plan_item.get("panel_type") or "") in {"feature_exploded_view", "feature_process_material", "detail_closeup", "parameter_explainer"} else 2
-
-    for image_id in [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)]:
-        image = product_by_id.get(image_id)
-        if image is None or image.image_id in seen:
-            continue
-        selected.append(image)
-        seen.add(image.image_id)
-        if len(selected) >= max_images:
-            return selected
-
-    for image_id in [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)]:
-        image = style_by_id.get(image_id)
-        if image is None or image.image_id in seen:
-            continue
-        selected.append(image)
-        seen.add(image.image_id)
-        if len(selected) >= max_images:
-            return selected
-
-    if not selected:
-        selected.append(product_grid)
-    if style_grid is not None and len(selected) < max_images:
-        selected.append(style_grid)
-    return selected[:max_images]
+    return resolve_detail_reference_images(
+        plan_item=plan_item,
+        loaded_product_images=loaded_product_images,
+        loaded_style_images=loaded_style_images,
+        product_grid=product_grid,
+        style_grid=style_grid,
+    )
 
 
 def _render_single_detail_panel(
@@ -2490,96 +1486,101 @@ def _render_single_detail_panel(
     instruction: str | None,
     reference_grids: list,
 ) -> dict[str, object]:
-    panel_id = str(plan_item["panel_id"])
-    slot_id = str(plan_item.get("slot_id") or panel_id)
-    display_order = int(plan_item["display_order"])
-    planner_instruction = str(strategy_preview.get("planner_instruction") or "") or None
-    aspect_ratio = str(strategy_preview.get("aspect_ratio") or DETAIL_PAGE_ASPECT_RATIO)
-    prompt_payload = compose_detail_panel_prompt(
+    strategy_preview = validate_contract_warn(
+        DetailStrategyPreviewPayload,
+        strategy_preview,
+        context={"stage": "pipeline_render_single_detail_strategy_preview"},
+    )
+    plan_item = validate_contract_warn(
+        DetailPanelPlanItem,
+        plan_item,
+        context={"slot_id": plan_item.get("slot_id"), "panel_id": plan_item.get("panel_id"), "stage": "pipeline_render_single_detail_plan_item"},
+    )
+    return render_single_detail_panel_sync(
+        db=db,
         confirmed_copy=confirmed_copy,
         strategy_preview=strategy_preview,
-        panel_id=panel_id,
+        plan_item=plan_item,
         instruction=instruction,
-        panel_plan_item=plan_item,
-        db=db,
+        reference_grids=reference_grids,
+        compose_detail_panel_prompt_fn=compose_detail_panel_prompt,
+        client_factory=WhataiClient,
+        generate_image_with_asset_retry_fn=_generate_image_with_asset_retry,
+        perf_counter_fn=time.perf_counter,
     )
-    client = WhataiClient()
-    started_at = time.perf_counter()
-    image_bytes = _generate_image_with_asset_retry(
-        client=client,
-        prompt=prompt_payload["final_prompt"],
-        image_size=DETAIL_PAGE_IMAGE_SIZE,
-        aspect_ratio=aspect_ratio,
-        reference_images=reference_grids,
-        role=panel_id,
-        display_order=display_order,
-    )
-    generation_snapshot = {
-        "asset_family": "detail_page",
-        "asset_kind": "panel",
-        "use_case": strategy_preview.get("use_case"),
-        "aspect_ratio": aspect_ratio,
-        "image_size": DETAIL_PAGE_IMAGE_SIZE,
-        "size": DETAIL_PAGE_IMAGE_SIZE,
-        "panel_label": plan_item.get("panel_label"),
-        "final_prompt": prompt_payload["final_prompt"],
-        "prompt_blocks": prompt_payload["blocks"],
-        "copy_blocks": prompt_payload.get("copy_blocks") or {},
-        "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
-        "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
-        "truth_contract": prompt_payload.get("truth_contract") or {},
-        "risk_flags": prompt_payload.get("risk_flags") or [],
-        "fidelity_validation": None,
-        "selling_point_binding": prompt_payload.get("selling_point_binding") or {},
-        "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
-        "applied_preset_id": prompt_payload.get("applied_preset_id"),
-        "style_preset_id": confirmed_copy.get("style_preset_id"),
-        "resolved_style_preset": confirmed_copy.get("resolved_style_preset"),
-        "style_custom": confirmed_copy.get("style_custom"),
-        "product_reference_image_ids": [str(value) for value in plan_item.get("product_reference_ids", []) if str(value)],
-        "style_reference_image_ids": [str(value) for value in plan_item.get("style_reference_ids", []) if str(value)],
-        "reference_grid_ids": [grid.image_id for grid in reference_grids],
-        "upstream_endpoint": "/v1/images/edits",
-        "planner_instruction": planner_instruction,
-        "planner_source": prompt_payload.get("planner_source"),
-        "slot_id": slot_id,
-        "narrative_section": plan_item.get("narrative_section"),
-        "panel_goal": plan_item.get("panel_goal"),
-        "copy_focus": plan_item.get("copy_focus"),
-        "visual_truth_mode": plan_item.get("visual_truth_mode"),
-        "origin_note": plan_item.get("origin_note"),
-        "panel_type": prompt_payload.get("panel_type"),
-        "rule_modules_used": prompt_payload.get("rule_modules_used") or [],
-        "display_order": display_order,
-        "layout_template": prompt_payload.get("layout_template"),
-        "timing": {"render_total_ms": int((time.perf_counter() - started_at) * 1000)},
-        "submission_batch_no": 1,
-        "submission_batch_size": 1,
-        "submit_strategy_version": "single_asset_sync",
-    }
-    return {
-        "panel_id": panel_id,
-        "slot_id": slot_id,
-        "display_order": display_order,
-        "panel_type": prompt_payload.get("panel_type"),
-        "rule_pack_id": strategy_preview.get("detail_rule_pack"),
-        "image_bytes": image_bytes,
-        "prompt_payload": prompt_payload,
-        "generation_snapshot": generation_snapshot,
-    }
 
 
-def _stitch_detail_panels(panel_images: list[bytes]) -> bytes:
-    frames = [Image.open(io.BytesIO(item)).convert("RGB") for item in panel_images]
-    if not frames:
-        raise AppError("missing_required_images", "detail panels missing", 400)
-    width = max(frame.width for frame in frames)
-    height = sum(frame.height for frame in frames)
-    canvas = Image.new("RGB", (width, height), color=(255, 255, 255))
-    offset = 0
-    for frame in frames:
-        canvas.paste(frame, (0, offset))
-        offset += frame.height
-    buffer = io.BytesIO()
-    canvas.save(buffer, format="JPEG", quality=92)
-    return buffer.getvalue()
+# ---------------------------------------------------------------------------
+# Text-edit mode: replace visible copy on an already-generated image
+# ---------------------------------------------------------------------------
+
+
+def _load_asset_as_reference_image(
+    asset: AssetModel, *, storage: "StorageAdapter"
+) -> LoadedReferenceImage:
+    return load_generated_asset_reference(asset, storage=storage)
+
+
+def run_edit_asset_text_job(db: Session, job_id: str) -> dict[str, Any] | None:
+    """Replace visible copy on an already-generated main_gallery image."""
+    from app.services.prompts import compose_text_edit_prompt
+
+    storage = get_storage_adapter()
+    job = _require_job(db, job_id)
+    session = _require_session(db, job.session_id)
+    payload = job.input_payload or {}
+    lock_keys = payload.get("lock_keys") or []
+
+    try:
+        update_job_status(db, job, status="running", progress=3, stage="preparing")
+        append_job_event(db, job.id, "job_started", {"event": "job_started", "job_id": job.id})
+        flow_result = execute_text_edit_flow(
+            db=db,
+            job=job,
+            session=session,
+            payload=payload,
+            storage=storage,
+            session_images_fn=_session_images,
+            load_reference_images_fn=load_reference_images,
+            load_asset_as_reference_image_fn=_load_asset_as_reference_image,
+            client_factory=WhataiClient,
+            generate_image_with_asset_retry_fn=_generate_image_with_asset_retry,
+            dispatch_quality_review_fn=_dispatch_quality_review,
+            ensure_session_transition_fn=ensure_session_transition,
+            resolve_image_size_fn=_resolve_image_size,
+            compose_text_edit_prompt_fn=compose_text_edit_prompt,
+            append_job_event_fn=append_job_event,
+            update_job_status_fn=update_job_status,
+            update_session_last_generated_at_fn=update_session_last_generated_at,
+            refresh_session_search_cache_fn=refresh_session_search_cache,
+            create_job_completion_notification_fn=create_job_completion_notification,
+            perf_counter_fn=time.perf_counter,
+        )
+        return dict(flow_result.get("post_commit_dispatch") or {})
+    except AppError as exc:
+        update_job_status(
+            db,
+            job,
+            status="failed",
+            progress=100,
+            stage="failed",
+            error_code=str(exc.error.code),
+            error_message=exc.message,
+            result_payload=_job_failure_payload(exc, planner_stage=None),
+        )
+        append_job_event(
+            db,
+            job.id,
+            "job_failed",
+            {
+                "event": "job_failed",
+                "error": exc.message,
+                "error_code": exc.error.code,
+                "upstream_reason": exc.key,
+                "upstream_http_status": exc.http_status,
+            },
+        )
+        session.status = "failed"
+        raise
+    finally:
+        release_locks(lock_keys)

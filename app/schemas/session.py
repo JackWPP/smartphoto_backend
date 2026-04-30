@@ -39,6 +39,13 @@ class UploadSessionImageData(BaseModel):
     uploaded_images: list[SessionImageSummary] = Field(description="当前 session 下所有有效图片。")
 
 
+class BatchUploadSessionImageData(BaseModel):
+    image_ids: list[str] = Field(description="批量上传的图片 ID 列表。")
+    session_id: str = Field(description="所属会话 ID。")
+    status: str = Field(description="上传后的 session 状态。")
+    uploaded_images: list[SessionImageSummary] = Field(description="当前 session 下所有有效图片。")
+
+
 class UploadPresignRequest(BaseModel):
     session_id: str = Field(description="所属会话 ID。")
     upload_kind: Literal["session_image", "detail_style_image", "parameter_attachment", "strategy_reference_image"] = Field(description="上传资源类型。")
@@ -253,6 +260,8 @@ class CopyData(BaseModel):
     style_choice: str = Field(default="", description="旧版风格选择字段，仅兼容读取。")
 
 
+    copy_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠 copy 瀛楁鐨勬潵婧愬綊鍥犱俊鎭€?")
+
 class CopySaveData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     status: str = Field(description="保存 copy 后的 session 状态。")
@@ -283,6 +292,10 @@ class StrategyPreviewRequest(BaseModel):
     planner_instruction: str | None = Field(
         default=None,
         description="Step 5 额外策略指令，例如“白底图更标准，主图更像参考图”。",
+    )
+    brand_memory_enabled: bool | None = Field(
+        default=None,
+        description="brand memory toggle for current strategy preview",
     )
     slot_preferences: list[dict[str, Any]] = Field(
         default_factory=list,
@@ -371,9 +384,13 @@ class PromptPreviewItem(BaseModel):
     planner_base: str | None = Field(default=None, description="当前槽位的基础生成目标。")
     expression_mode: str | None = Field(default=None, description="当前槽位的表达方式。")
     expression_label: str | None = Field(default=None, description="表达方式名称。")
+    brand_memory_trace: list[dict[str, Any]] = Field(default_factory=list, description="brand memory trace for this prompt item")
     rule_modules_used: list[str] = Field(default_factory=list, description="本次 prompt 组合到的规则模块列表。")
     platform_overlay: dict[str, Any] | None = Field(default=None, description="平台 overlay 元数据。")
     resolved_constraints: list[str] = Field(default_factory=list, description="本次 prompt 的最终约束列表。")
+
+
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠妲戒綅 copy blocks 鐨勬潵婧愬綊鍥犱俊鎭€?")
 
 
 class PromptPreviewLatestAsset(BaseModel):
@@ -397,6 +414,10 @@ class PromptPreviewLatestAsset(BaseModel):
 class PromptPreviewData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     active_platform_id: str | None = Field(default=None, description="当前生效平台。")
+    brand_id: str | None = Field(default=None, description="bound brand id")
+    brand_memory_enabled: bool = Field(default=False, description="brand memory enabled")
+    brand_memory_applied: bool = Field(default=False, description="brand memory applied")
+    brand_memory_trace: list[dict[str, Any]] = Field(default_factory=list, description="brand memory trace")
     hero_scene: str = Field(default="", description="当前策略使用的首图场景。")
     core_selling_points: list[str] = Field(default_factory=list, description="当前策略使用的核心卖点列表。")
     key_parameters: list[dict[str, Any]] = Field(default_factory=list, description="当前策略使用的核心参数列表。")
@@ -408,6 +429,9 @@ class PromptPreviewData(BaseModel):
     reference_manifest: list[dict[str, Any]] = Field(description="当前 session 可用参考图清单。")
     prompts: list[PromptPreviewItem] = Field(description="按主图角色生成的 prompt 预览列表。")
     latest_assets: list[PromptPreviewLatestAsset] = Field(description="最近一版结果的执行快照。")
+
+
+    copy_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠 session 绾?copy 鏉ユ簮褰掑洜銆?")
 
 
 class DetailPromptPreviewItem(BaseModel):
@@ -442,6 +466,10 @@ class DetailPromptPreviewItem(BaseModel):
     rule_modules_used: list[str] = Field(default_factory=list, description="详情页规则模块列表。")
     platform_overlay: dict[str, Any] | None = Field(default=None, description="详情页平台 overlay 元数据。")
     copy_language: str | None = Field(default=None, description="当前详情页 panel 的图上文案语言策略。")
+
+
+    copy_blocks_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠 panel copy blocks 鐨勬潵婧愬綊鍥犱俊鎭€?")
+    copy_lines_attribution: list[dict[str, Any]] = Field(default_factory=list, description="褰撳墠 panel copy lines 鐨勬潵婧愬綊鍥犱俊鎭€?")
 
 
 class DetailPromptPreviewLatestAsset(BaseModel):
@@ -479,8 +507,12 @@ class DetailPromptPreviewData(BaseModel):
     latest_assets: list[DetailPromptPreviewLatestAsset] = Field(description="最近一版详情页结果的执行快照。")
 
 
+    copy_attribution: dict[str, Any] = Field(default_factory=dict, description="褰撳墠 session 绾?copy 鏉ユ簮褰掑洜銆?")
+
+
 class GenerateGalleryRequest(BaseModel):
     instruction: str | None = Field(default=None, description="本轮整组生图附加指令。")
+    brand_memory_enabled: bool | None = Field(default=None, description="brand memory toggle for generation")
     slot_ids: list[str] = Field(
         default_factory=list,
         description="可选的主图槽位列表。为空时生成整组；传值时只生成指定槽位。",
@@ -501,6 +533,9 @@ class ParameterSnapshotData(BaseModel):
     parameter_snapshot: dict[str, Any] = Field(description="参数提取结果快照。")
     applied_copy_fields: dict[str, Any] = Field(default_factory=dict, description="当前参数结果映射到 copy 的正式字段。")
     overwrite_mode: str = Field(default="replace_all", description="参数结果映射到 copy 的默认策略。")
+
+
+    applied_copy_attribution: dict[str, Any] = Field(default_factory=dict, description="鍙傛暟缁撴灉鏄犲皠鍒?copy 鐨勬潵婧愬綊鍥犱俊鎭€?")
 
 
 class ParameterCompletionRequest(BaseModel):
@@ -557,6 +592,27 @@ class GenericGenerationJobData(BaseModel):
     status: str = Field(description="任务状态。")
 
 
+class AssetHistoryItem(BaseModel):
+    asset_id: str = Field(description="资产 ID。")
+    version_no: int = Field(description="版本号。")
+    round_no: int = Field(description="生成轮次。")
+    image_url: str = Field(description="图片 URL。")
+    thumbnail_url: str | None = Field(default=None, description="缩略图 URL。")
+    width: int = Field(description="图片宽度。")
+    height: int = Field(description="图片高度。")
+    status: str = Field(description="资产状态。")
+    quality_status: str = Field(description="质量状态。")
+    visibility_status: str = Field(description="可见性状态。")
+    edit_instruction: str | None = Field(default=None, description="生成时的修改指令。")
+    created_at: datetime | None = Field(default=None, description="创建时间。")
+
+
+class AssetRestoreResponse(BaseModel):
+    restored_asset_id: str = Field(description="被恢复的资产 ID。")
+    previous_asset_id: str = Field(description="之前的当前资产 ID（已被标记为 superseded）。")
+    slot_id: str = Field(description="槽位 ID。")
+
+
 class GalleryRegenerateRequest(BaseModel):
     reason: str | None = Field(default=None, description="用户不满意原因。")
     instruction: str | None = Field(default=None, description="本轮附加生图指令。")
@@ -568,9 +624,28 @@ class GlobalEditRequest(BaseModel):
     asset_ids: list[str] = Field(default_factory=list, description="当 scope=selected 时提交的资产 ID 列表。")
 
 
+class EditConstraints(BaseModel):
+    """结构化编辑约束，用于定向控制重生成行为。"""
+    keep: list[str] = Field(default_factory=list, description="需要保留的属性，如 product_identity, composition, style。", max_length=10)
+    change: dict[str, str] = Field(default_factory=dict, description="需要变更的属性及目标值，如 {\"background\": \"pure_white\"}。")
+    remove: list[str] = Field(default_factory=list, description="需要移除的元素，如 visible_text, watermark。", max_length=10)
+
+
 class AssetRegenerateRequest(BaseModel):
     instruction: str = Field(description="单图重生成指令。")
     keep_style_consistency: bool = Field(default=True, description="是否保持与当前版本风格一致。")
+    edit_constraints: EditConstraints | None = Field(default=None, description="可选的结构化编辑约束，与 instruction 互补。")
+
+
+class AssetEditTextRequest(BaseModel):
+    """文字编辑请求 - 保持图片构图不变，仅替换可见文案。"""
+    copy_blocks: dict[str, Any] = Field(
+        description="要替换的文案块。key 与 generation_snapshot.copy_blocks 一致：headline/supporting/proof_lines/matrix_lines。"
+    )
+    instruction: str | None = Field(
+        default=None,
+        description="可选附加指令，如'字体改大一点'、'标题换成红色'。"
+    )
 
 
 class AnalysisTriggerData(BaseModel):
@@ -592,6 +667,8 @@ class SessionSnapshotData(BaseModel):
     session_id: str = Field(description="会话 ID。")
     status: str = Field(description="当前 session 状态。")
     current_step: int = Field(description="当前步骤号。")
+    brand_id: str | None = Field(default=None, description="bound brand id")
+    brand_memory_enabled: bool = Field(default=False, description="brand memory enabled")
     selected_platform_ids: list[str] = Field(description="当前选中的平台列表。")
     active_platform_id: str | None = Field(default=None, description="当前生效平台。")
     analysis_snapshot: dict[str, Any] | None = Field(default=None, description="分析结果快照。")
@@ -609,3 +686,22 @@ class SessionSnapshotData(BaseModel):
     latest_result_version: int = Field(description="最近一版结果版本号。")
     detail_generation_round: int = Field(description="当前详情页生成轮次。")
     detail_latest_result_version: int = Field(description="最近一版详情页结果版本号。")
+    detail_preview_generated: bool = Field(default=False, description="详情页预览是否已生成。")
+    detail_preview_version: int = Field(default=0, description="详情页预览版本号。")
+    detail_preview_image_urls: dict[str, str] | None = Field(default=None, description="详情页预览图片 URL 映射。")
+
+
+class DetailPreviewPanelItem(BaseModel):
+    panel_id: str = Field(description="panel ID。")
+    slot_id: str | None = Field(default=None, description="详情页固定槽位 ID。")
+    display_order: int = Field(description="显示顺序。")
+    preview_url: str = Field(description="预览图片 URL。")
+    is_preview: bool = Field(default=True, description="是否为预览版。")
+    preview_watermarked: bool = Field(default=True, description="预览版是否已嵌入水印。")
+
+
+class DetailPreviewData(BaseModel):
+    session_id: str = Field(description="会话 ID。")
+    preview_generated: bool = Field(description="详情页预览是否已生成。")
+    preview_version: int = Field(description="详情页预览版本号。")
+    panels: list[DetailPreviewPanelItem] = Field(default_factory=list, description="预览 panel 列表。")

@@ -13,6 +13,9 @@ FIDELITY_ISSUE_TAXONOMY = (
     "selling_point_not_rendered",
     "text_mismatch",
     "insufficient_reference_evidence",
+    "logo_position_drift",
+    "product_text_altered",
+    "color_palette_drift",
 )
 
 STRUCTURE_SENSITIVE_CATEGORIES = {
@@ -21,6 +24,12 @@ STRUCTURE_SENSITIVE_CATEGORIES = {
     "空气净化器",
     "宠物饮水机",
     "净水器",
+    "智能门锁",
+    "剃须刀",
+    "电动牙刷",
+    "洗地机",
+    "扫地机",
+    "空调",
 }
 
 _ENTITY_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -35,7 +44,16 @@ _ENTITY_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def category_is_structure_sensitive(category: Any) -> bool:
+def category_is_structure_sensitive(category: Any, analysis_snapshot: dict[str, Any] | None = None) -> bool:
+    """Check if the product requires structure-sensitive handling.
+    Prioritizes fidelity_tier from analysis snapshot, falls back to hardcoded set.
+    """
+    if analysis_snapshot:
+        tier = str((analysis_snapshot or {}).get("fidelity_tier", "")).strip().lower()
+        if tier in ("critical", "high"):
+            return True
+        if tier in ("standard", "creative"):
+            return False
     return repair_broken_text(category) in STRUCTURE_SENSITIVE_CATEGORIES
 
 
@@ -167,6 +185,9 @@ def build_truth_contract(
     evidence_scores = snapshot.get("evidence_scores") if isinstance(snapshot.get("evidence_scores"), dict) else {}
     risk_flags = [str(item).strip() for item in snapshot.get("risk_flags", []) if str(item).strip()]
     selling_point_entities = [str(item).strip() for item in snapshot.get("selling_point_entities", []) if str(item).strip()]
+    identity_anchor = snapshot.get("product_identity_anchor") if isinstance(snapshot.get("product_identity_anchor"), dict) else {}
+    component_registry = snapshot.get("component_registry") if isinstance(snapshot.get("component_registry"), list) else []
+    fidelity_tier = str(snapshot.get("fidelity_tier") or "standard").strip().lower()
 
     immutable_features = _dedupe(
         [
@@ -195,6 +216,25 @@ def build_truth_contract(
             *extract_selling_point_entities(copy_focus, focus_selling_point),
         ]
     )
+
+    # --- Truth Contract v2: Component-level locks ---
+    component_locks = []
+    for comp in component_registry[:8]:
+        if isinstance(comp, dict) and comp.get("name"):
+            component_locks.append({
+                "component": str(comp["name"]),
+                "position": str(comp.get("position", "")),
+                "constraint": "preserve_exact",
+            })
+
+    color_palette_hex: list[str] = []
+    if isinstance(identity_anchor.get("color_palette_hex"), list):
+        color_palette_hex = [str(c).strip() for c in identity_anchor["color_palette_hex"] if str(c).strip()][:6]
+
+    brand_marks_preserve: list[str] = []
+    if isinstance(identity_anchor.get("brand_marks"), list):
+        brand_marks_preserve = [str(m).strip() for m in identity_anchor["brand_marks"] if str(m).strip()][:4]
+
     structure_score = int(evidence_scores.get("structure") or 0)
     proportion_score = int(evidence_scores.get("proportion") or 0)
     scene_score = int(evidence_scores.get("scene") or 0)
@@ -215,6 +255,32 @@ def build_truth_contract(
         "按上传参考图保持高度、宽度、厚薄和部件相对比例。" if proportion_score >= 45 else "缺少明确尺寸证据，避免夸张强调迷你/超大/手持比例。"
     )
 
+    # --- Truth Contract v3: Hardened Fidelity Locks ---
+    logo_lock_mode = "strict" if brand_marks_preserve else "relaxed"
+
+    # Detect text-on-product: check control_panel_note and do_not_move_features
+    _text_keywords = ("文字", "标签", "按键", "按钮", "屏幕", "面板", "显示", "字样", "型号", "logo", "LOGO", "Logo")
+    _panel_note = str(summary.get("control_panel_note") or "")
+    _do_not_move = str(summary.get("do_not_move_features") or "")
+    text_on_product_lock = any(kw in _panel_note or kw in _do_not_move for kw in _text_keywords)
+
+    # Color drift tolerance based on fidelity tier
+    color_drift_tolerance = "zero" if fidelity_tier in ("critical", "high") else ("low" if fidelity_tier == "standard" else "relaxed")
+
+    # Pre-composed hard constraint summary for high-salience prompt placement
+    hard_parts: list[str] = []
+    if logo_lock_mode == "strict":
+        hard_parts.append("不得移动、旋转、缩放或去除任何品牌logo和商标")
+    if text_on_product_lock:
+        hard_parts.append("产品本体上的型号、按键标签、屏幕文���必须与原图完全一致")
+    if color_drift_tolerance == "zero":
+        hard_parts.append("色相、饱和度、明度必须与参考图一致，不允许任何色偏")
+    elif color_drift_tolerance == "low":
+        hard_parts.append("主色调和材质色必须与参考图一致")
+    if immutable_features:
+        hard_parts.append(f"保持{immutable_features[0]}的完整外观不变")
+    hard_constraint_summary = "；".join(hard_parts[:4]) + "。" if hard_parts else ""
+
     return {
         "immutable_features": immutable_features[:6],
         "forbidden_drift": forbidden_drift[:6],
@@ -223,6 +289,16 @@ def build_truth_contract(
         "allow_structure_extrapolation": allow_structure_extrapolation,
         "scene_grounding_rule": scene_grounding_rule,
         "scale_anchor": scale_anchor,
+        # Truth Contract v2 additions
+        "fidelity_tier": fidelity_tier,
+        "component_locks": component_locks[:8],
+        "color_palette_hex": color_palette_hex,
+        "brand_marks_preserve": brand_marks_preserve,
+        # Truth Contract v3: Hardened Fidelity Locks
+        "logo_lock_mode": logo_lock_mode,
+        "text_on_product_lock": text_on_product_lock,
+        "color_drift_tolerance": color_drift_tolerance,
+        "hard_constraint_summary": hard_constraint_summary,
     }
 
 
@@ -255,6 +331,30 @@ def should_run_fidelity_validation(
     if isinstance(truth_contract, dict) and str(truth_contract.get("evidence_level") or "").strip() == "low":
         return True
     return False
+
+
+def validate_expected_components(
+    *,
+    expected_components: list[str],
+    fidelity_result: dict[str, Any] | None,
+) -> list[str]:
+    """对比 expected_components 和 fidelity check 返回的已识别部件，返回缺失部件列表。"""
+    if not expected_components or not fidelity_result:
+        return []
+    detected_raw = fidelity_result.get("detected_components") or fidelity_result.get("component_registry") or []
+    detected_names: set[str] = set()
+    for item in detected_raw:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        else:
+            name = str(item).strip()
+        if name:
+            detected_names.add(name)
+    missing = [
+        comp for comp in expected_components
+        if not any(comp in detected or detected in comp for detected in detected_names)
+    ]
+    return missing
 
 
 def _flatten_texts(values: Any) -> list[str]:

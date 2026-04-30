@@ -2,7 +2,7 @@
   <section class="page-stack">
     <div class="page-toolbar">
       <div>
-        <span class="eyebrow">Category Catalog</span>
+        <span class="eyebrow">品类库管理</span>
         <h3>全局品类库</h3>
       </div>
       <div class="toolbar-actions">
@@ -38,7 +38,7 @@
       <article class="surface-card">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Catalog List</span>
+            <span class="eyebrow">品类列表</span>
             <h4>品类列表</h4>
           </div>
           <span>{{ categories.total || categories.items?.length || 0 }}</span>
@@ -81,7 +81,7 @@
       <article class="surface-card">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Catalog Editor</span>
+            <span class="eyebrow">品类库编辑器</span>
             <h4>{{ editor.name || '新建品类' }}</h4>
           </div>
           <span>{{ selectedCategoryId || 'draft' }}</span>

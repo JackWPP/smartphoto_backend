@@ -260,4 +260,19 @@ export const adminApi = {
   getSystemRuntime() {
     return request('GET', '/system/runtime')
   },
+  listPlatformConfigs(params = {}) {
+    return request('GET', `/platform-configs${buildQuery(params)}`)
+  },
+  getPlatformConfig(id) {
+    return request('GET', `/platform-configs/${id}`)
+  },
+  createPlatformConfig(payload) {
+    return request('POST', '/platform-configs', { body: payload })
+  },
+  updatePlatformConfig(id, payload) {
+    return request('PUT', `/platform-configs/${id}`, { body: payload })
+  },
+  deletePlatformConfig(id) {
+    return request('DELETE', `/platform-configs/${id}`)
+  },
 }

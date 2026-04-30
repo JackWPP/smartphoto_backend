@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -11,6 +11,8 @@ class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "sessions"
 
     service_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, default="default")
+    brand_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("brands.id"), nullable=True, index=True)
+    brand_memory_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     guest_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="created", index=True)
@@ -38,6 +40,10 @@ class SessionModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     latest_result_version: Mapped[int] = mapped_column(Integer, default=0)
     detail_generation_round: Mapped[int] = mapped_column(Integer, default=0)
     detail_latest_result_version: Mapped[int] = mapped_column(Integer, default=0)
+
+    detail_preview_generated: Mapped[bool] = mapped_column(Boolean, default=False)
+    detail_preview_version: Mapped[int] = mapped_column(Integer, default=0)
+    detail_preview_image_urls: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     product_name_cache: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     brand_name_cache: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)

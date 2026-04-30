@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "WebSearch",
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(grep -r \"def.*text\\\\|def.*image\\\\|def.*generate\" /d/smartphoto_backend/app/api/v2/*.py)",
+      "Bash(xargs grep:*)",
+      "Bash(python -m pytest tests/test_pipeline_refactor_baseline.py -q)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(gh pr:*)",
+      "WebFetch(domain:www.volcengine.com)",
+      "Bash(git stash:*)"
+    ]
+  }
+}

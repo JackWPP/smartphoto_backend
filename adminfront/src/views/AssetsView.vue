@@ -2,7 +2,7 @@
   <section class="page-stack">
     <div class="page-toolbar">
       <div>
-        <span class="eyebrow">Assets</span>
+        <span class="eyebrow">素材资产库</span>
         <h3>资产治理工作台</h3>
       </div>
       <div class="toolbar-actions">
@@ -47,7 +47,7 @@
       <article class="surface-card" v-if="detail.asset">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Asset Detail</span>
+            <span class="eyebrow">素材大图详情</span>
             <h4>{{ detail.asset.role || detail.asset.asset_kind }}</h4>
           </div>
         </div>
@@ -76,7 +76,7 @@
           <button class="primary-button" @click="regenerateSelected">重生成</button>
         </div>
         <div class="surface-pane">
-          <h4>Generation Snapshot</h4>
+          <h4>生成参数快照</h4>
           <pre>{{ prettyJson(detail.asset.generation_snapshot) }}</pre>
         </div>
       </article>

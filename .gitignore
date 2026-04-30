@@ -18,6 +18,7 @@ ENV/
 .env.*
 !.env.example
 !.env.prod.example
+!.env.prod.native.example
 .envrc
 
 # Tool caches
@@ -73,3 +74,8 @@ docs/主图结构剖析.pdf
 docs/生图Agent协作逻辑.md
 runtime/redis/dump.rdb
 详情图风格对比0.2(1).pdf
+agent_harness_improvement_plan.md
+CLAUDE.md
+PIPELINE_REFACTOR_HANDOFF.md
+/.omx
+docs/品牌记忆前端对接说明_20260419.md

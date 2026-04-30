@@ -69,10 +69,48 @@ _PAREN_TERM_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _SEPARATOR_RE = re.compile(r"[|｜]+")
+# Matches bracket-wrapped content that is itself a layout/structural label (not real copy).
+# Uses full-string match (^...$) to avoid false positives on real product copy.
+_LAYOUT_LABEL_RE = re.compile(
+    r"^(?:主标题|副标题|侧边?标题|小标题|标题|正文|说明文字|角标|底部?文字|顶部?文字|"
+    r"卖点文案|卖点说明|图上文案|可见文案|产品品类[：:][^\s]*|结构工艺|工艺结构|"
+    r"细节参数|参数细节|copy[\s_]?lines?|copy[\s_]?focus|panel[\s_]?goal|"
+    r"heading|subheading|body[\s_]?copy|tagline|caption|label)$",
+    flags=re.IGNORECASE | re.UNICODE,
+)
 
 
 def prompt_matrix_guardrails() -> list[str]:
     return list(PROMPT_MATRIX_GUARDRAILS)
+
+
+def has_planning_annotation(text: str) -> bool:
+    """Detect whether text contains a 【】 planning annotation bracket.
+
+    Used by validators to flag contaminated visible-copy fields before they
+    reach the sanitize layer.  A single 【 is enough to signal a problem.
+    """
+    return bool(re.search(r"[【\[]", str(text)))
+
+
+def _replace_wrapped(m: re.Match) -> str:
+    """Callback for _WRAPPED_TEXT_RE.sub().
+
+    If the bracketed content is itself a layout/structural label (e.g. 【主标题】,
+    【copy_lines】) the entire token is dropped.  Otherwise the brackets are
+    stripped and the inner content is preserved.
+    """
+    inner = m.group(1).strip()
+    if _INTERNAL_PROMPT_TERM_RE.search(inner) or _LAYOUT_LABEL_RE.match(inner):
+        return ""
+    return inner
+
+
+def _truncate_text(text: str, *, max_chars: int) -> str:
+    """Truncate text to max_chars, preserving meaning with ellipsis."""
+    if not text or len(text) <= max_chars:
+        return text
+    return text[:max_chars - 1] + "…"
 
 
 def contains_internal_prompt_term(value: Any) -> bool:
@@ -86,12 +124,12 @@ def sanitize_surface_text(value: Any) -> str:
     text = repair_broken_text(value)
     if not text:
         return ""
-    text = _WRAPPED_TEXT_RE.sub(r"\1", text)
+    text = _WRAPPED_TEXT_RE.sub(_replace_wrapped, text)
     text = _PAREN_TERM_RE.sub("", text)
     text = _LABEL_PREFIX_RE.sub("", text)
     text = _INTERNAL_PROMPT_TERM_RE.sub("", text)
     text = _SEPARATOR_RE.sub(" ", text)
-    text = re.sub(r"\s+", " ", text).strip(" |：:;；-")
+    text = re.sub(r"[^\S\n]+", " ", text).strip(" |：:;；-\n")
     if not text:
         return ""
     if contains_internal_prompt_term(text):
@@ -120,10 +158,10 @@ def sanitize_planning_context_text(value: Any, fallback: str) -> str:
 def sanitize_main_copy_blocks(copy_blocks: dict[str, Any], *, product_name: str = "") -> tuple[dict[str, Any], list[str], list[str]]:
     raw = dict(copy_blocks or {})
     sanitized = {
-        "headline": sanitize_surface_text(raw.get("headline")) or sanitize_surface_text(product_name),
-        "supporting": sanitize_surface_text(raw.get("supporting")),
-        "proof_lines": sanitize_surface_list(raw.get("proof_lines")),
-        "matrix_lines": sanitize_surface_list(raw.get("matrix_lines")),
+        "headline": _truncate_text(sanitize_surface_text(raw.get("headline")) or sanitize_surface_text(product_name), max_chars=20),
+        "supporting": _truncate_text(sanitize_surface_text(raw.get("supporting")), max_chars=40),
+        "proof_lines": [_truncate_text(line, max_chars=30) for line in sanitize_surface_list(raw.get("proof_lines"))[:4]],
+        "matrix_lines": [_truncate_text(line, max_chars=25) for line in sanitize_surface_list(raw.get("matrix_lines"))[:3]],
     }
     sanitized_fields = _collect_changed_fields(raw, sanitized, ("headline", "supporting", "proof_lines", "matrix_lines"))
     notes = _copy_safety_notes(sanitized_fields)

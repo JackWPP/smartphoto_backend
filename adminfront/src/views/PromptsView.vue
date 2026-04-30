@@ -2,7 +2,7 @@
   <section class="page-stack">
     <div class="page-toolbar">
       <div>
-        <span class="eyebrow">Prompts</span>
+        <span class="eyebrow">提示词模板管理</span>
         <h3>Prompt Preset 控制台</h3>
       </div>
       <div class="toolbar-actions">
@@ -38,7 +38,7 @@
       <article class="surface-card">
         <div class="surface-card__header">
           <div>
-            <span class="eyebrow">Prompt Editor</span>
+            <span class="eyebrow">提示词编辑器</span>
             <h4>{{ editor.name || '新模板' }}</h4>
           </div>
           <span>{{ selectedPresetId || 'draft' }}</span>
@@ -69,7 +69,7 @@
 
         <div class="surface-pane">
           <div class="surface-card__header">
-            <h4>Sample Session Prompt Preview</h4>
+            <h4>会话 Prompt 生成预览</h4>
           </div>
           <div class="toolbar-actions">
             <input v-model="previewSessionId" class="compact-input" placeholder="sample session_id" />

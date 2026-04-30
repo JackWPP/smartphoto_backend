@@ -3,6 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,7 @@ from app.core.errors import AppError
 from app.core.response import success_response
 from app.db.session import get_db
 from app.models.asset import AssetModel
+from app.models.brand import BrandModel
 from app.models.detail_style_image import DetailStyleImageModel
 from app.models.job import JobModel
 from app.models.parameter_attachment import ParameterAttachmentModel
@@ -26,6 +28,7 @@ from app.schemas.results import DetailResultsData, ResultsData
 from app.schemas.session import (
     AnalysisData,
     AnalysisTriggerData,
+    BatchUploadSessionImageData,
     CopyFormSchema,
     CopyData,
     CopyRegenerateJobData,
@@ -35,6 +38,7 @@ from app.schemas.session import (
     DeleteSessionImageData,
     DeleteDetailStyleImageData,
     DetailGenerationJobData,
+    DetailPreviewData,
     DetailPromptPreviewData,
     DetailStrategyPreviewData,
     DetailStrategyPreviewRequest,
@@ -72,6 +76,11 @@ from app.schemas.session import (
     DeleteStrategyReferenceImageData,
 )
 from app.services.copy_normalization import normalize_copy_payload
+from app.services.copy_resolution import (
+    apply_explicit_copy_input_with_attribution,
+    resolve_session_copy,
+    strip_copy_meta,
+)
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
@@ -92,9 +101,11 @@ from app.services.jobs import append_job_event, create_job, update_job_status
 from app.services.locking import acquire_generation_locks, release_locks
 from app.services.parameter_snapshot import (
     apply_parameter_snapshot_to_copy,
+    parameter_snapshot_to_copy_attribution,
     merge_parameter_snapshot_into_copy,
     parameter_snapshot_to_copy_fields,
 )
+from app.services.brand_memory import get_brand_or_404
 from app.services.platforms import get_platform_or_none
 from app.services.prompts import build_prompt_previews
 from app.services.prompt_repo import list_prompt_presets
@@ -113,10 +124,11 @@ from app.services.repo import (
     list_active_strategy_reference_images,
     list_session_prompt_overrides,
 )
+from app.services.preview_hashing import PREVIEW_HASH_POLICY_VERSION
 from app.services.state_machine import ensure_session_transition
 from app.services.storage import get_storage_adapter, public_url_for
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview, strategy_preview_input_hash
-from app.services.strategy_overrides import serialize_prompt_preset, serialize_session_override
+from app.services.strategy_overrides import resolve_session_overrides, serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
 from app.services.user_accounts import refresh_session_search_cache
 
@@ -128,6 +140,11 @@ ALLOWED_SLOT = {"front", "angle45", "side", "extra"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_SESSION_IMAGES = 6
 MAX_DETAIL_STYLE_IMAGES = 4
+
+
+class SessionBrandBindRequest(BaseModel):
+    brand_id: str | None = Field(default=None)
+    brand_memory_enabled: bool = Field(default=False)
 
 
 def _signed_url(value: str | None) -> str | None:
@@ -185,6 +202,14 @@ def _clear_analysis_downstream_outputs(session: SessionModel) -> None:
     session.parameter_snapshot = None
     session.strategy_preview = None
     session.detail_strategy_preview = None
+    # Clear cached style preset resolution to prevent cross-product style pollution.
+    # The style_preset_id itself is preserved (user's deliberate choice), but the
+    # resolved/expanded preset data must be re-fetched from DB on next generation.
+    if isinstance(session.confirmed_copy, dict) and "resolved_style_preset" in session.confirmed_copy:
+        session.confirmed_copy = {
+            k: v for k, v in session.confirmed_copy.items()
+            if k != "resolved_style_preset"
+        }
 
 
 def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:
@@ -192,6 +217,8 @@ def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:
         "session_id": session.id,
         "status": session.status,
         "current_step": session.current_step,
+        "brand_id": session.brand_id,
+        "brand_memory_enabled": bool(session.brand_memory_enabled),
         "selected_platform_ids": session.selected_platform_ids,
         "active_platform_id": session.active_platform_id,
         "analysis_snapshot": session.analysis_snapshot,
@@ -207,6 +234,9 @@ def _session_snapshot_payload(db: Session, session: SessionModel) -> dict:
         "latest_result_version": session.latest_result_version,
         "detail_generation_round": session.detail_generation_round,
         "detail_latest_result_version": session.detail_latest_result_version,
+        "detail_preview_generated": bool(session.detail_preview_generated),
+        "detail_preview_version": session.detail_preview_version,
+        "detail_preview_image_urls": session.detail_preview_image_urls,
     }
 
 
@@ -222,6 +252,9 @@ def _effective_strategy_preview(session: SessionModel, db: Session) -> dict:
         db=db,
         prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
         parameter_snapshot=session.parameter_snapshot or {},
+        brand_id=session.brand_id,
+        brand_memory_enabled=bool(session.brand_memory_enabled),
+        service_id=session.service_id,
     )
 
 
@@ -412,7 +445,8 @@ def _serialized_session_overrides(db: Session, session_id: str, *, asset_family:
 
 
 def _copy_response_payload(session: SessionModel, db: Session) -> dict:
-    copy_data = _resolved_copy_for_session(session, db)
+    resolution = _resolved_copy_for_session(session, db, include_attribution=True)
+    copy_data = resolution["copy"]
     return {
         "product_name": copy_data.get("product_name", ""),
         "category": copy_data.get("category", ""),
@@ -423,20 +457,28 @@ def _copy_response_payload(session: SessionModel, db: Session) -> dict:
         "style_preset_id": copy_data.get("style_preset_id"),
         "style_custom": copy_data.get("style_custom", ""),
         "style_choice": copy_data.get("style_choice", ""),
+        "copy_attribution": resolution["copy_attribution"],
     }
 
 
-def _resolved_copy_for_session(session: SessionModel, db: Session) -> dict:
-    copy_data = sanitize_copy_form_payload(session.confirmed_copy)
-    if session.parameter_snapshot:
-        copy_data = merge_parameter_snapshot_into_copy(copy_data, session.parameter_snapshot)
-    preset = get_prompt_preset_or_none(db, copy_data.get("style_preset_id"), session.service_id)
+def _resolved_copy_for_session(session: SessionModel, db: Session, *, include_attribution: bool = False) -> dict:
+    base_copy = sanitize_copy_form_payload(strip_copy_meta(session.confirmed_copy))
+    preset = get_prompt_preset_or_none(db, base_copy.get("style_preset_id"), session.service_id)
+    resolved_preset = serialize_prompt_preset(preset) if preset is not None else None
+    resolution = resolve_session_copy(
+        session.confirmed_copy or {},
+        parameter_snapshot=session.parameter_snapshot or {},
+        resolved_style_preset=resolved_preset,
+    )
+    copy_data = resolution["copy"]
     if preset is not None:
         copy_data["style_preset_id"] = preset.id
-        copy_data["resolved_style_preset"] = serialize_prompt_preset(preset)
+        copy_data["resolved_style_preset"] = resolved_preset
         if not copy_data.get("style_choice"):
             copy_data["style_choice"] = preset.name
-    return sanitize_copy_form_payload(copy_data)
+    if include_attribution:
+        return resolution
+    return copy_data
 
 
 def _invalidate_analysis_outputs(session: SessionModel) -> None:
@@ -445,6 +487,35 @@ def _invalidate_analysis_outputs(session: SessionModel) -> None:
     else:
         session.analysis_snapshot = {"reanalysis_required": True}
     _clear_analysis_downstream_outputs(session)
+
+
+def _sync_analysis_snapshot_product(session: SessionModel) -> None:
+    """Sync confirmed_copy product_name/category into analysis_snapshot.recognized_product.
+
+    When a user overrides the product name or category in Step 4, the analysis snapshot
+    should reflect the user's decision so that downstream planners receive consistent
+    signals instead of contradictory ones (analysis says "除湿机" while copy says "空气净化器").
+    """
+    final_copy = session.confirmed_copy or {}
+    final_product_name = str(final_copy.get("product_name") or "").strip()
+    final_category = str(final_copy.get("category") or "").strip()
+    if not isinstance(session.analysis_snapshot, dict) or not final_product_name:
+        return
+    recognized = session.analysis_snapshot.get("recognized_product")
+    if not isinstance(recognized, dict):
+        return
+    snapshot_pn = str(recognized.get("product_name") or "").strip()
+    snapshot_cat = str(recognized.get("category") or "").strip()
+    if snapshot_pn == final_product_name and snapshot_cat == final_category:
+        return
+    session.analysis_snapshot = {
+        **session.analysis_snapshot,
+        "recognized_product": {
+            **recognized,
+            "product_name": final_product_name,
+            **({"category": final_category} if final_category else {}),
+        },
+    }
 
 
 def _invalidate_strategy_inputs(session: SessionModel) -> None:
@@ -507,6 +578,36 @@ def create_session(db: Session = Depends(get_db), principal: ServicePrincipal = 
 def get_session_snapshot(session_id: str, db: Session = Depends(get_db), principal: ServicePrincipal = Depends(get_service_principal)) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     return success_response(_session_snapshot_payload(db, session))
+
+
+@router.put(
+    "/{session_id}/brand",
+    operation_id="bindSessionBrand",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def bind_session_brand(
+    session_id: str,
+    req: SessionBrandBindRequest,
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    if req.brand_id:
+        brand = get_brand_or_404(db, req.brand_id, service_id=principal.app_id)
+        session.brand_id = brand.id
+        session.brand_memory_enabled = bool(req.brand_memory_enabled)
+    else:
+        session.brand_id = None
+        session.brand_memory_enabled = False
+    session.strategy_preview = None
+    db.commit()
+    return success_response(
+        {
+            "session_id": session.id,
+            "brand_id": session.brand_id,
+            "brand_memory_enabled": bool(session.brand_memory_enabled),
+        }
+    )
 
 
 @router.post(
@@ -572,6 +673,98 @@ async def upload_session_image(
     return success_response(
         {
             "image_id": model.id,
+            "session_id": session.id,
+            "status": session.status,
+            "uploaded_images": [
+                {
+                    "image_id": item.id,
+                    "slot_type": item.slot_type,
+                    "display_order": item.display_order,
+                    "url": _signed_url(item.source_url),
+                }
+                for item in images
+            ],
+        }
+    )
+
+
+@router.post(
+    "/{session_id}/images/batch",
+    response_model=APIResponse[BatchUploadSessionImageData],
+    summary="批量上传会话图片",
+    description="向指定 session 批量上传商品参考图。支持一次上传多张，每张 ≤20MB，仅 jpeg/png/webp，总共最多 6 张。",
+    operation_id="uploadSessionImagesBatch",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+async def upload_session_images_batch(
+    session_id: str,
+    files: list[UploadFile] = File(..., description="图片文件列表。"),
+    slots: str = Form(..., description="JSON 数组，每项 {slot_type, display_order}，与 files 一一对应。"),
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    import json as _json
+
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    try:
+        slot_entries: list[dict[str, Any]] = _json.loads(slots)
+    except Exception:
+        raise AppError("invalid_request", "slots must be a valid JSON array", 400)
+
+    if len(files) != len(slot_entries):
+        raise AppError("invalid_request", "files and slots count mismatch", 400)
+
+    current_images = list_active_session_images(db, session_id)
+    if len(current_images) + len(files) > MAX_SESSION_IMAGES:
+        raise AppError("too_many_images", http_status=400)
+
+    storage = get_storage_adapter()
+    created_ids: list[str] = []
+
+    for file, entry in zip(files, slot_entries):
+        slot_type = str(entry.get("slot_type", ""))
+        display_order = int(entry.get("display_order", 0))
+        if slot_type not in ALLOWED_SLOT:
+            raise AppError("invalid_request", f"invalid slot_type: {slot_type}", 400)
+
+        content = await file.read()
+        if len(content) > MAX_IMAGE_BYTES:
+            raise AppError("file_too_large", http_status=400)
+        if file.content_type not in ALLOWED_MIME:
+            raise AppError("unsupported_file_type", http_status=400)
+
+        source_url, width, height, mime_type, file_size = storage.save_upload(
+            session_id=session_id,
+            original_name=file.filename or "upload.jpg",
+            content=content,
+        )
+        model = SessionImageModel(
+            session_id=session_id,
+            slot_type=slot_type,
+            display_order=display_order,
+            source_url=source_url,
+            width=width,
+            height=height,
+            mime_type=mime_type,
+            file_size=file_size,
+            is_deleted=False,
+        )
+        db.add(model)
+        db.flush()
+        created_ids.append(model.id)
+
+    if session.status == "created":
+        ensure_session_transition("created", "images_uploaded")
+        session.status = "images_uploaded"
+        session.current_step = 1
+    else:
+        _invalidate_analysis_outputs(session)
+
+    db.commit()
+    images = list_active_session_images(db, session_id)
+    return success_response(
+        {
+            "image_ids": created_ids,
             "session_id": session.id,
             "status": session.status,
             "uploaded_images": [
@@ -1160,6 +1353,7 @@ def get_parameters(
             "session_id": session.id,
             "parameter_snapshot": session.parameter_snapshot or {},
             "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "applied_copy_attribution": parameter_snapshot_to_copy_attribution(session.parameter_snapshot or {}),
             "overwrite_mode": "replace_all",
         }
     )
@@ -1180,8 +1374,26 @@ def complete_parameters(
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     client = WhataiClient()
+    current_snapshot = session.parameter_snapshot or {}
+    # 跳过补全：只要 Gemini 分析非 fallback 且无显式 completion_instruction，就复用现有快照
+    # 接口签名不变，对前端完全透明；快照中写入 skipped_completion 元数据供调试
+    if client._should_skip_completion(current_snapshot) and not req.completion_instruction:
+        current_snapshot = dict(current_snapshot)
+        current_snapshot["skipped_completion"] = True
+        current_snapshot["skip_reason"] = "gemini_success"
+        session.parameter_snapshot = current_snapshot
+        db.commit()
+        return success_response(
+            {
+                "session_id": session.id,
+                "parameter_snapshot": session.parameter_snapshot or {},
+                "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+                "applied_copy_attribution": parameter_snapshot_to_copy_attribution(session.parameter_snapshot or {}),
+                "overwrite_mode": "replace_all",
+            }
+        )
     snapshot = client.complete_parameters(
-        parameter_snapshot=session.parameter_snapshot or {},
+        parameter_snapshot=current_snapshot,
         analysis_snapshot=session.analysis_snapshot or {},
         confirmed_copy=_resolved_copy_for_session(session, db),
         active_platform_id=session.active_platform_id,
@@ -1199,6 +1411,7 @@ def complete_parameters(
             "session_id": session.id,
             "parameter_snapshot": session.parameter_snapshot or {},
             "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "applied_copy_attribution": parameter_snapshot_to_copy_attribution(session.parameter_snapshot or {}),
             "overwrite_mode": "replace_all",
         }
     )
@@ -1219,7 +1432,12 @@ def put_parameters(
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     session.parameter_snapshot = payload or {}
-    session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
+    session.confirmed_copy = apply_parameter_snapshot_to_copy(
+        session.confirmed_copy or {},
+        session.parameter_snapshot,
+        overwrite=True,
+        protect_explicit_input=False,
+    )
     refresh_session_search_cache(session)
     session.strategy_preview = None
     session.detail_strategy_preview = None
@@ -1229,6 +1447,7 @@ def put_parameters(
             "session_id": session.id,
             "parameter_snapshot": session.parameter_snapshot or {},
             "applied_copy_fields": parameter_snapshot_to_copy_fields(session.parameter_snapshot or {}),
+            "applied_copy_attribution": parameter_snapshot_to_copy_attribution(session.parameter_snapshot or {}),
             "overwrite_mode": "replace_all",
         }
     )
@@ -1304,14 +1523,39 @@ def put_copy_form(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    payload = sanitize_copy_form_payload(req.model_dump())
+
+    # --- Fix: headline 联动 product_name ---
+    # 当旧 headline 是 product_name 的自动 fallback（两者相同），且 product_name 发生变化时，
+    # 清空 headline 让 normalize_copy_payload 从新 product_name 重新派生。
+    old_copy = sanitize_copy_form_payload(session.confirmed_copy)
+    old_product_name = old_copy.get("product_name", "")
+    old_headline = old_copy.get("headline", "")
+    incoming = req.model_dump()
+    new_product_name = (incoming.get("product_name") or "").strip()
+    incoming_headline = (incoming.get("headline") or "").strip()
+    if (
+        old_headline
+        and old_headline == old_product_name
+        and new_product_name
+        and new_product_name != old_product_name
+        and (not incoming_headline or incoming_headline == old_product_name)
+    ):
+        incoming["headline"] = ""
+
+    payload = sanitize_copy_form_payload(incoming)
     preset = get_prompt_preset_or_none(db, payload.get("style_preset_id"), principal.app_id)
     if payload.get("style_preset_id") and preset is None:
         raise AppError("invalid_request", "style preset not found", 404)
     payload["resolved_style_preset"] = serialize_prompt_preset(preset) if preset is not None else None
     if preset is not None and not payload.get("style_choice"):
         payload["style_choice"] = preset.name
-    session.confirmed_copy = sanitize_copy_form_payload(payload)
+    session.confirmed_copy = apply_explicit_copy_input_with_attribution(session.confirmed_copy or {}, payload)
+
+    # --- Fix: 同步 analysis_snapshot.recognized_product ---
+    # 当用户修正了 product_name/category 时，同步更新 analysis_snapshot 中的对应字段，
+    # 避免下游 planner 收到矛盾的产品名称信号。
+    _sync_analysis_snapshot_product(session)
+
     refresh_session_search_cache(session)
     session.strategy_preview = None
     session.detail_strategy_preview = None
@@ -1420,6 +1664,12 @@ def build_strategy(
     if not session.active_platform_id:
         raise AppError("invalid_platform", "active platform required", 400)
     payload = req.model_dump() if req is not None else {"planner_instruction": None}
+    effective_brand_memory_enabled = bool(
+        payload.get("brand_memory_enabled")
+        if payload.get("brand_memory_enabled") is not None
+        else session.brand_memory_enabled
+    )
+    session.brand_memory_enabled = effective_brand_memory_enabled
     images = list_active_session_images(db, session.id)
     strategy_reference_images = list_active_strategy_reference_images(db, session.id)
     loaded_reference_images = load_reference_images(images) if images else []
@@ -1442,9 +1692,23 @@ def build_strategy(
         loaded_strategy_reference_images=loaded_strategy_reference_images,
         reference_manifest=reference_manifest,
         strategy_reference_manifest=strategy_reference_manifest,
+        brand_id=session.brand_id,
+        brand_memory_enabled=effective_brand_memory_enabled,
+        service_id=session.service_id,
     )
     existing_preview = session.strategy_preview if isinstance(session.strategy_preview, dict) else None
-    if existing_preview and existing_preview.get("input_hash") == input_hash:
+    if (
+        existing_preview
+        and existing_preview.get("hash_policy_version") == PREVIEW_HASH_POLICY_VERSION
+        and existing_preview.get("input_hash") == input_hash
+    ):
+        response_preview = {
+            **existing_preview,
+            "cache_hit": True,
+            "prompt_profile": existing_preview.get("prompt_profile") or get_settings().planner_prompt_mode,
+            "prompt_input_chars": int(existing_preview.get("prompt_input_chars") or 0),
+            "planner_image_count": int(existing_preview.get("planner_image_count") or len(loaded_reference_images) + len(loaded_strategy_reference_images)),
+        }
         session.status = "strategy_ready"
         session.current_step = max(session.current_step, 5)
         db.commit()
@@ -1452,7 +1716,7 @@ def build_strategy(
             {
                 "session_id": session.id,
                 "status": session.status,
-                "strategy_preview": existing_preview,
+                "strategy_preview": response_preview,
             }
         )
 
@@ -1485,6 +1749,9 @@ def build_strategy(
         loaded_strategy_reference_images=loaded_strategy_reference_images,
         reference_manifest=reference_manifest,
         strategy_reference_manifest=strategy_reference_manifest,
+        brand_id=session.brand_id,
+        brand_memory_enabled=effective_brand_memory_enabled,
+        service_id=session.service_id,
     )
     session.strategy_preview = preview
     session.latest_strategy_job_id = job.id
@@ -1553,6 +1820,9 @@ def build_detail_strategy(
         planner_instruction=payload.get("planner_instruction"),
         panel_preferences=resolve_panel_preferences(resolved_panel_preferences, db=db),
         active_platform_id=session.active_platform_id,
+        prompt_overrides=resolve_session_overrides(prompt_overrides),
+        analysis_snapshot=session.analysis_snapshot or {},
+        db=db,
     )
     existing_preview = session.detail_strategy_preview if isinstance(session.detail_strategy_preview, dict) else None
     if existing_preview and not detail_strategy_preview_needs_rebuild(
@@ -1562,7 +1832,18 @@ def build_detail_strategy(
         current_input_hash=input_hash,
     ):
         db.commit()
-        return success_response({"session_id": session.id, "detail_strategy_preview": existing_preview})
+        return success_response(
+            {
+                "session_id": session.id,
+                "detail_strategy_preview": {
+                    **existing_preview,
+                    "cache_hit": True,
+                    "prompt_profile": existing_preview.get("prompt_profile") or get_settings().detail_planner_prompt_mode,
+                    "prompt_input_chars": int(existing_preview.get("prompt_input_chars") or 0),
+                    "planner_image_count": int(existing_preview.get("planner_image_count") or 0),
+                },
+            }
+        )
 
     preview = build_detail_strategy_preview(
         resolved_copy,
@@ -1650,17 +1931,19 @@ def put_strategy_overrides(
 
     db.flush()
     if session.confirmed_copy and session.active_platform_id:
-        preview = build_strategy_preview(
+        # Only merge copy_blocks overrides into the existing strategy_preview
+        # without replacing planner-generated fields (background_rule,
+        # composition_rule, final_prompt_base, etc.) that control the scene.
+        preview = normalize_strategy_preview(
+            session.strategy_preview,
             _resolved_copy_for_session(session, db),
             session.active_platform_id,
             db=db,
-            session_images=list_active_session_images(db, session.id),
-            analysis_snapshot=session.analysis_snapshot or {},
-            parameter_snapshot=session.parameter_snapshot or {},
-            planner_instruction=(session.strategy_preview or {}).get("planner_instruction"),
-            slot_preferences=(session.strategy_preview or {}).get("slot_preferences") or [],
             prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
-            strategy_reference_images=list_active_strategy_reference_images(db, session.id),
+            parameter_snapshot=session.parameter_snapshot or {},
+            brand_id=session.brand_id,
+            brand_memory_enabled=bool(session.brand_memory_enabled),
+            service_id=session.service_id,
         )
         session.strategy_preview = preview
 
@@ -1780,7 +2063,8 @@ def preview_prompts(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    resolved_copy = _resolved_copy_for_session(session, db)
+    copy_resolution = _resolved_copy_for_session(session, db, include_attribution=True)
+    resolved_copy = copy_resolution["copy"]
     strategy_preview = _effective_strategy_preview(session, db)
     if not strategy_preview.get("reference_manifest"):
         strategy_preview = build_strategy_preview(
@@ -1794,6 +2078,9 @@ def preview_prompts(
             slot_preferences=strategy_preview.get("slot_preferences") or [],
             prompt_overrides=_serialized_session_overrides(db, session.id, user_id=session.service_id),
             strategy_reference_images=list_active_strategy_reference_images(db, session.id),
+            brand_id=session.brand_id,
+            brand_memory_enabled=bool(session.brand_memory_enabled),
+            service_id=session.service_id,
         )
     prompts = build_prompt_previews(
         confirmed_copy=resolved_copy,
@@ -1821,6 +2108,7 @@ def preview_prompts(
                 "rule_pack_id": asset.rule_pack_id or (asset.generation_snapshot or {}).get("rule_pack_id"),
                 "raw_prompt_override": (asset.generation_snapshot or {}).get("raw_prompt_override"),
                 "applied_preset_id": (asset.generation_snapshot or {}).get("applied_preset_id"),
+                "brand_memory_trace": (asset.generation_snapshot or {}).get("brand_memory_trace", []),
             }
             for asset in assets
         ]
@@ -1830,12 +2118,17 @@ def preview_prompts(
         {
             "session_id": session.id,
             "active_platform_id": session.active_platform_id,
+            "brand_id": session.brand_id,
+            "brand_memory_enabled": bool(strategy_preview.get("brand_memory_enabled")),
+            "brand_memory_applied": bool(strategy_preview.get("brand_memory_applied")),
+            "brand_memory_trace": strategy_preview.get("brand_memory_trace", []),
             "hero_scene": resolved_copy.get("hero_scene", ""),
             "core_selling_points": resolved_copy.get("core_selling_points", []),
             "key_parameters": resolved_copy.get("key_parameters", []),
             "product_advantages": resolved_copy.get("product_advantages", []),
             "style_preset_id": resolved_copy.get("style_preset_id"),
             "style_custom": resolved_copy.get("style_custom", ""),
+            "copy_attribution": copy_resolution["copy_attribution"],
             "model": settings.whatai_image_model,
             "image_size": "1024x1024",
             "reference_manifest": strategy_preview.get("reference_manifest", []),
@@ -1860,7 +2153,8 @@ def preview_detail_prompts(
     principal: ServicePrincipal = Depends(get_service_principal),
 ) -> dict:
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
-    resolved_copy = _resolved_copy_for_session(session, db)
+    copy_resolution = _resolved_copy_for_session(session, db, include_attribution=True)
+    resolved_copy = copy_resolution["copy"]
     detail_strategy_preview = _effective_detail_strategy_preview(session, db)
     prompts = build_detail_prompt_previews(
         confirmed_copy=resolved_copy,
@@ -1902,6 +2196,7 @@ def preview_detail_prompts(
             "product_advantages": resolved_copy.get("product_advantages", []),
             "style_preset_id": resolved_copy.get("style_preset_id"),
             "style_custom": resolved_copy.get("style_custom", ""),
+            "copy_attribution": copy_resolution["copy_attribution"],
             "model": settings.whatai_image_model,
             "image_size": DETAIL_PAGE_IMAGE_SIZE,
             "product_reference_manifest": detail_strategy_preview.get("product_reference_manifest", []),
@@ -1932,8 +2227,12 @@ def generate_gallery(
     session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
     if session.status not in {"strategy_ready", "completed"}:
         raise AppError("invalid_session_status", "strategy not ready", 400)
+    if req.brand_memory_enabled is not None:
+        session.brand_memory_enabled = bool(req.brand_memory_enabled)
+        session.strategy_preview = None
+    strategy_preview = _effective_strategy_preview(session, db) if req.brand_memory_enabled is not None or req.slot_ids else None
     if req.slot_ids:
-        strategy_preview = _effective_strategy_preview(session, db)
+        strategy_preview = strategy_preview or _effective_strategy_preview(session, db)
         valid_slot_ids = {
             str(item.get("slot_id") or item.get("role") or "").strip()
             for item in strategy_preview.get("asset_plan", [])
@@ -2107,6 +2406,7 @@ def get_results(
                     "carry_forward": bool((asset.generation_snapshot or {}).get("carry_forward")),
                     "source_version_no": (asset.generation_snapshot or {}).get("source_version_no"),
                     "fidelity_validation_status": ((asset.generation_snapshot or {}).get("fidelity_validation") or {}).get("status"),
+                    "brand_memory_trace": (asset.generation_snapshot or {}).get("brand_memory_trace", []),
                 }
                 for asset in assets
             ],
@@ -2208,6 +2508,53 @@ def get_detail_page_results(
             ),
         }
     )
+
+
+@router.get(
+    "/{session_id}/detail-pages/preview",
+    response_model=APIResponse[DetailPreviewData],
+    summary="获取详情页预览",
+    description="返回详情页预览图片列表。预览由详情页生成完成后自动派生（缩小+水印），仅供预览，不扣费。",
+    operation_id="getDetailPagePreview",
+    responses={**OPENAPI_ERROR_RESPONSES},
+)
+def get_detail_page_preview(
+    session_id: str,
+    db: Session = Depends(get_db),
+    principal: ServicePrincipal = Depends(get_service_principal),
+) -> dict:
+    session = get_session_or_404(db, session_id, **_session_scope_kwargs(principal))
+    preview_urls = session.detail_preview_image_urls or {}
+
+    # Build panel list from detail_strategy_preview to preserve display_order and slot_id
+    detail_preview = session.detail_strategy_preview or {}
+    panel_plan = detail_preview.get("panel_plan", [])
+    panel_map: dict[str, dict[str, Any]] = {}
+    for item in panel_plan:
+        if isinstance(item, dict):
+            pid = item.get("panel_id")
+            if pid:
+                panel_map[pid] = item
+
+    panels: list[dict[str, Any]] = []
+    for panel_id, preview_url in preview_urls.items():
+        plan = panel_map.get(panel_id, {})
+        panels.append({
+            "panel_id": panel_id,
+            "slot_id": plan.get("slot_id"),
+            "display_order": plan.get("display_order", 0),
+            "preview_url": _signed_url(preview_url) or preview_url,
+            "is_preview": True,
+            "preview_watermarked": True,
+        })
+    panels.sort(key=lambda item: item["display_order"])
+
+    return success_response({
+        "session_id": session.id,
+        "preview_generated": bool(session.detail_preview_generated),
+        "preview_version": session.detail_preview_version,
+        "panels": panels,
+    })
 
 
 @router.post(

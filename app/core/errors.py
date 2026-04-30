@@ -27,6 +27,8 @@ ERRORS = {
     "user_not_found": ErrorDef(40404, "user_not_found"),
     "job_already_running": ErrorDef(40901, "job_already_running"),
     "duplicate_idempotency_key": ErrorDef(40902, "duplicate_idempotency_key"),
+    "duplicate_platform_config": ErrorDef(40903, "duplicate_platform_config"),
+    "platform_config_not_found": ErrorDef(40405, "platform_config_not_found"),
     "copy_validation_failed": ErrorDef(42201, "copy_validation_failed"),
     "insufficient_credits": ErrorDef(40201, "insufficient_credits"),
     "rate_limited": ErrorDef(42901, "rate_limited"),

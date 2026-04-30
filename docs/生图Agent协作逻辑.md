@@ -59,7 +59,8 @@
   - 上游异常转 `50201`
 - 重试策略：上游网络级异常会先做单请求重试；若仍失败，Celery 任务最多再重试 3 次（`max_retries=3`）
 - 当前实现补充：
-  - LLM Router 已改为按任务显式路由：`analysis / main planner / detail planner / visual parameter extraction` 默认保持 `WhatAI + Gemini`，OpenRouter 只保留给文本辅助任务
+- LLM Router 已改为按任务显式路由：`analysis / visual parameter extraction` 默认保持 `WhatAI + Gemini`；`main planner / detail planner / parameter completion / text review` 默认走 `doubao_text`，未配置或上游失败时 planner 按 `PLANNER_FALLBACK_ROUTE=whatai_gemini` 降级。
+- `doubao_text` 通过火山 Ark Responses API 调用 `/responses`，读取 `DOUBAO_API_KEY` 或 `ARK_API_KEY`，业务层不得硬编码豆包 endpoint。
   - 上传商品图会以内联图像内容的方式发给上游，不再依赖 `localhost` URL
   - 分析输入当前会优先走受控尺寸图片（`max_edge` 缩边），避免大图全量进内存
   - analysis / planner / parameter extraction 现在统一走 `validator -> 同模型 repair 1 次 -> fallback`，worker 不再因为轻微格式漂移直接崩溃
@@ -107,6 +108,11 @@
 - 状态变更：session 进入或保持 `copy_ready`
 - 失败处理：非法字段 `40004`
 - 重试策略：上游网络级异常可进入 Celery 任务重试，最多 3 次
+- Step2/Step3 combined mode:
+  - Default PARAMETER_EXTRACTION_MODE=combined makes Analysis Agent write analysis_snapshot and parameter_snapshot in the same visual LLM call.
+  - The combined parameter snapshot uses source_stage=analysis_combined and records analysis_version/input_image_ids/input_hash/parameter_source_job_id for freshness checks.
+  - Parameter Extract Agent first checks freshness; without attachments, a fresh combined snapshot is reused and no upstream LLM call is made.
+  - Attachments or PARAMETER_EXTRACTION_MODE=separate keep the old standalone extract_parameters LLM behavior.
 
 ### 3.3.1 Parameter Extract Agent
 - 输入：`analysis_snapshot + 当前 session 商品图 + confirmed_copy + 可选参数附件`
@@ -120,6 +126,8 @@
     - `feature_highlights`
   - 无附件时仍可运行，属于 `analysis_only` 轻策划模式
   - 有附件时附件优先，属于 `attachment_backed` 模式，可整页覆盖旧的 analysis-only 结果
+  - `hero_scene` 是首图优先场景，不是只给 `scene` 槽位参考；主图策略构建时应直接约束首张主图 (`hero` / `primary_kv`)
+  - Step3 覆盖正式字段后，需要同步镜像 legacy 字段 `usage_scenes/selling_points/specs`，避免旧策略分支读到历史值
   - 不相关附件返回 `invalid`，但 job 仍可成功完成，供前端展示解释
   - 快照额外补充：
     - `source_mode`
@@ -150,6 +158,9 @@
     - `harness_first`：当前默认主/详情 planner 先走 `WhatAI + kimi-k2.5`，并对 `kimi-k2.5` 自动追加 `enable_thinking=true`；若命中 `429/超时` 再降级到 `WHATAI_PLANNER_LIGHT_MODEL`
     - `light_model`：切到更轻量的 planner 模型
   - `strategy_preview` / `detail_strategy_preview` 会记录 `planner_profile`、`planner_primary_* / planner_fallback_* / planner_attempt_count / planner_final_source`，同时 `input_hash` 也会把当前 profile/provider/model 纳入哈希
+  - Latency mode: `PLANNER_PROMPT_MODE` and `DETAIL_PLANNER_PROMPT_MODE` default to `compact`; switch either to `legacy` to restore the longer planner prompts without code changes.
+  - Repair mode: `PLANNER_REPAIR_STRICTNESS=critical_only` means only invalid JSON, missing slot/panel coverage, invalid reference ids, visible-copy contamination, and similar critical planner errors trigger an extra LLM repair call; locally derivable fields are filled by rule merge/normalizers.
+  - Preview observability fields: both `strategy_preview` and `detail_strategy_preview` may include `cache_hit`, `prompt_profile`, `prompt_input_chars`, and `planner_image_count` for latency A/B comparison.
   - `Main Copy Design Agent` 当前默认关闭，不再作为主链默认时延来源
   - 主图改为“平台规则包 + 槽位计划 + 表达方式模块”
   - 默认平台固定输出 5 张主图：`hero` `white_bg` `selling_point` `scene` `detail`
@@ -157,6 +168,8 @@
   - 每个 `asset_plan` 项都带 `slot_id/slot_family/expression_mode/copy_blocks/layout_policy/proof_policy/requires_white_bg_validation/platform_rule_pack`
   - 每个 `prompt_plan` 项都带 `reference_image_ids/must_keep/must_avoid/background_rule/composition_rule/lighting_rule/fidelity_rule/final_prompt_base/rule_modules_used/resolved_constraints`
   - 当前支持在 Step 5 通过 `planner_instruction` 对整组策略做一轮额外优化
+  - 主图 planner 现在一次性产出策略与可见文案增强：除 `prompt_plan` 原字段外，可返回 `copy_blocks/text_density/visual_emphasis/global_consistency_note`；默认不再额外调用 `main_copy_design`。
+  - 主图/详情页策略预览会记录 `planner_ms/planner_fallback_reason`，用于定位豆包耗时、fallback 与 repair 情况。
   - 当前优先让 planner 决定 `expression_mode/copy_focus/focus_selling_point/reference_image_ids`，规则包退化为 guardrail + fallback
   - `prompt_plan` / `asset_plan` 现在还会带 `global_consistency_note`：
     - 用于约束局部图和结构图必须与参考图整体结构一致
@@ -340,6 +353,7 @@
   - 每次生成都新写文件，不覆盖旧文件
   - `version_no` 单调递增
   - 单图重生成写 `parent_asset_id`
+  - 历史版本回滚（`POST /assets/{id}/restore`）也必须物化为新的 `version_no`
   - 被替代图标记为 `superseded`
 - 详情页补充：
   - `assets.asset_family` 区分 `main_gallery | detail_page`
@@ -355,16 +369,18 @@
   - Redis 不可用时降级到 DB 检查
   - 详情页 generation 也参与同一套互斥，不允许和主图 generation 并行
 
-## 4. 三类 regenerate 语义对比
+## 4. 四类版本变更语义对比
 | 类型 | 入口 | 作用范围 | round_no | version_no | parent_asset_id |
 |---|---|---|---|---|---|
 | `global_edit` | `POST /sessions/{id}/results/global-edit` | 当前实现按整组重做 | +1 | +1 | 否 |
 | `regenerate_gallery` | `POST /sessions/{id}/results/regenerate` | 整组重做 | +1 | +1 | 否 |
 | `regenerate_asset` | `POST /assets/{id}/regenerate` | 单图重做 | 不变 | +1 | 是 |
+| `restore_asset` | `POST /assets/{id}/restore` | 历史图回滚到当前 | 不变 | +1 | 否 |
 
 补充：
 - 当 `/assets/{id}/regenerate` 命中 `detail_page/panel` 时，内部 job_type 为 `regenerate_detail_panel`，语义同样是“局部重做 + 新版本完整物化”。
 - `regenerate_asset` 与 `regenerate_detail_panel` 的 carry-forward 基线都必须取 `parent_asset.version_no`，不能直接取当前 `latest_result_version`。
+- `restore_asset` 会以“当前最新可见版本”为基线，替换目标槽位（或 stitched 资产）后物化完整新版本，不能直接在旧版本上改 `visibility_status`。
 
 ## 5. 时序图
 
@@ -437,6 +453,7 @@ sequenceDiagram
 ```
 
 - Worker 在物化新版本时，必须从 `parent_asset.version_no` 读取 carry-forward 资产；如果用户是在历史版本上发起单图或单 panel 重生成，未改动槽位必须继续继承该历史版本。
+- `POST /assets/{asset_id}/restore` 的落库语义与上面一致：必须生成完整新版本，保证 `GET /sessions/{id}/results` 与 `GET /sessions/{id}/detail-pages/results` 任意 `version_no` 都可独立回看。
 
 ## 6. 一致性与可追溯约束
 1. Job 是唯一执行真相：任何生图动作都必须先建 job。
@@ -471,3 +488,19 @@ sequenceDiagram
 - success validator、平台合规检测、自动纠偏链路尚未接入。
 - `scope=selected` 的局部全局修改尚未在执行层生效（当前按整组处理）。
 - 规则包运行时现在支持“DB 发布优先 + 代码 seed 兜底”；后台改规则只影响后续策略和新生成结果，不回写历史资产。
+
+## 6.2 ???? Phase 1????
+
+- ??????????? `main_gallery` ???????
+- ?????? `strategy_preview`?
+  1. `PUT /sessions/{id}/brand` ???????/?? session ??????
+  2. `POST /sessions/{id}/strategy/preview` ?????????????????
+  3. ?????? `brand_memory_trace / brand_memory_item_ids / brand_memory_applied`?
+  4. `prompts/preview` ??? `generations` ??????? `session.strategy_preview`?
+- ?????????? > ????/????? > ???? > ?? session ?????
+- ?????????????????????? prompt ?????
+- ????????????????????`quality_status=passed`??
+- `quality_review_mode=sample/off` ?????? passed ????????????????????????
+- `brand_memory_items` ?? natural key ???????? platform/category/slot ??????????
+- Phase 1 ????????????????????/??????????????
+

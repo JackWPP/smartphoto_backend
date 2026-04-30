@@ -83,6 +83,9 @@ cp .env.example .env
 # LLM_ANALYSIS_MODEL=moonshotai/kimi-k2.5
 # LLM_MAIN_PLANNER_MODEL=xiaomi/mimo-v2-pro
 # LLM_DETAIL_PLANNER_MODEL=minimax/minimax-m2.7
+# PLANNER_PROMPT_MODE=compact
+# DETAIL_PLANNER_PROMPT_MODE=compact
+# PLANNER_REPAIR_STRICTNESS=critical_only
 # WHATAI_REQUEST_TIMEOUT_SECONDS=90
 # [上线推荐] 切到对象存储：
 # STORAGE_BACKEND=s3
@@ -145,112 +148,76 @@ CORS_ALLOW_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
   - 若 `8000` 已被占用，会自动顺延到下一个空闲端口，并在终端打印实际端口
 - 若你要调真实异步链路，把 `TASKS_EAGER=false` 并启动本机 Redis + `./scripts/dev-worker.sh`
 
-## 生产部署（单机 Docker Compose）
+## 生产部署
 
-适用于“单机 Linux 服务器 + Docker Compose + Git tag 发布”的首发方案。
+当前唯一推荐的生产形态是：
 
-### 1. 准备生产配置
+- `Postgres`：`docker-compose.infra.yml`
+- `Redis`：`docker-compose.infra.yml`
+- `API`：`systemd + .venv`
+- `Worker`：`systemd + .venv`
+- `Alembic`：`systemd + .venv`
+
+也就是：
+
+**Docker 只跑基础设施，业务服务原生运行。**
+
+生产文档入口按优先级阅读：
+
+1. [原生部署指南](./docs/原生部署指南.md)
+2. [原生运维指南](./docs/原生运维指南.md)
+3. [生产上线 SOP](./docs/生产上线SOP.md)
+4. [运行与排障手册](./docs/运行与排障手册.md)
+
+最小生产命令摘要：
+
 ```bash
-cp .env.prod.example .env.prod
+cd /opt/smartphoto_backend/repo
+
+docker compose --env-file .env.prod -f docker-compose.infra.yml up -d postgres redis
+./scripts/native-preflight.sh
+sudo ./scripts/native-install-systemd.sh
+sudo systemctl start smartphoto-migrate
+sudo systemctl enable --now smartphoto-api smartphoto-worker
 ```
 
-必须至少改这些值：
-- `PUBLIC_BASE_URL=http://<server_ip>:8000`
-- `CORS_ALLOW_ORIGINS=http://<frontend_host>:<port>`
-- `IMAGE_SAAS_APP_KEYS`
-- `IMAGE_SAAS_DEFAULT_APP_ID`
-- `ADMIN_JWT_SECRET`
-- `WHATAI_API_KEY`
-- `WHATAI_PLANNER_LIGHT_MODEL` / `PLANNER_PROFILE` / `PLANNER_FALLBACK_ROUTE`
-- `WHATAI_IMAGE_MODEL` / `WHATAI_REQUEST_TIMEOUT_SECONDS`
-- `LLM_ROUTE_ANALYSIS` / `LLM_ROUTE_MAIN_PLANNER` / `LLM_ROUTE_DETAIL_PLANNER` / `LLM_ROUTE_PARAMETER_VISUAL`
-- `OPENROUTER_API_KEY` / `OPENROUTER_API_BASE`
-- `OPENROUTER_MAIN_PLANNER_MODEL` / `OPENROUTER_DETAIL_PLANNER_MODEL` / `OPENROUTER_PLANNER_LIGHT_MODEL`（仅在显式切 OpenRouter planner 时使用）
-- `LLM_ANALYSIS_MODEL` / `LLM_PARAMETER_MODEL`
-- `OPENROUTER_FORM_REWRITE_MODEL` / `OPENROUTER_TEXT_REVIEW_MODEL` / `OPENROUTER_TEXT_PRESENTATION_MODEL`
-- 全部 `S3_*`
-- `POSTGRES_PASSWORD`
-- `DATABASE_URL`
+后续发版默认：
 
-说明：
-- 生产默认推荐 `STORAGE_BACKEND=s3`
-- `ADMIN_DATABASE_URL` 默认继续使用 `sqlite:///./storage/admin.sqlite3`，但会随 `./runtime/storage` 持久化
-- 当前默认推荐：视觉主链保持 `WhatAI + Gemini`，OpenRouter 只给文本辅助任务或横向试模型用
-- 当前默认策略规划配置：
-  - `PLANNER_PROFILE=harness_first`
-  - `LLM_ROUTE_MAIN_PLANNER=whatai_gemini`
-  - `LLM_ROUTE_DETAIL_PLANNER=whatai_gemini`
-  - `WHATAI_PLANNER_MODEL=kimi-k2.5`
-  - `WHATAI_PLANNER_LIGHT_MODEL=gemini-3-flash-preview`
-  - `PLANNER_FALLBACK_ROUTE=whatai_gemini`
-- 当前默认生图模型：
-  - `WHATAI_IMAGE_MODEL=gemini-3.1-flash-image-preview-2k`
-- analysis 会优先消费后台“全局品类库”；客户新增品类时优先在后台配置，不要再回到后端 fallback 硬编码
-- 生产示例文件不再替你预填 WhatAI / OpenRouter 模型，直接复用你当前已验证过的配置
-- 生产不要继续使用开发态默认 secret
-- `.env.prod` 里的 `PIP_INDEX_URL/PIP_TRUSTED_HOST` 不会自动影响 `docker build`；若构建阶段卡在 `npm/apt/pip`，直接按 `docs/生产上线SOP.md` 的“构建网络慢时的完整替代命令”处理
-
-### 2. 首次启动
 ```bash
-docker compose --env-file .env.prod -f docker-compose.prod.yml build api
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d postgres redis
-docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm migrate
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d api worker
+cd /opt/smartphoto_backend/repo
+SYSTEMCTL="sudo systemctl" ./scripts/native-deploy.sh --branch <deploy-branch>
 ```
 
-### 3. 健康检查
+只有确认无 migration 时，才允许：
+
 ```bash
-curl -s http://127.0.0.1:8000/healthz
-curl -s http://127.0.0.1:8000/api/admin/v1/auth/health
-docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+cd /opt/smartphoto_backend/repo
+SYSTEMCTL="sudo systemctl" ./scripts/native-deploy.sh --branch <deploy-branch> --skip-migrate
 ```
 
-### 4. 发布前预检
-```bash
-./scripts/preflight-prod.sh
-```
-
-若预检输出包含以下任一项，先停止发布并处理数据库兼容问题：
-- `alembic_version` 含 `20260322_0007`
-- 新增 Alembic revision 但生产库版本未跟上
-- `service_id` 相关新列或索引未迁到位
-- `rule_packs` / `rule_pack_versions` 出现 `family/draft_payload/payload/change_note` 这一套 3/22 错误 schema
-
-### 5. 热更新发布与回滚
-```bash
-export COMPOSE_PROJECT_NAME=smartphoto_backend
-
-# 纯逻辑/文档/静态资源变更，无 migration
-./scripts/deploy-prod.sh --image-tag recovery-20260323 --skip-migrate
-
-# 如本次包含 migration
-./scripts/deploy-prod.sh --image-tag recovery-20260323
-
-# 回滚到上一镜像
-./scripts/rollback-prod.sh
-```
-
-说明：
-- 生产机应保留自己的 `.env.prod`，发布包不要覆盖它
-- 使用部署包时，默认在新的 release 目录解压，不要在旧代码目录直接 `tar -xzf` 覆盖
-- 新旧目录必须复用同一个 `COMPOSE_PROJECT_NAME`，这样才会继续使用原有 `postgres/redis/storage` 卷
-- `deploy-prod.sh` 会做：本机 `docker build` -> 可选 `migrate` -> 热更新 `api/worker`
-- `rollback-prod.sh` 只替换 `api/worker`，不会动 `postgres/redis/storage` 卷
-- 只有在代码包不包含新 Alembic revision，且生产库已处于当前代码要求的 schema 时，才可使用 `--skip-migrate`
-- 详细生产上线顺序、备份命令、冒烟检查与常见坑位，以 `docs/生产上线SOP.md` 为准
+Docker 全应用部署仍保留在仓库里，但现在只作为历史兼容或应急备用路径，不再是默认建议。
 
 ## API 联调与排障手册索引
 
 遇到对接和运行问题，可以在这几份设计文档中找到完整答案，本系统严格贯彻**以代码为第一解释权，文档和逻辑强对齐**的原则。
 
+- 生产维护文档优先级：
+  1. `docs/原生部署指南.md`
+  2. `docs/原生运维指南.md`
+  3. `docs/生产上线SOP.md`
+  4. `docs/运行与排障手册.md`
 - 🚀 [API 接口字段字典、错误码与联调指南](./docs/API_联调指南.md)
+- 🏷️ [品牌记忆前端对接说明](./docs/品牌记忆前端对接说明_20260419.md)
+- 🧾 [品牌记忆 Phase 1 交接文档](./docs/brand-memory-phase1-handoff.md)
 - 🧭 `docs/Guest_First_前端联调说明.md` 已归档，仅供回看用户版历史方案
 - ☁️ [OSS 对接与上线指南](./docs/OSS_对接与上线指南.md)
 - 🧠 [生图 Agent 工作流架构与长程协作逻辑分析](./docs/生图Agent协作逻辑.md)
 - ⚙️ [主线生图与调度系统技术深度解构报告](./docs/生图架构核心技术报告.md)
 - ⚡ [生图提速优化报告（客户版）](./docs/生图提速优化报告_客户版.md)
-- 🚢 [项目运行、本地报错诊断与生产部署排障手册](./docs/运行与排障手册.md)
-- 📋 [单机 Docker Compose 生产上线 SOP](./docs/生产上线SOP.md)
+- 🧩 [原生部署指南：首次上线、切换与机器初始化](./docs/原生部署指南.md)
+- 🛠️ [原生运维指南：巡检、发版、迁移与救火](./docs/原生运维指南.md)
+- 📋 [生产上线 SOP：标准发布总册](./docs/生产上线SOP.md)
+- 🚢 [运行与排障手册：开发与问题定位索引](./docs/运行与排障手册.md)
 - 🤝 [甲方框架手册项目对齐说明（对外版）](./docs/甲方框架手册_项目对齐说明_对外版.md)
 - 🧾 [甲方框架手册项目对齐说明（内部评估版）](./docs/甲方框架手册_项目对齐说明_内部评估版.md)
 - 📦 [开发规范约束与贡献者约定](./AGENTS.md)
@@ -303,3 +270,24 @@ npm run dev
 - 调试前端现在应直接带 `X-App-Key` 调图片主链路，不再依赖 `/api/v2/auth`
 - Job 事件流与 ZIP 下载同样走 `X-App-Key`，不再区分 user/guest
 - 浏览器上传默认改走 `/api/v2/uploads/presign -> 直传对象存储 -> /api/v2/uploads/complete`
+
+## Windows 本地 Worker 说明
+
+- Windows 本地联调若直接让 Celery 使用默认 `billiard` 多进程池，容易出现 `WinError 5`、`WinError 6`、`句柄无效`、`SpawnPoolWorker-* exited with exitcode 1`
+- 当前 `scripts/dev-worker.ps1` 已默认改为安全模式启动：
+  - `--pool=solo`
+  - `--concurrency=1`
+  - 默认消费队列 `q.analysis,q.copy,q.generation.main,q.generation.detail,q.quality`
+- 这项适配只针对 Windows 本地联调稳定性；Linux / Docker 侧仍可继续使用常规 worker 配置验证真实异步并发
+- 若你确实要在本地覆盖 Windows worker 启动参数，可设置：
+  - `CELERY_WORKER_POOL`
+  - `CELERY_WORKER_CONCURRENCY`
+  - `CELERY_QUEUES`
+
+PowerShell 示例：
+
+```powershell
+$env:CELERY_WORKER_POOL = "threads"
+$env:CELERY_WORKER_CONCURRENCY = "4"
+.\scripts\dev-worker.ps1
+```
