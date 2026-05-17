@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db import session as db_session
 from app.models.category_catalog import CategoryCatalogModel
+from app.models.category_parameter_rules import CategoryParameterRuleModel
 
 
 def _seed(
@@ -340,3 +341,113 @@ def suggest_supplementary_views(
         return []
     detected = set(detected_view_slots or [])
     return [s for s in suggestions if s["view"] not in detected]
+
+
+# ── Category Parameter Rules ──────────────────────────────────────────
+
+SYSTEM_CATEGORY_PARAMETER_RULES: list[dict[str, Any]] = [
+    {
+        "category_slug": "air_purifier",
+        "platform_id": None,
+        "core_purchase_parameters": [
+            {"key": "cadr", "label": "CADR值", "unit": "m³/h", "priority": 1},
+            {"key": "coverage_area", "label": "适用面积", "unit": "m²", "priority": 2},
+            {"key": "filter_grade", "label": "滤网等级", "unit": "", "priority": 1},
+            {"key": "noise_level", "label": "噪音", "unit": "dB(A)", "priority": 3},
+            {"key": "purification_efficiency", "label": "净化效率", "unit": "%", "priority": 2},
+            {"key": "sensor_type", "label": "传感器类型", "unit": "", "priority": 4},
+            {"key": "filter_life", "label": "滤网使用寿命", "unit": "月", "priority": 3},
+            {"key": "rated_power", "label": "额定功率", "unit": "W", "priority": 5},
+        ],
+        "parameter_extraction_hints": [
+            "优先识别净化性能相关参数（CADR、滤网等级、适用面积）",
+            "如有铭牌或参数标贴请重点提取",
+            "关注进风口/出风口设计，这关系到净化效率",
+        ],
+        "anti_patterns": [
+            "外观形状（如圆柱型、方形）",
+            "按钮布局方式",
+            "指示灯颜色",
+            "产品高度或直径",
+            "进风口格栅样式",
+        ],
+        "selling_point_themes": [
+            {"theme": "宠物家庭适用", "keywords": ["宠物", "毛发", "除味", "猫狗"]},
+            {"theme": "母婴级净化", "keywords": ["母婴", "婴��", "安全", "低敏"]},
+            {"theme": "除甲醛", "keywords": ["甲醛", "新装修", "装修污染", "除醛"]},
+            {"theme": "静音睡眠", "keywords": ["静音", "睡眠", "低噪", "卧室"]},
+            {"theme": "大面积覆盖", "keywords": ["大面积", "全屋", "客厅", "大空间"]},
+            {"theme": "智能监测", "keywords": ["智能", "传感器", "自动", "APP"]},
+        ],
+        "category_reasoning_hints": (
+            "空气净化器是成熟家电品类。消费者购买决策核心关注：净化效率(CADR值，单位m³/h)、"
+            "滤网等级(HEPA H11/H12/H13)与更换成本、噪音水平(dB(A))、适用面积(m²)。"
+            "常见消费者场景包括：宠物家庭（毛发过滤+除异味）、新装修除甲醛、母婴防护（低噪+除菌）、"
+            "卧室静音运行。核心参数应优先围绕这些维度提取，而非外观描述。"
+        ),
+    },
+]
+
+
+def ensure_system_category_parameter_rules(db: Session) -> None:
+    now = datetime.now(timezone.utc)
+    existing_by_slug = {
+        item.category_slug: item
+        for item in db.query(CategoryParameterRuleModel).all()
+    }
+    changed = False
+    for item in SYSTEM_CATEGORY_PARAMETER_RULES:
+        existing = existing_by_slug.get(item["category_slug"])
+        if existing is None:
+            db.add(
+                CategoryParameterRuleModel(
+                    **item,
+                    is_active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            changed = True
+            continue
+        row_changed = False
+        for key in (
+            "platform_id", "core_purchase_parameters", "parameter_extraction_hints",
+            "anti_patterns", "selling_point_themes", "category_reasoning_hints",
+        ):
+            if getattr(existing, key) != item[key]:
+                setattr(existing, key, item[key])
+                row_changed = True
+        if row_changed:
+            existing.updated_at = now
+            changed = True
+    if changed:
+        db.flush()
+
+
+def get_category_parameter_rules(
+    db: Session,
+    category_slug: str,
+    platform_id: str | None = None,
+) -> dict[str, Any] | None:
+    ensure_system_category_parameter_rules(db)
+    query = db.query(CategoryParameterRuleModel).filter(
+        CategoryParameterRuleModel.category_slug == category_slug,
+        CategoryParameterRuleModel.is_active.is_(True),
+    )
+    if platform_id:
+        query = query.filter(CategoryParameterRuleModel.platform_id == platform_id)
+    else:
+        query = query.filter(CategoryParameterRuleModel.platform_id.is_(None))
+    item = query.first()
+    if item is None:
+        return None
+    return {
+        "rule_id": item.id,
+        "category_slug": item.category_slug,
+        "platform_id": item.platform_id,
+        "core_purchase_parameters": item.core_purchase_parameters or [],
+        "parameter_extraction_hints": item.parameter_extraction_hints or [],
+        "anti_patterns": item.anti_patterns or [],
+        "selling_point_themes": item.selling_point_themes or [],
+        "category_reasoning_hints": item.category_reasoning_hints or "",
+    }

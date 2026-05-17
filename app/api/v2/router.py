@@ -10,7 +10,9 @@ from app.api.v2.platforms import router as platforms_router
 from app.api.v2.prompt_presets import router as prompt_presets_router
 from app.api.v2.sessions import router as sessions_router
 from app.api.v2.uploads import router as uploads_router
+from app.api.v2.debug import router as debug_router
 from app.api.v2.feedback import router as feedback_router
+from app.api.v2.judge import router as judge_router
 
 router = APIRouter()
 router.include_router(platforms_router)
@@ -24,3 +26,5 @@ router.include_router(jobs_router)
 router.include_router(assets_router)
 router.include_router(prompt_presets_router)
 router.include_router(feedback_router)
+router.include_router(debug_router)
+router.include_router(judge_router)

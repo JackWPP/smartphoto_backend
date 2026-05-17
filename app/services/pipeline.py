@@ -35,6 +35,7 @@ from app.services.copy_normalization import (
     normalize_copy_text,
 )
 from app.services.copy_resolution import apply_analysis_defaults_with_attribution, resolve_session_copy
+from app.services.category_catalog import get_category_parameter_rules, suggest_supplementary_views
 from app.services.detail_pages import (
     DETAIL_PAGE_ASPECT_RATIO,
     DETAIL_PAGE_IMAGE_SIZE,
@@ -575,9 +576,16 @@ def run_extract_parameters_job(db: Session, job_id: str) -> None:
             }
         )
 
+    # Load category parameter rules for knowledge-guided extraction
+    analysis_snapshot = session.analysis_snapshot or {}
+    recognized = (analysis_snapshot or {}).get("recognized_product") or {}
+    category = str(recognized.get("category", "") or "").strip() if isinstance(recognized, dict) else ""
+    category_rules = None
+    if category:
+        category_rules = get_category_parameter_rules(db, category)
     snapshot = client.extract_parameters(
         confirmed_copy=_resolved_copy_for_session(db, session, include_parameter_snapshot=False),
-        analysis_snapshot=session.analysis_snapshot or {},
+        analysis_snapshot=analysis_snapshot,
         active_platform_id=session.active_platform_id,
         product_images=loaded_product_images,
         image_attachments=loaded_images,
