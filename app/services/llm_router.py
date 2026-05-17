@@ -21,14 +21,13 @@ class LLMRouter:
     OPENROUTER_TEXT_ROUTE = "openrouter_text"
     DOUBAO_TEXT_ROUTE = "doubao_text"
     OPENAI_COMPATIBLE_TEXT_ROUTE = "openai_compatible_text"
+    DEEPSEEK_TEXT_ROUTE = "deepseek_text"
+    QWEN_TEXT_ROUTE = "qwen_text"
     DISABLED_ROUTE = "disabled"
     VALID_ROUTES = {
-        WHATI_CHAT_ROUTE,
-        WHATI_GEMINI_ROUTE,
-        OPENROUTER_TEXT_ROUTE,
-        DOUBAO_TEXT_ROUTE,
-        OPENAI_COMPATIBLE_TEXT_ROUTE,
-        DISABLED_ROUTE,
+        WHATI_CHAT_ROUTE, WHATI_GEMINI_ROUTE, OPENROUTER_TEXT_ROUTE,
+        DOUBAO_TEXT_ROUTE, OPENAI_COMPATIBLE_TEXT_ROUTE,
+        DEEPSEEK_TEXT_ROUTE, QWEN_TEXT_ROUTE, DISABLED_ROUTE,
     }
 
     def __init__(self, settings: Settings | None = None) -> None:
@@ -67,6 +66,10 @@ class LLMRouter:
             return "doubao"
         if route == self.OPENAI_COMPATIBLE_TEXT_ROUTE:
             return "openai_compatible"
+        if route == self.DEEPSEEK_TEXT_ROUTE:
+            return "deepseek"
+        if route == self.QWEN_TEXT_ROUTE:
+            return "qwen"
         return "whatai"
 
     def model_for_task(self, task: str) -> str:
@@ -123,6 +126,10 @@ class LLMRouter:
             return str(whatai_mapping.get(task) or self.settings.whatai_chat_model).strip()
         if route == self.WHATI_CHAT_ROUTE:
             return str(self.settings.whatai_chat_model).strip()
+        if route == self.DEEPSEEK_TEXT_ROUTE:
+            return str(self.settings.deepseek_model).strip()
+        if route == self.QWEN_TEXT_ROUTE:
+            return str(self.settings.qwen_model).strip()
         if task in {"main_planner", "detail_planner"} and self.settings.planner_profile == "light_model":
             return str(self.settings.openrouter_planner_light_model).strip()
         if task == "main_planner":
@@ -286,18 +293,35 @@ class LLMRouter:
                 retryable_on_exhausted=True,
             )
         if provider == "doubao":
+            if str(self.settings.doubao_api_mode or "chat").strip().lower() == "chat":
+                return self._post_doubao_chat_json(payload, error_key)
             return self._post_doubao_responses_json(payload, error_key)
         if provider == "openai_compatible":
             return self._request_json_with_retry(
                 base_url=self.settings.openai_compatible_api_base.rstrip("/"),
-                method="POST",
-                path="/chat/completions",
-                payload=dict(payload),
+                method="POST", path="/chat/completions", payload=dict(payload),
                 headers={"Authorization": f"Bearer {self.settings.openai_compatible_api_key}"},
                 error_key=error_key,
                 attempts=max(int(self.settings.openai_compatible_max_retries), 1),
                 timeout_seconds=max(int(self.settings.openai_compatible_request_timeout_seconds), 1),
                 retryable_on_exhausted=True,
+            )
+        if provider == "deepseek":
+            return self._request_json_with_retry(
+                base_url=self.settings.deepseek_api_base.rstrip("/"),
+                method="POST", path="/chat/completions", payload=dict(payload),
+                headers={"Authorization": f"Bearer {self.settings.deepseek_api_key}"},
+                error_key=error_key, attempts=3, retryable_on_exhausted=True,
+            )
+        if provider == "qwen":
+            qwen_payload = dict(payload)
+            qwen_payload["enable_thinking"] = False
+            return self._request_json_with_retry(
+                base_url=self.settings.qwen_api_base.rstrip("/"),
+                method="POST", path="/chat/completions", payload=qwen_payload,
+                headers={"Authorization": f"Bearer {self.settings.qwen_api_key}"},
+                error_key=error_key, attempts=1, retryable_on_exhausted=False,
+                timeout_seconds=180,
             )
         if model.startswith("gemini-"):
             return self._post_gemini_json(model, payload, error_key)
@@ -401,21 +425,52 @@ class LLMRouter:
 
     def _post_gemini_json(self, model: str, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
         contents = self._build_gemini_contents(payload.get("messages", []))
-        gemini_payload = {
+        generation_config: dict[str, Any] = {}
+        temp = payload.get("temperature")
+        if temp is not None:
+            generation_config["temperature"] = float(temp)
+        response_format = payload.get("response_format") or {}
+        if response_format.get("type") == "json_object":
+            generation_config["response_mime_type"] = "application/json"
+        gemini_payload: dict[str, Any] = {
             "contents": contents,
-            "generationConfig": {},
+            "generationConfig": generation_config,
         }
-        base = self._normalized_whatai_base_url()
-        if base.endswith("/v1"):
-            base = base[:-3]
+        system_msg = next((m for m in (payload.get("messages") or []) if isinstance(m, dict) and m.get("role") == "system"), None)
+        if system_msg is not None:
+            sys_content = system_msg.get("content")
+            if isinstance(sys_content, str) and sys_content.strip():
+                gemini_payload["systemInstruction"] = {"parts": [{"text": sys_content.strip()}]}
         return self._request_json_with_retry(
-            base_url=base,
+            base_url=self._normalized_gemini_base_url(),
             method="POST",
             path=f"/v1beta/models/{model}:generateContent",
             payload=gemini_payload,
-            headers={"Authorization": f"Bearer {self.settings.whatai_api_key}"},
+            headers={"x-goog-api-key": self.settings.whatai_api_key},
             error_key=error_key,
             attempts=3,
+            retryable_on_exhausted=True,
+        )
+
+    def _post_doubao_chat_json(self, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
+        """Doubao Chat Completions API — supports reasoning_effort and multimodal."""
+        request_payload: dict[str, Any] = {
+            "model": str(payload.get("model") or ""),
+            "messages": payload.get("messages", []),
+            "response_format": {"type": "json_object"},
+        }
+        effort = str(self.settings.doubao_reasoning_effort or "minimal").strip()
+        if effort != "minimal":
+            request_payload["reasoning_effort"] = effort
+        return self._request_json_with_retry(
+            base_url=self.settings.doubao_api_base.rstrip("/"),
+            method="POST",
+            path="/chat/completions",
+            payload=request_payload,
+            headers={"Authorization": f"Bearer {self.settings.doubao_api_key}"},
+            error_key=error_key,
+            attempts=max(int(self.settings.doubao_max_retries), 1),
+            timeout_seconds=max(int(self.settings.doubao_request_timeout_seconds), 1),
             retryable_on_exhausted=True,
         )
 
@@ -536,7 +591,11 @@ class LLMRouter:
 
     def _normalized_whatai_base_url(self) -> str:
         base = str(self.settings.whatai_api_base or "").strip().rstrip("/")
-        return base if base.endswith("/v1") else f"{base}/v1"
+        return f"{base}/api/codex/backend-api/codex/v1"
+
+    def _normalized_gemini_base_url(self) -> str:
+        base = str(self.settings.whatai_api_base or "").strip().rstrip("/")
+        return f"{base}/api/gemini"
 
     def _extract_text(self, payload: dict[str, Any]) -> str:
         choices = payload.get("choices") if isinstance(payload, dict) else None

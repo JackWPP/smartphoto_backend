@@ -555,7 +555,8 @@ def persist_text_edit_version_outputs(
     )
     created_assets = [new_asset]
     regenerated_slot_id = str(slot_id).strip()
-    for existing_asset in version_assets(db, session.id, carry_forward_version, asset_family="main_gallery"):
+    family = new_asset.asset_family or "main_gallery"
+    for existing_asset in version_assets(db, session.id, carry_forward_version, asset_family=family):
         if existing_asset.id == source_asset.id:
             continue
         existing_slot = str(existing_asset.slot_id or existing_asset.asset_role or "").strip()

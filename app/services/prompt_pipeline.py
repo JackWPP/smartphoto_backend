@@ -49,6 +49,7 @@ class MainPromptPipelineResult:
     visible_copy: MainPromptVisibleCopyStage
     composed: MainPromptComposedStage
     final_prompt: str
+    visible_copy_slots: list[dict[str, str]]
 
 
 def normalize_main_prompt_stage(
@@ -140,13 +141,13 @@ def compose_main_prompt_blocks(
 def compose_main_final_prompt(
     stage: MainPromptComposedStage,
     *,
-    format_prompt_blocks: Callable[..., str],
+    format_prompt_blocks: Callable[..., tuple[str, list[dict[str, str]]]],
     compose_raw_override_prompt: Callable[[str, dict[str, Any]], str],
-) -> str:
+) -> tuple[str, list[dict[str, str]]]:
     normalized = stage.visible_copy.sanitized.normalized
     truth_contract = normalized.prompt_plan.get("truth_contract")
     if normalized.raw_prompt_override:
-        return compose_raw_override_prompt(normalized.raw_prompt_override, normalized.prompt_plan)
+        return compose_raw_override_prompt(normalized.raw_prompt_override, normalized.prompt_plan), []
     return format_prompt_blocks(
         stage.blocks,
         aspect_ratio=str(normalized.plan.get("aspect_ratio") or "1:1"),
@@ -170,7 +171,7 @@ def build_main_prompt_pipeline(
     apply_instruction_overrides: Callable[[dict[str, str], list[tuple[str, str]], str | None], dict[str, str]],
     normalized_text_entries: Callable[[Any], list[str]],
     block_order: list[str],
-    format_prompt_blocks: Callable[..., str],
+    format_prompt_blocks: Callable[..., tuple[str, list[dict[str, str]]]],
     compose_raw_override_prompt: Callable[[str, dict[str, Any]], str],
 ) -> MainPromptPipelineResult:
     sanitized = sanitize_main_prompt_stage(
@@ -190,7 +191,7 @@ def build_main_prompt_pipeline(
         normalized_text_entries=normalized_text_entries,
         block_order=block_order,
     )
-    final_prompt = compose_main_final_prompt(
+    final_prompt, visible_copy_slots = compose_main_final_prompt(
         composed,
         format_prompt_blocks=format_prompt_blocks,
         compose_raw_override_prompt=compose_raw_override_prompt,
@@ -201,6 +202,7 @@ def build_main_prompt_pipeline(
         visible_copy=visible_copy,
         composed=composed,
         final_prompt=final_prompt,
+        visible_copy_slots=visible_copy_slots,
     )
 
 

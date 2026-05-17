@@ -121,8 +121,8 @@ def _product_name_correction_notice(
 class WhataiClient:
     REQUEST_RETRYABLE_ERRORS = (httpx.TransportError,)
     IMAGE_EDIT_REQUEST_ATTEMPTS = 4
-    CHAT_IMAGE_MAX_EDGE = 1024
-    CHAT_IMAGE_JPEG_QUALITY = 82
+    CHAT_IMAGE_MAX_EDGE = 768
+    CHAT_IMAGE_JPEG_QUALITY = 75
     IMAGE_EDIT_ALLOWED_ASPECT_RATIOS = {
         "1:1",
         "1:4",
@@ -183,54 +183,33 @@ class WhataiClient:
                 {
                     "type": "text",
                     "text": (
-                        "你是 SmartPhoto 的商品视觉分析器。"
-                        "你的职责是识别商品真实品类、理解当前视角覆盖情况，并给主图/详情页规划提供结构化输入。"
-                        "只能返回 JSON 对象，不要输出解释性段落。"
-                        "输出字段必须包含：recognized_product,image_assessment,missing_views,suggestions,copy_draft,"
-                        "key_parameters,suggested_styles,reference_summary,category_candidates,scene_tags,"
-                        "supplement_image_recommendations,detected_view_slots,evidence_scores,risk_flags,selling_point_entities。"
-                        "recognized_product 必须包含 product_name,category,image_type,confidence。"
-                        "category_candidates 至少返回 3 个候选项，每项包含 category,confidence,reason，并按置信度排序。"
-                        "category_candidates 必须优先从给定的全局品类库中选择，只有完全无法归类时才允许使用“其他”。"
-                        "每个品类条目包含 confusion_pairs 字段，列出外观相似的易混淡品类——识别时必须根据以下要点区分：\n"
-                        "  饮水机 vs 净水器：饮水机有出水龙头+加热功能；净水器有滤芝舟+出水管且无内置加热。\n"
-                        "  空气净化器 vs 加湿器：净化器有HEPA滤网+进出风口；加湿器有出雾口+水筱可见。\n"
-                        "  宠物饮水机 vs 普通饮水机：宠物饮水机有饮水槽/磗+循环泵，体积小，面向动物。\n"
-                        "  破壁机 vs 料理机 vs 养生壶：破壁机高速刀头+圆柱透明杯；养生壶有加热底座+玻璃内胆；料理机有多功能刀片组。\n"
-                        "  扫地机 vs 洗地机：扫地机扁圆形自动导航；洗地机手持推杆+双水筱。\n"
-                        "不要把具体家电、个护、宠物、家具产品泛化成“家居用品”。"
-                        "supplement_image_recommendations 每项必须包含 slot_type,label,reason,priority,upload_goal,must_show,framing_hint,example_caption。"
-                        "slot_type 只能是 front,angle45,side,extra。priority 只能输出 1-10 的整数，不允许输出 high/medium/low。"
-                        "如果 slot_type=extra，可额外输出 image_kind，且只能是 detail_closeup,water_tank,filter_structure,size_in_hand,use_scene_real 之一。"
-                        "补图建议的重点是告诉用户还需要补上传什么图片，不要主要输出抽象拍摄技巧。"
-                        "upload_goal 要描述补这张图是为了什么；must_show 要写清楚希望图里出现的真实结构元素；framing_hint 要说明构图建议；example_caption 给一句短标题示例。"
-                        "建议数量控制在 2-4 条，优先覆盖当前缺失的视角和关键结构信息。"
-                        "missing_views 和 detected_view_slots 只能使用 front,angle45,side,extra 这 4 个槽位。"
-                        "reference_summary 至少包含 shape,colors,materials,structures,must_keep,"
-                        "proportion_note,control_panel_note,transparent_parts_note,structure_anchor_points,"
-                        "do_not_move_features,scene_fit_notes。"
-                        "evidence_scores 必须包含 structure,proportion,scene,text，取值 0-100。"
-                        "risk_flags 必须是数组，用于描述透明结构、控制面板、尺寸敏感、场景落地等风险。"
-                        "selling_point_entities 必须是数组，只保留真实卖点实体，例如宠物、控制面板、透明水箱、滤芯。"
-                        "输出字段额外必须包含：fidelity_tier,product_identity_anchor,component_registry,image_semantic_tags。"
-                        "fidelity_tier 只能是 critical/high/standard/creative，表示当前商品需要多高级别的外观保真。"
-                        "涉及控制面板、精密结构、透明部件、机械组件的产品应为 critical；普通家电/日用品为 high；"
-                        "简单造型产品为 standard；纯设计/艺术类为 creative。"
-                        "product_identity_anchor 必须包含 brand_marks(品牌标识位置列表), "
-                        "control_interfaces(控制界面/面板/按键描述), distinguishing_geometry(辨识性几何特征), "
-                        "color_palette_hex(主体色 HEX 色号数组,至少2色)。"
-                        "component_registry 必须是数组，每项包含 name(部件名), position(位置描述), movable(bool是否可拆卸)。"
-                        "image_semantic_tags 必须是数组，每项包含 image_id 和 tags "
-                        "(如 main_body, accessory, front_panel, side_view, internal_structure, packaging, lifestyle_scene)。"
-                        "如果某个候选品类置信度低，请在 reason 中明确指出不确定原因。"
-                        "不要输出思考过程、推理过程、内部规划标签或流程说明。"
-                        "copy_draft 和 example_caption 必须像可直接交给用户编辑或继续生成的最终候选，不要输出中间想法。"
-                        "You may also return copy_blocks,text_density,visual_emphasis,global_consistency_note for each prompt_plan item. "
-                        "copy_blocks may contain headline,supporting,proof_lines,matrix_lines. "
-                        "These fields are final visible copy for the image, not internal reasoning or layout instructions. "
+                        "你是电商商品视觉分析器。仔细看图，用中文返回 JSON。\n"
+                        "\n"
+                        "【品类识别 — 最重要】\n"
+                        "category 必须使用品类库中的精确 name，不要加括号注释或改写。\n"
+                        "注意区分易混品类：冰柜（顶开式冷冻柜）≠ 冰箱（前开式冷藏冷冻柜）；\n"
+                        "空气净化器 ≠ 加湿器；净水器 ≠ 饮水机。不要把具体产品泛化。\n"
+                        "category_candidates 至少 3 个，按置信度降序，每项 category,confidence,reason(简短)。\n"
+                        "\n"
+                        "【返回 JSON 结构】\n"
+                        "recognized_product: {product_name, category(品类库精确name), image_type, confidence}。\n"
+                        "category_candidates: [{category, confidence, reason}] 至少3个，按置信度降序。\n"
+                        "reference_summary: {shape, colors, materials, structures, must_keep} 各一句话。\n"
+                        "copy_draft: {title, highlights[3-5个卖点短句]}。\n"
+                        "key_parameters: {参数名: 参数值}。suggested_styles: [风格1, 风格2]。\n"
+                        "selling_point_entities: [短标签数组]。risk_flags: [真实风险，无则[]]。\n"
+                        "fidelity_tier: critical|high|standard|creative。\n"
+                        "product_identity_anchor: {brand_marks, control_interfaces, distinguishing_geometry, color_palette_hex[至少2色]}。\n"
+                        "component_registry: [{name, position}]。\n"
+                        "evidence_scores: {structure, proportion, scene, text} 各 0-100。\n"
+                        "missing_views, detected_view_slots: 每个值精确为 'front'/'angle45'/'side'/'extra'，不要用其他描述词。\n"
+                        "supplement_image_recommendations: 2-4 条，每项 {slot_type(同样只限front/angle45/side/extra), label, reason}。\n"
+                        "scene_tags: [使用场景标签]。\n"
+                        "\n"
+                        "【约束】所有文案用中文，简洁明确。不编造卖点。不输出思考过程。\n"
                         f"{_prompt_matrix_guardrail_text()}"
-                        f"当前平台：{active_platform_id or 'temu'}。"
-                        f"当前全局品类库：{json.dumps(catalog_prompt, ensure_ascii=False)}。"
+                        f"平台：{active_platform_id or 'temu'}。\n"
+                        f"品类库：{json.dumps(catalog_prompt, ensure_ascii=False)}。"
                     ),
                 },
                 *self._build_chat_image_parts(normalized_images),
@@ -844,9 +823,12 @@ class WhataiClient:
                     f"文件附件摘要：{json.dumps(attachment_manifest, ensure_ascii=False)}。"
                 ),
             },
-            *self._build_chat_image_parts(product_images),
-            *self._build_chat_image_parts(image_attachments),
         ]
+        # Only include images for multimodal providers; DeepSeek is text-only
+        _param_provider = self.llm_router.provider_for_task("parameter")
+        if _param_provider in {"whatai", "qwen", "doubao"}:
+            content.extend(self._build_chat_image_parts(product_images))
+            content.extend(self._build_chat_image_parts(image_attachments))
         outcome = self._run_structured_task(
             task="parameter",
             messages=[{"role": "user", "content": content}],
@@ -1184,15 +1166,12 @@ class WhataiClient:
         aspect_ratio: str | None = None,
         reference_images: list[LoadedReferenceImage] | None = None,
     ) -> bytes:
-        if not self.settings.whatai_api_key:
+        if not self.settings.image_api_key and not self.settings.whatai_api_key:
             return self._fake_image(prompt)
 
         if reference_images:
             response_json = self._submit_image_edit(
-                prompt,
-                aspect_ratio,
-                reference_images,
-                "upstream_image_error",
+                prompt, aspect_ratio, reference_images, "upstream_image_error",
             )
             upstream_endpoint = "/v1/images/edits"
         else:
@@ -1222,7 +1201,7 @@ class WhataiClient:
         reference_images: list[LoadedReferenceImage] | None = None,
         error_key: str = "upstream_image_error",
     ) -> dict[str, Any]:
-        if not self.settings.whatai_api_key:
+        if not self.settings.image_api_key and not self.settings.whatai_api_key:
             return {
                 "submission_id": None,
                 "task_id": None,
@@ -1236,10 +1215,7 @@ class WhataiClient:
 
         if reference_images:
             response_json = self._submit_image_edit(
-                prompt,
-                aspect_ratio,
-                reference_images,
-                error_key,
+                prompt, aspect_ratio, reference_images, error_key,
             )
             upstream_endpoint = "/v1/images/edits"
         else:
@@ -1414,14 +1390,59 @@ class WhataiClient:
             retryable_on_exhausted=True,
         )
 
+    GEN_IMAGE_MAX_EDGE = 384
+    GEN_IMAGE_QUALITY = 50
+
+    def _build_image_payload(
+        self,
+        prompt: str,
+        size: str,
+        aspect_ratio: str | None,
+        reference_images: list[LoadedReferenceImage] | None,
+    ) -> dict[str, Any]:
+        """Build a unified payload for /v1/images/generations.
+
+        Reference images are embedded as compact data URIs (384px, JPEG q50)
+        so the model can see what the product looks like without bloating the request.
+        """
+        import base64
+        payload: dict[str, Any] = {
+            "model": self.settings.whatai_image_model,
+            "prompt": prompt,
+            "size": size,
+        }
+        if reference_images:
+            data_uris: list[str] = []
+            for image in reference_images[:2]:  # at most 2 ref images
+                try:
+                    with Image.open(io.BytesIO(image.content)) as img:
+                        if img.mode not in {"RGB", "L"}:
+                            base = Image.new("RGB", img.size, (255, 255, 255))
+                            base.paste(img.convert("RGBA"), mask=img.convert("RGBA").split()[-1])
+                            img = base
+                        elif img.mode != "RGB":
+                            img = img.convert("RGB")
+                        if max(img.size) > self.GEN_IMAGE_MAX_EDGE:
+                            scaled = img.copy()
+                            scaled.thumbnail((self.GEN_IMAGE_MAX_EDGE, self.GEN_IMAGE_MAX_EDGE))
+                            img = scaled
+                        buf = io.BytesIO()
+                        img.save(buf, format="JPEG", quality=self.GEN_IMAGE_QUALITY, optimize=True)
+                        encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+                        data_uris.append(f"data:image/jpeg;base64,{encoded}")
+                except Exception:
+                    data_uris.append(f"data:{image.mime_type};base64,{base64.b64encode(image.content).decode('ascii')}")
+            if data_uris:
+                payload["image"] = data_uris
+        return payload
+
     def _submit_image_generation_task(self, payload: dict[str, Any], error_key: str) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
         response_json = self._request_json_with_retry(
-            base_url=self._normalized_base_url(),
+            base_url=self._image_base_url(),
             method="POST",
             path="/images/generations",
             payload=payload,
-            headers=headers,
+            headers=self._image_auth_headers(),
             error_key=error_key,
             attempts=3,
             params={"async": "true"},
@@ -1450,7 +1471,7 @@ class WhataiClient:
                 ),
                 502,
             )
-        headers = {"Authorization": f"Bearer {self.settings.whatai_api_key}"}
+        headers = self._image_auth_headers()
         files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:8]]
         data = {
             "model": self.settings.whatai_image_model,
@@ -1465,7 +1486,7 @@ class WhataiClient:
             len(files),
         )
         return self._request_multipart_json_with_retry(
-            base_url=self._normalized_base_url(),
+            base_url=self._image_base_url(),
             path="/images/edits",
             data=data,
             files=files,
@@ -1613,6 +1634,21 @@ class WhataiClient:
         elif not path.endswith("/v1"):
             path = f"{path}/v1"
         return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+    def _image_base_url(self) -> str:
+        """Base URL for image generation (aiartmirror.com)."""
+        base = self.settings.image_api_base or self.settings.whatai_api_base
+        parsed = urlsplit(base.rstrip("/"))
+        path = parsed.path.rstrip("/")
+        if not path:
+            path = "/v1"
+        elif not path.endswith("/v1"):
+            path = f"{path}/v1"
+        return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+    def _image_auth_headers(self) -> dict[str, str]:
+        key = self.settings.image_api_key or self.settings.whatai_api_key
+        return {"Authorization": f"Bearer {key}"}
 
     def _format_http_error(self, exc: httpx.HTTPStatusError) -> str:
         message = str(exc)
@@ -1956,6 +1992,15 @@ class WhataiClient:
         return _count(messages)
 
     def _should_repair_validation_errors(self, task: str, errors: list[dict[str, Any]]) -> bool:
+        if task == "analysis":
+            # Only repair critical structural errors; enum / catalog-match are
+            # guidance-level and would cause infinite repair loops since the
+            # vision model cannot reliably map to strict enum sets in one shot.
+            for error in errors:
+                rule = str(error.get("rule") or "")
+                if rule in {"json_object", "required", "required_object", "min_items"}:
+                    return True
+            return False
         if task not in {"main_planner", "detail_planner"}:
             return True
         if self.settings.planner_repair_strictness != "critical_only":
@@ -2049,12 +2094,12 @@ class WhataiClient:
                 if slot_type == "extra" and image_kind and image_kind not in ALLOWED_EXTRA_IMAGE_KINDS:
                     errors.append(self._validation_error(f"supplement_image_recommendations[{index}].image_kind", "enum", f"image_kind 只能使用 {ALLOWED_EXTRA_IMAGE_KINDS}", image_kind))
                 priority = item.get("priority")
-                if not isinstance(priority, int):
+                if priority is not None and not isinstance(priority, int):
                     try:
                         int(str(priority).strip())
                     except (TypeError, ValueError):
                         errors.append(self._validation_error(f"supplement_image_recommendations[{index}].priority", "integer", "priority 必须是 1-10 的整数", priority))
-                for key in ("reason", "upload_goal", "must_show", "framing_hint", "example_caption"):
+                for key in ("slot_type", "label", "reason"):
                     if not repair_broken_text(item.get(key)):
                         errors.append(self._validation_error(f"supplement_image_recommendations[{index}].{key}", "required", f"{key} 不能为空", item.get(key)))
         reference_summary = parsed.get("reference_summary")

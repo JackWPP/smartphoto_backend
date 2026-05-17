@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>前端 UI/交互层更新报告</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #f8fafc;
+      --bg-card: #ffffff;
+      --bg-aurora-1: rgba(6, 182, 212, 0.06);
+      --bg-aurora-2: rgba(59, 130, 246, 0.04);
+      --border-color: #e2e8f0;
+      --text-primary: #0f172a;
+      --text-secondary: #475569;
+      --text-muted: #94a3b8;
+      --accent-blue: #2563eb;
+      --accent-cyan: #0891b2;
+      --accent-amber: #d97706;
+      --accent-emerald: #059669;
+      --accent-rose: #e11d48;
+      --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+      --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+      --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+      --radius: 16px;
+      --radius-sm: 8px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      min-height: 100vh;
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      top: -50%;
+      right: -20%;
+      width: 80vw;
+      height: 80vw;
+      background: radial-gradient(circle, var(--bg-aurora-1) 0%, transparent 70%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      bottom: -30%;
+      left: -10%;
+      width: 60vw;
+      height: 60vw;
+      background: radial-gradient(circle, var(--bg-aurora-2) 0%, transparent 70%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 48px 24px;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Header */
+    .header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    .header-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(6, 182, 212, 0.08));
+      border: 1px solid rgba(37, 99, 235, 0.15);
+      border-radius: 100px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent-blue);
+      letter-spacing: 0.05em;
+      margin-bottom: 20px;
+    }
+
+    .header h1 {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, var(--text-primary), #334155);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .header p {
+      font-size: 16px;
+      color: var(--text-secondary);
+      max-width: 560px;
+      margin: 0 auto;
+    }
+
+    .header-meta {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      margin-top: 24px;
+      flex-wrap: wrap;
+    }
+
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .meta-item svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    /* Cards */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 28px;
+      margin-bottom: 24px;
+      box-shadow: var(--shadow-sm);
+      transition: box-shadow 0.3s ease, transform 0.2s ease;
+    }
+
+    .card:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-1px);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .card-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 20px;
+    }
+
+    .card-icon.blue { background: linear-gradient(135deg, #dbeafe, #bfdbfe); }
+    .card-icon.cyan { background: linear-gradient(135deg, #cffafe, #a5f3fc); }
+    .card-icon.amber { background: linear-gradient(135deg, #fef3c7, #fde68a); }
+    .card-icon.emerald { background: linear-gradient(135deg, #d1fae5, #a7f3d0); }
+    .card-icon.rose { background: linear-gradient(135deg, #ffe4e6, #fecdd3); }
+    .card-icon.indigo { background: linear-gradient(135deg, #e0e7ff, #c7d2fe); }
+
+    .card-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+
+    .card-subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .card-body {
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+
+    .card-body p {
+      margin-bottom: 12px;
+    }
+
+    .card-body p:last-child {
+      margin-bottom: 0;
+    }
+
+    /* File list */
+    .file-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      background: #f8fafc;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-family: 'SF Mono', Monaco, monospace;
+      color: var(--text-secondary);
+    }
+
+    .file-item::before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .file-item.modified::before { background: var(--accent-blue); }
+    .file-item.new::before { background: var(--accent-emerald); }
+
+    .file-item code {
+      background: rgba(37, 99, 235, 0.06);
+      color: var(--accent-blue);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    /* Tag */
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 10px;
+      border-radius: 100px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      margin-left: auto;
+    }
+
+    .tag.p0 { background: #fef2f2; color: var(--accent-rose); border: 1px solid #fecaca; }
+    .tag.p1 { background: #fffbeb; color: var(--accent-amber); border: 1px solid #fde68a; }
+    .tag.p2 { background: #f0fdf4; color: var(--accent-emerald); border: 1px solid #bbf7d0; }
+
+    /* Summary grid */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    .summary-card {
+      background: linear-gradient(135deg, var(--bg-card), #f8fafc);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 20px;
+      text-align: center;
+    }
+
+    .summary-number {
+      font-size: 32px;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 4px;
+    }
+
+    .summary-label {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      margin-top: 48px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border-color);
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .container { padding: 32px 16px; }
+      .header h1 { font-size: 26px; }
+      .card { padding: 20px; }
+      .card-header { flex-direction: column; gap: 12px; }
+    }
+
+    /* Animation */
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .card {
+      animation: fadeInUp 0.5s ease both;
+    }
+
+    .card:nth-child(1) { animation-delay: 0.05s; }
+    .card:nth-child(2) { animation-delay: 0.1s; }
+    .card:nth-child(3) { animation-delay: 0.15s; }
+    .card:nth-child(4) { animation-delay: 0.2s; }
+    .card:nth-child(5) { animation-delay: 0.25s; }
+    .card:nth-child(6) { animation-delay: 0.3s; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-badge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        前端更新报告
+      </div>
+      <h1>UI / 交互层修复与优化</h1>
+      <p>针对用户提出的 6 类核心诉求进行系统性修复，覆盖上传态、进度反馈、文案排版、移动端适配、视觉观感与预览流程。</p>
+      <div class="header-meta">
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          2026-04-26
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          12 个文件修改
+        </div>
+        <div class="meta-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          TypeScript & Build 验证通过
+        </div>
+      </div>
+    </header>
+
+    <!-- Summary -->
+    <div class="summary-grid">
+      <div class="summary-card">
+        <div class="summary-number">8</div>
+        <div class="summary-label">修复类别</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-number">16</div>
+        <div class="summary-label">修改文件</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-number">0</div>
+        <div class="summary-label">类型错误</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-number">8</div>
+        <div class="summary-label">页面底部栏安全区适配</div>
+      </div>
+    </div>
+
+    <!-- Category 1 -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon blue">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="card-title">上传区展示逻辑修复</div>
+          <div class="card-subtitle">修复多图上传时预览覆盖丢失问题</div>
+        </div>
+        <span class="tag p1">P1</span>
+      </div>
+      <div class="card-body">
+        <p>用户上传多张图片后，后端返回的图片列表通过 <code>display_order</code> 映射到前端 slot 时，存在冲突覆盖问题，导致界面只显示一张。</p>
+        <p><strong>修复内容：</strong></p>
+        <ul style="margin-left: 18px; margin-bottom: 12px;">
+          <li>hydration 阶段增加 <code>assignedSlots</code> 集合追踪，已分配的 slot 不再被覆盖</li>
+          <li>冲突时自动寻找下一个空闲 slot 进行分配，所有 slot 占满则跳过</li>
+          <li>文件选择器增加 <code>multiple</code> 属性，支持批量选择</li>
+          <li>多余文件自动分配到 <code>extra_1</code>, <code>extra_2</code> 等空闲 slot</li>
+        </ul>
+        <div class="file-list">
+          <div class="file-item modified">
+            client/src/pages/create/UploadStep.tsx <code>slot 映射修复 + 多文件上传</code>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 2 -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon cyan">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0891b2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="card-title">进度反馈真实化</div>
+          <div class="card-subtitle">移除假进度条，改为阶段式保守增长</div>
+        </div>
+        <span class="tag p0">P0</span>
+      </div>
+      <div class="card-body">
+        <p>用户反馈"几秒就显示已经过了半程"，原因是前端使用激进的假进度定时器（每 400ms 增加 1-6%，上限 40%），短时间内即可跳至半程。</p>
+        <p><strong>修复内容：</strong></p>
+        <ul style="margin-left: 18px; margin-bottom: 12px;">
+          <li><strong>ResultStep</strong>：假进度增量从 <code>Math.random() * 5 + 1</code> 降至 <code>Math.random() * 1.2 + 0.3</code>，间隔从 400ms 改为 800ms，上限从 40% 降至 8%</li>
+          <li><strong>HDResultStep</strong>：假进度增量从 <code>Math.random() * 8-10</code> 降至 <code>Math.random() * 1.5 + 0.5</code>，间隔改为 600ms</li>
+          <li><strong>DetailResultStep</strong>：初始进度从 8 改为 0；后端进度映射区间统一调整为 12%-92%</li>
+          <li>后端返回真实 <code>progress</code> / <code>progress_pct</code> 后，进度条平滑过渡到对应位置</li>
+        </ul>
+        <div class="file-list">
+          <div class="file-item modified">client/src/pages/create/ResultStep.tsx <code>保守阶段式进度</code></div>
+          <div class="file-item modified">client/src/pages/create/HDResultStep.tsx <code>移除激进假进度</code></div>
+          <div class="file-item modified">client/src/pages/create/DetailResultStep.tsx <code>初始进度从 0 开始</code></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 3 -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon amber">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="card-title">文字改动后的版式联动</div>
+          <div class="card-subtitle">区分"仅替换文字"与"智能重排版"两种模式</div>
+        </div>
+        <span class="tag p1">P1</span>
+      </div>
+      <div class="card-body">
+        <p>用户修改文案后，界面仅做轻量文字替换，未触发重新排版，导致文字竖排、超出背景框等问题。原"应用文案重生"按钮文案与实际行为不符。</p>
+        <p><strong>修复内容：</strong></p>
+        <ul style="margin-left: 18px; margin-bottom: 12px;">
+          <li>编辑面板拆分为<strong>两个明确按钮</strong>：
+            <br>「仅替换文字」（白底蓝边，保留原有构图，调用 <code>editAssetText</code>）
+            <br>「智能重排版」（渐变蓝底，调用 <code>assetAPI.regenerate</code> 传入重排版指令）
+          </li>
+          <li>新增文案长度实时校验，超过 80 字时提示"建议使用智能重排版"</li>
+          <li>HD 结果页同步双模式编辑面板</li>
+        </ul>
+        <div class="file-list">
+          <div class="file-item modified">client/src/pages/create/ResultStep.tsx <code>双模式文案编辑</code></div>
+          <div class="file-item modified">client/src/pages/create/HDResultStep.tsx <code>双模式同步</code></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 4 -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon rose">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#e11d48" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9.26a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="card-title">功能区 UI 观感优化</div>
+          <div class="card-subtitle">编辑面板按钮层级分明，增加长度提示</div>
+        </div>
+        <span class="tag p2">P2</span>
+      </div>
+      <div class="card-body">
+        <p>用户对"运用文案重生的背景 UI 太丑"表示不满，编辑面板视觉层次弱，按钮与整体浅色主题不融合。</p>
+        <p><strong>修复内容：</strong></p>
+        <ul style="margin-left: 18px; margin-bottom: 12px;">
+          <li>编辑面板从单一深蓝按钮改为<strong>并排双按钮</strong>，主次分明</li>
+          <li>「仅替换文字」使用 secondary 样式（白底 + 蓝边框）</li>
+          <li>「智能重排版」使用 primary 样式（渐变蓝底 + 白色文字）</li>
+          <li>增加<strong>琥珀色文案长度警告提示</strong>，提升用户决策信息</li>
+        </ul>
+        <div class="file-list">
+          <div class="file-item modified">client/src/pages/create/ResultStep.tsx <code>编辑面板 UI 重构</code></div>
+          <div class="file-item modified">client/src/pages/create/HDResultStep.tsx <code>编辑面板 UI 同步</code></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 5 -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon emerald">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="card-title">移动端显示完整性</div>
+          <div class="card-subtitle">适配安全区，修复底部按钮被裁切问题</div>
+        </div>
+        <span class="tag p2">P2</span>
+      </div>
+      <div class="card-body">
+        <p>用户在移动端（iPhone / 微信浏览器）发现底部按钮、内容区被裁切，PC 正常但手机端显示不完整。原因是 <code>fixed bottom-0</code> 元素未适配 iOS 安全区（safe-area-inset-bottom）。</p>
+        <p><strong>修复内容：</strong></p>
+        <ul style="margin-left: 18px; margin-bottom: 12px;">
+          <li><code>index.css</code> 全局 <code>body</code> 增加 <code>padding-bottom: env(safe-area-inset-bottom)</code></li>
+          <li>8 个页面的底部固定操作栏统一增加 <code>pb-[env(safe-area-inset-bottom)]</code></li>
+          <li>覆盖页面：结果页、HD结果页、详情结果页、详情确认页、支付页、详情支付页、HD支付页、文案页</li>
+        </ul>
+        <div class="file-list">
+          <div class="file-item modified">client/src/index.css <code>全局安全区适配</code></div>
+          <div class="file-item modified">client/src/pages/create/ResultStep.tsx</div>
+          <div class="file-item modified">client/src/pages/create/HDResultStep.tsx</div>
+          <div class="file-item modified">client/src/pages/create/DetailResultStep.tsx</div>
+          <div class="file-item modified">client/src/pages/create/DetailConfirmStep.tsx</div>
+          <div class="file-item modified">client/src/pages/create/PaymentStep.tsx</div>
+          <div class="file-item modified">client/src/pages/create/DetailPaymentStep.tsx</div>
+          <div class="file-item modified">client/src/pages/create/HDPaymentStep.tsx</div>
+          <div class="file-item modified">client/src/pages/create/CopywritingStep.tsx</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 6 -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon indigo">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="card-title">详情图预览节点补回</div>
+          <div class="card-subtitle">确认页先生成真实预览，再决定是否付费</div>
+        </div>
+        <span class="tag p0">P0</span>
+      </div>
+      <div class="card-body">
+        <p>用户反馈"生成详情图这里没有预览图，就直接进付费页面了"，不接受故意模糊或占位图直接替代真实预览。</p>
+        <p><strong>修复内容：</strong></p>
+        <ul style="margin-left: 18px; margin-bottom: 12px;">
+          <li><strong>详情确认页</strong>："确认方案并继续"按钮改为"生成预览图"，点击后调用真实生成接口并展示阶段式进度</li>
+          <li><strong>详情结果页</strong>：新增预览模式状态判断，预览模式下图片显示"预览版"水印，底部栏提供「返回修改文案」和「获取高清无水印版」两个按钮</li>
+          <li><strong>详情支付页</strong>：移除 <code>blur-md scale-110 opacity-60</code> 故意模糊效果，改为正常显示 + 轻量"预览版"水印</li>
+          <li>预览模式状态通过 <code>sessionStorage</code> 在页面间传递（刷新后需重新生成）</li>
+        </ul>
+        <div class="file-list">
+          <div class="file-item modified">client/src/pages/create/DetailConfirmStep.tsx <code>新增预览生成逻辑</code></div>
+          <div class="file-item modified">client/src/pages/create/DetailResultStep.tsx <code>预览模式状态 + 水印</code></div>
+          <div class="file-item modified">client/src/pages/create/DetailPaymentStep.tsx <code>移除故意模糊</code></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 7 -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon blue">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2v20M2 12h20"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="card-title">付费页面配色统一对齐</div>
+          <div class="card-subtitle">三个付费页面配色对齐示例页面</div>
+        </div>
+        <span class="tag p2">P2</span>
+      </div>
+      <div class="card-body">
+        <p>用户指出当前付费页面（主图高清、HD高清、详情图）配色与示例页面不一致，要求统一调整。</p>
+        <p><strong>修复内容：</strong></p>
+        <ul style="margin-left: 18px; margin-bottom: 12px;">
+          <li><strong>全局按钮</strong>：`.sci-fi-button` 从纯蓝色 <code>bg-blue-500</code> 改为<strong>蓝绿渐变</strong> <code>bg-gradient-to-r from-blue-500 to-emerald-500</code>，hover 同步调整</li>
+          <li><strong>价格数字</strong>：从蓝青渐变色改为深色 <code>text-slate-900</code></li>
+          <li><strong>促销标签</strong>：从琥珀→橙色、黑字 改为 橙色→红色、白字</li>
+          <li><strong>权益勾选</strong>：从青色背景/勾 改为 蓝色背景/勾</li>
+          <li><strong>卡片阴影</strong>：从青色光晕 <code>shadow-[0_0_50px_rgba(34,211,238,0.15)]</code> 改为柔和灰色阴影</li>
+          <li><strong>已选数量标签 + 套餐指示条 + 底部协议链接</strong>：全部从青色系对齐到蓝色系</li>
+          <li>覆盖页面：PaymentStep、HDPaymentStep、DetailPaymentStep</li>
+        </ul>
+        <div class="file-list">
+          <div class="file-item modified">client/src/index.css <code>sci-fi-button 蓝绿渐变</code></div>
+          <div class="file-item modified">client/src/pages/create/PaymentStep.tsx <code>全量配色对齐</code></div>
+          <div class="file-item modified">client/src/pages/create/HDPaymentStep.tsx <code>全量配色对齐</code></div>
+          <div class="file-item modified">client/src/pages/create/DetailPaymentStep.tsx <code>配色对齐 + 缩略图 API 修复</code></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Category 8 -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-icon rose">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#e11d48" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="card-title">详情图预览→付费跳转修复</div>
+          <div class="card-subtitle">预览后付费无法正确进入高清无水印状态</div>
+        </div>
+        <span class="tag p0">P0</span>
+      </div>
+      <div class="card-body">
+        <p>用户发现详情图预览后点击"获取高清无水印版"→支付成功→跳转回结果页时，页面仍显示"预览版"水印和"获取高清无水印版"按钮，未正确切换到已付费状态。</p>
+        <p><strong>问题根因：</strong>DetailResultStep 的 bootstrap 逻辑中，当已有生成结果（<code>detail_latest_result_version &gt; 0</code>）时直接 <code>return</code>，导致清除 <code>detail_preview_mode</code> 标记的代码被跳过，<code>isPreviewMode</code> 仍为 <code>true</code>。</p>
+        <p><strong>修复内容：</strong></p>
+        <ul style="margin-left: 18px; margin-bottom: 12px;">
+          <li>将 <code>paymentSuccess</code> 检测提前到获取结果之前</li>
+          <li>支付成功时立即清除 <code>detail_preview_mode</code> 标记，并设置 <code>isPreviewMode(false)</code></li>
+          <li>未支付时保持原有预览模式判断逻辑不变</li>
+          <li>确保无论后续走"已有结果直接展示"还是"启动新任务轮询"，状态都正确</li>
+        </ul>
+        <div class="file-list">
+          <div class="file-item modified">client/src/pages/create/DetailResultStep.tsx <code>支付成功后立即清除预览模式</code></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Acceptance Criteria -->
+    <div class="card" style="margin-top: 32px;">
+      <div class="card-header">
+        <div class="card-icon blue" style="background: linear-gradient(135deg, #dbeafe, #e0e7ff);">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div>
+          <div class="card-title">验收标准</div>
+          <div class="card-subtitle">测试验证要点</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <ol style="margin-left: 18px; line-height: 2.2;">
+          <li><strong>上传区</strong>：连续上传 3 张不同图片，3 张图片均正确显示预览，无覆盖或丢失</li>
+          <li><strong>进度条</strong>：生成主图/详情图时，进度从 0 开始，前 5 秒增长不超过 15%，整体平滑无跳跃</li>
+          <li><strong>文案编辑</strong>：修改长文案后，选择"智能重排版"，新图片的文字布局正确，无竖排、无溢出背景框</li>
+          <li><strong>移动端</strong>：在 iPhone 14 Pro / 微信浏览器中，所有底部按钮完整可见，无被安全区或工具栏遮挡</li>
+          <li><strong>详情预览</strong>：从文案页进入确认页后，可生成并看到真实预览图（带水印但可辨认内容），再进入支付页</li>
+          <li><strong>配色一致性</strong>：三个付费页面的按钮均为蓝绿渐变，价格数字为深色，促销标签为橙红渐变白字</li>
+          <li><strong>预览→付费跳转</strong>：详情图预览后支付成功，结果页应显示无水印高清图，底部显示"一键打包下载"而非"获取高清无水印版"</li>
+          <li><strong>详情支付缩略图</strong>：详情图支付页的小图应展示详情图缩略图，而非主图结果</li>
+        </ol>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <p>前端更新报告 · SmartPhoto UI/交互层修复 · TypeScript 类型检查 & Vite 构建均已通过</p>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Dict, List
+
 from pydantic import BaseModel, Field
 
 
@@ -39,6 +41,9 @@ class AssetItem(BaseModel):
     carry_forward: bool = Field(default=False, description="该图是否为从旧版本沿用而来。")
     source_version_no: int | None = Field(default=None, description="若为沿用图，来源版本号。")
     fidelity_validation_status: str | None = Field(default=None, description="保真校验状态。")
+    copy_blocks: dict[str, Any] = Field(default_factory=dict, description="图片上实际渲染的文案内容（headline/supporting/proof_lines/matrix_lines）。")
+    visible_copy_slots: List[Dict[str, str]] = Field(default_factory=list, description="prompt 可见文案区中每个文字槽位到实际文字的1:1映射。用于编辑框回显。")
+    text_elements: List[Dict[str, str]] = Field(default_factory=list, description="element级文字布局数组。每个元素含 id/role/text。前端可用此动态渲染编辑框。")
 
 
 class ResultsData(BaseModel):
@@ -88,6 +93,8 @@ class DetailPanelAssetItem(BaseModel):
     carry_forward: bool = Field(default=False, description="该 panel 是否为从旧版本沿用而来。")
     source_version_no: int | None = Field(default=None, description="若为沿用 panel，来源版本号。")
     fidelity_validation_status: str | None = Field(default=None, description="保真校验状态。")
+    copy_blocks: dict[str, Any] = Field(default_factory=dict, description="图片上实际渲染的文案内容（headline/supporting/proof_lines/matrix_lines）。")
+    visible_copy_slots: List[Dict[str, str]] = Field(default_factory=list, description="prompt 可见文案区中每个文字槽位到实际文字的1:1映射。")
     is_preview: bool = Field(default=False, description="是否为预览版。")
     preview_watermarked: bool = Field(default=False, description="预览版是否已嵌入水印。")
 

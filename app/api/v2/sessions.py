@@ -107,7 +107,7 @@ from app.services.parameter_snapshot import (
 )
 from app.services.brand_memory import get_brand_or_404
 from app.services.platforms import get_platform_or_none
-from app.services.prompts import build_prompt_previews
+from app.services.prompts import build_prompt_previews, parse_visible_copy_slots
 from app.services.prompt_repo import list_prompt_presets
 from app.services.prompt_safety import sanitize_copy_blocks_override, sanitize_copy_form_payload, sanitize_generated_copy_fields
 from app.services.reference_images import build_reference_manifest, load_reference_images
@@ -130,6 +130,7 @@ from app.services.storage import get_storage_adapter, public_url_for
 from app.services.strategy import build_strategy_preview, normalize_strategy_preview, strategy_preview_input_hash
 from app.services.strategy_overrides import resolve_session_overrides, serialize_prompt_preset, serialize_session_override
 from app.services.upstream import WhataiClient
+from app.services.category_catalog import get_category_parameter_rules
 from app.services.user_accounts import refresh_session_search_cache
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -1392,12 +1393,20 @@ def complete_parameters(
                 "overwrite_mode": "replace_all",
             }
         )
+    # Load category parameter rules for knowledge-guided completion
+    analysis_snapshot = session.analysis_snapshot or {}
+    recognized = (analysis_snapshot or {}).get("recognized_product") or {}
+    category = str(recognized.get("category", "") or "").strip() if isinstance(recognized, dict) else ""
+    category_rules = None
+    if category:
+        category_rules = get_category_parameter_rules(db, category)
     snapshot = client.complete_parameters(
         parameter_snapshot=current_snapshot,
-        analysis_snapshot=session.analysis_snapshot or {},
+        analysis_snapshot=analysis_snapshot,
         confirmed_copy=_resolved_copy_for_session(session, db),
         active_platform_id=session.active_platform_id,
         completion_instruction=req.completion_instruction,
+        category_parameter_rules=category_rules,
     )
     session.parameter_snapshot = snapshot
     session.confirmed_copy = apply_parameter_snapshot_to_copy(session.confirmed_copy or {}, session.parameter_snapshot, overwrite=True)
@@ -2406,6 +2415,10 @@ def get_results(
                     "carry_forward": bool((asset.generation_snapshot or {}).get("carry_forward")),
                     "source_version_no": (asset.generation_snapshot or {}).get("source_version_no"),
                     "fidelity_validation_status": ((asset.generation_snapshot or {}).get("fidelity_validation") or {}).get("status"),
+                    "copy_blocks": (asset.generation_snapshot or {}).get("copy_blocks") or {},
+                    "visible_copy_slots": (asset.generation_snapshot or {}).get("visible_copy_slots")
+                        or parse_visible_copy_slots((asset.generation_snapshot or {}).get("final_prompt", "")),
+                    "text_elements": (asset.generation_snapshot or {}).get("text_elements") or [],
                     "brand_memory_trace": (asset.generation_snapshot or {}).get("brand_memory_trace", []),
                 }
                 for asset in assets
@@ -2489,6 +2502,10 @@ def get_detail_page_results(
                     "carry_forward": bool((asset.generation_snapshot or {}).get("carry_forward")),
                     "source_version_no": (asset.generation_snapshot or {}).get("source_version_no"),
                     "fidelity_validation_status": ((asset.generation_snapshot or {}).get("fidelity_validation") or {}).get("status"),
+                    "copy_blocks": (asset.generation_snapshot or {}).get("copy_blocks") or {},
+                    "visible_copy_slots": (asset.generation_snapshot or {}).get("visible_copy_slots")
+                        or parse_visible_copy_slots((asset.generation_snapshot or {}).get("final_prompt", "")),
+                    "text_elements": (asset.generation_snapshot or {}).get("text_elements") or [],
                 }
                 for asset in panels
             ],

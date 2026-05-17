@@ -410,8 +410,8 @@ def edit_asset_text(
     asset = get_asset_or_404(db, asset_id)
     session = get_session_or_404(db, asset.session_id, service_id=principal.app_id)
     asset_family = getattr(asset, "asset_family", "main_gallery")
-    if asset_family != "main_gallery":
-        raise AppError("invalid_request", "text edit is only supported for main_gallery assets", 400)
+    if asset_family not in ("main_gallery", "detail_page"):
+        raise AppError("invalid_request", f"text edit is not supported for {asset_family} assets", 400)
     if session.latest_result_version <= 0:
         raise AppError("invalid_session_status", "results not ready", 400)
 
