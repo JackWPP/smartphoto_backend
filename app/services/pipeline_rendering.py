@@ -88,7 +88,8 @@ def submit_image_request_with_retry(
     app_error_cls,
 ) -> dict[str, Any]:
     supports_submit_api = hasattr(client, "submit_image_request")
-    api_key = getattr(getattr(client, "settings", None), "whatai_api_key", "")
+    _s = getattr(client, "settings", None)
+    api_key = getattr(_s, "image_api_key", "") or getattr(_s, "whatai_api_key", "")
     if not supports_submit_api or not api_key:
         image_bytes = generate_image_with_asset_retry_fn(
             client=client,
