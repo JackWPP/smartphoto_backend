@@ -19,8 +19,6 @@ ENV/
 !.env.example
 !.env.prod.example
 !.env.prod.native.example
-!.env.zeabur.example
-!.env.zeabur.local.example
 .envrc
 
 # Tool caches
