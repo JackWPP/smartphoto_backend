@@ -1460,29 +1460,16 @@ class WhataiClient:
         reference_images: list[LoadedReferenceImage],
         error_key: str,
     ) -> dict[str, Any]:
-        normalized_aspect_ratio = str(aspect_ratio or "").strip()
-        if normalized_aspect_ratio not in self.IMAGE_EDIT_ALLOWED_ASPECT_RATIOS:
-            raise AppError(
-                error_key,
-                (
-                    "invalid edit aspect_ratio: "
-                    f"{normalized_aspect_ratio or '<missing>'}; allowed values are "
-                    f"{sorted(self.IMAGE_EDIT_ALLOWED_ASPECT_RATIOS)}"
-                ),
-                502,
-            )
         headers = self._image_auth_headers()
         files = [("image", (image.file_name, image.content, image.mime_type)) for image in reference_images[:8]]
         data = {
             "model": self.settings.whatai_image_model,
             "prompt": prompt,
-            "aspect_ratio": normalized_aspect_ratio,
         }
         logger.info(
-            "Submitting upstream image edit: model=%s endpoint=%s aspect_ratio=%s reference_count=%s",
+            "Submitting upstream image edit: model=%s endpoint=%s reference_count=%s",
             self.settings.whatai_image_model,
             "/v1/images/edits",
-            normalized_aspect_ratio,
             len(files),
         )
         return self._request_multipart_json_with_retry(
