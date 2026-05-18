@@ -33,4 +33,6 @@ RUN pip install --upgrade pip setuptools wheel \
 
 EXPOSE 8000
 
-CMD ["./scripts/docker-api.sh"]
+ENV SERVICE_TYPE=api
+
+ENTRYPOINT ["./scripts/docker-entrypoint.sh"]

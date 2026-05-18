@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 import importlib.util
 import json
@@ -94,7 +95,9 @@ class Settings(BaseSettings):
     openai_compatible_max_retries: int = Field(default=2, ge=1, le=5)
     deepseek_api_base: str = "https://api.deepseek.com/v1"
     deepseek_api_key: str = "sk-3c53274f60a9466691dad3e9210d1ca2"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_reasoning_effort: str = "high"
+    deepseek_thinking_routes: str = "main_copy_design,main_planner,detail_planner,copy_planner"
     qwen_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_api_key: str = "sk-fe1d234093dc413db1bfab1e5e49c0d1"
     qwen_model: str = "qwen3.6-plus"
@@ -306,12 +309,43 @@ def resolve_database_url(url: str) -> str:
     return normalized
 
 
+def _build_database_url_from_zeabur() -> str | None:
+    pg_host = os.getenv("POSTGRES_HOST", "").strip()
+    if not pg_host:
+        return None
+    pg_port = os.getenv("POSTGRES_PORT", "5432").strip()
+    pg_db = os.getenv("POSTGRES_DATABASE", "smartphoto").strip()
+    pg_user = os.getenv("POSTGRES_USERNAME", "smartphoto").strip()
+    pg_password = os.getenv("POSTGRES_PASSWORD", "").strip()
+    return f"postgresql+psycopg://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_db}"
+
+
+def _build_redis_url_from_zeabur() -> str | None:
+    redis_host = os.getenv("REDIS_HOST", "").strip()
+    if not redis_host:
+        return None
+    redis_port = os.getenv("REDIS_PORT", "6379").strip()
+    redis_password = os.getenv("REDIS_PASSWORD", "").strip()
+    if redis_password:
+        return f"redis://:{redis_password}@{redis_host}:{redis_port}/0"
+    return f"redis://{redis_host}:{redis_port}/0"
+
+
 @lru_cache
 def get_settings() -> Settings:
     ensure_project_venv_site_packages()
     settings = Settings()
     settings.storage_root.mkdir(parents=True, exist_ok=True)
     settings.admin_frontend_dist.mkdir(parents=True, exist_ok=True)
+
+    zeabur_db_url = _build_database_url_from_zeabur()
+    if zeabur_db_url:
+        settings.database_url = zeabur_db_url
+
+    zeabur_redis_url = _build_redis_url_from_zeabur()
+    if zeabur_redis_url:
+        settings.redis_url = zeabur_redis_url
+
     settings.database_url = resolve_database_url(settings.database_url)
     settings.storage_backend = (settings.storage_backend or "local").strip().lower()
     settings.llm_provider = (settings.llm_provider or "whatai").strip().lower()
