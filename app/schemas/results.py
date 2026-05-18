@@ -95,6 +95,7 @@ class DetailPanelAssetItem(BaseModel):
     fidelity_validation_status: str | None = Field(default=None, description="保真校验状态。")
     copy_blocks: dict[str, Any] = Field(default_factory=dict, description="图片上实际渲染的文案内容（headline/supporting/proof_lines/matrix_lines）。")
     visible_copy_slots: List[Dict[str, str]] = Field(default_factory=list, description="prompt 可见文案区中每个文字槽位到实际文字的1:1映射。")
+    text_elements: List[Dict[str, str]] = Field(default_factory=list, description="元素级结构化文案列表 [{id, role, text}]，一行一个元素，前端可直接渲染为可编辑表单。")
     is_preview: bool = Field(default=False, description="是否为预览版。")
     preview_watermarked: bool = Field(default=False, description="预览版是否已嵌入水印。")
 

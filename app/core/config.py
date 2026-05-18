@@ -94,12 +94,12 @@ class Settings(BaseSettings):
     openai_compatible_request_timeout_seconds: int = Field(default=45, ge=5, le=600)
     openai_compatible_max_retries: int = Field(default=2, ge=1, le=5)
     deepseek_api_base: str = "https://api.deepseek.com/v1"
-    deepseek_api_key: str = "sk-3c53274f60a9466691dad3e9210d1ca2"
+    deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_reasoning_effort: str = "high"
     deepseek_thinking_routes: str = "main_copy_design,main_planner,detail_planner,copy_planner"
     qwen_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    qwen_api_key: str = "sk-fe1d234093dc413db1bfab1e5e49c0d1"
+    qwen_api_key: str = ""
     qwen_model: str = "qwen3.6-plus"
     planner_profile: str = "harness_first"
     planner_prompt_mode: str = "compact"

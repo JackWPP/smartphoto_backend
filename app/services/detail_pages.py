@@ -1757,12 +1757,14 @@ def _detail_copy_contract(
 ) -> str:
     visible_lines = _copy_lines_from_detail_blocks(visible_copy_blocks) or visible_copy_lines
     if copy_language == "zh":
-        base = "只允许短促、自然、可直接上图的中文成品文案，不要模板词、分类词或内部标签。"
+        base = "图上文字必须是最终中文成品，一字不改，不允许模型自行添加、删减或改写任何文字。"
     else:
-        base = "Only keep short, natural, production-ready visible copy."
+        base = "Visible copy must be verbatim final text. Do not add, remove, or rephrase any text element."
     if not visible_lines:
         return base
-    return f"{base} 可见文案候选：{' | '.join(visible_lines[:5])}"
+    count = len(visible_lines)
+    line_block = " | ".join(visible_lines)
+    return f"图上文字（仅此{count}条，一字不改）：{line_block}"
 
 
 def _detail_panel_plan_has_internal_display_leakage(panel_plan: Any) -> bool:
@@ -2010,6 +2012,11 @@ def compose_detail_panel_prompt(
         "sanitized_fields": sanitized.sanitized_fields,
         "copy_safety_notes": sanitized.copy_safety_notes,
         "final_prompt": pipeline.final_prompt,
+        "visible_copy_slots": pipeline.visible_copy_slots,
+        "text_elements": [
+            {"id": f"e{i}", "role": "line", "text": line}
+            for i, line in enumerate(copy_lines, start=1)
+        ],
     }
 
 
