@@ -1,0 +1,57 @@
+# =============================================================================
+# Zeabur 模拟环境 - 用于本地测试 Zeabur 部署配置
+# =============================================================================
+# 用法:
+#   1. 启动基础设施:  docker compose -f docker-compose.yml up -d
+#   2. 构建并启动全部: docker compose -f docker-compose.yml -f docker-compose.zeabur.yml up -d --build
+#   3. 仅 API:        docker compose -f docker-compose.yml -f docker-compose.zeabur.yml up api
+#   4. 仅 Worker:     docker compose -f docker-compose.yml -f docker-compose.zeabur.yml up worker
+#
+# 这个文件模拟 Zeabur 的环境注入方式:
+#   - POSTGRES_* 变量替代 DATABASE_URL
+#   - REDIS_* 变量替代 REDIS_URL
+#   - PORT 环境变量控制监听端口
+#   - SERVICE_TYPE 环境变量切换启动模式
+# =============================================================================
+
+x-zeabur-common: &zeabur-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - .env.zeabur.local
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  api:
+    <<: *zeabur-common
+    environment:
+      SERVICE_TYPE: api
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    <<: *zeabur-common
+    environment:
+      SERVICE_TYPE: worker
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

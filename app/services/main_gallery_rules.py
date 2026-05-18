@@ -1115,41 +1115,44 @@ def build_copy_blocks(
     slot_id = str(slot_blueprint["slot_id"])
 
     # ── Slot templates ──────────────────────────────────────────────
+    # Design principle: headline / supporting / proof_lines each pull from
+    # non-overlapping source pools so every text element is different.
+    # matrix_lines is reserved for parameter data-badges (规格标签).
     if slot_id in {"primary_kv", "hero"}:
         hero_headline = _pick("headline", "selling_0")
         cb = {
             "headline": hero_headline or product_name,
-            "supporting": _pick("selling_0", "adv_0"),
-            "proof_lines": _pick_list("selling_1", "param_0"),
-            "matrix_lines": [],
+            "supporting": _pick("adv_0", "selling_1"),
+            "proof_lines": _pick_list("param_0", "param_1", "selling_2", "adv_1"),
+            "matrix_lines": _pick_list("param_1", "param_2"),
         }
     elif slot_id in {"reason_why", "selling_point"}:
         cb = {
             "headline": _pick("selling_0", "headline", "product_name"),
-            "supporting": _pick("adv_0", "param_0"),
+            "supporting": _pick("selling_1", "adv_0"),
             "proof_lines": [],
-            "matrix_lines": _pick_list("param_0", "selling_1", "adv_1"),
+            "matrix_lines": _pick_list("param_0", "param_1", "adv_1"),
         }
     elif slot_id in {"proof_authority", "detail"}:
         cb = {
             "headline": _pick("param_0", "selling_0", "product_name"),
             "supporting": _pick("product_name"),
             "proof_lines": _pick_list("param_0", "param_1", "adv_0", "spec_0"),
-            "matrix_lines": [],
+            "matrix_lines": _pick_list("selling_0", "selling_1"),
         }
     elif slot_id in {"benefit_scene_or_compare", "scene"}:
         cb = {
             "headline": _pick("selling_1", "selling_0", "headline"),
-            "supporting": _pick("adv_0", "selling_0"),
+            "supporting": _pick("adv_1", "adv_0"),
             "proof_lines": [],
-            "matrix_lines": _pick_list("adv_0", "param_0"),
+            "matrix_lines": _pick_list("param_0", "param_1"),
         }
     elif slot_id in {"closing_selling_point"}:
         closing_headline = _pick("headline", "selling_0")
         cb = {
             "headline": closing_headline or product_name,
-            "supporting": _pick("adv_0", "selling_0"),
-            "proof_lines": _pick_list("param_0", "adv_0", "selling_1"),
+            "supporting": _pick("adv_0", "selling_1"),
+            "proof_lines": _pick_list("param_0", "param_1", "adv_1", "selling_2"),
             "matrix_lines": [],
         }
     elif slot_id in {"white_bg"}:
@@ -1275,10 +1278,10 @@ def _to_brief_english(text: str) -> str:
 
 def _normalize_copy_blocks_for_slot(slot_id: str, blocks: dict[str, Any]) -> dict[str, Any]:
     policy = {
-        "primary_kv": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 0, "matrix_max": 2},
-        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 20, "supporting_ascii": 34, "proof_max": 0, "matrix_max": 3},
+        "primary_kv": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 3, "matrix_max": 2},
+        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 20, "supporting_ascii": 34, "proof_max": 2, "matrix_max": 3},
         "proof_authority": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 3, "matrix_max": 0},
-        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 0, "matrix_max": 2},
+        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 2, "matrix_max": 2},
         "closing_selling_point": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 2, "matrix_max": 2},
     }.get(slot_id, {"headline_cn": 18, "headline_ascii": 32, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 2, "matrix_max": 2})
 

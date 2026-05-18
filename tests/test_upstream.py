@@ -755,7 +755,7 @@ def test_llm_router_doubao_planner_falls_back_when_unconfigured(monkeypatch):
         )
     )
 
-    def fake_post(payload, error_key, *, route):
+    def fake_post(payload, error_key, *, route, task=""):
         assert route == "whatai_gemini"
         return {"choices": [{"message": {"content": "{\"prompt_plan\": []}"}}]}
 
@@ -1634,7 +1634,7 @@ def test_llm_router_planner_falls_back_to_whatai_light_model(monkeypatch):
         )
     )
 
-    def _fake_post_chat_json(payload, error_key, *, route):
+    def _fake_post_chat_json(payload, error_key, *, route, task=""):
         if route == router.OPENROUTER_TEXT_ROUTE:
             raise AppError("rate_limited", "busy", 429)
         assert route == router.WHATI_GEMINI_ROUTE

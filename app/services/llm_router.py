@@ -238,7 +238,7 @@ class LLMRouter:
         }
         started = time.perf_counter()
         try:
-            response = self._post_chat_json(payload, error_key, route=primary_route)
+            response = self._post_chat_json(payload, error_key, route=primary_route, task=task)
             text = self._extract_text(response)
             retry_meta = self._consume_retry_meta()
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -275,7 +275,7 @@ class LLMRouter:
                     return fallback_attempt
             raise
 
-    def _post_chat_json(self, payload: dict[str, Any], error_key: str, *, route: str) -> dict[str, Any]:
+    def _post_chat_json(self, payload: dict[str, Any], error_key: str, *, route: str, task: str = "") -> dict[str, Any]:
         provider = self.provider_for_route(route)
         model = str(payload.get("model") or "")
         if provider == "openrouter":
@@ -307,9 +307,15 @@ class LLMRouter:
                 retryable_on_exhausted=True,
             )
         if provider == "deepseek":
+            ds_payload = dict(payload)
+            thinking_routes = {r.strip() for r in self.settings.deepseek_thinking_routes.split(",") if r.strip()}
+            if task and task in thinking_routes:
+                ds_payload["extra_body"] = {"thinking": {"type": "enabled"}}
+                ds_payload["reasoning_effort"] = self.settings.deepseek_reasoning_effort
+                ds_payload.pop("temperature", None)
             return self._request_json_with_retry(
                 base_url=self.settings.deepseek_api_base.rstrip("/"),
-                method="POST", path="/chat/completions", payload=dict(payload),
+                method="POST", path="/chat/completions", payload=ds_payload,
                 headers={"Authorization": f"Bearer {self.settings.deepseek_api_key}"},
                 error_key=error_key, attempts=3, retryable_on_exhausted=True,
             )
@@ -376,7 +382,7 @@ class LLMRouter:
             "response_format": {"type": "json_object"},
         }
         started = time.perf_counter()
-        response = self._post_chat_json(payload, error_key, route=fallback_route)
+        response = self._post_chat_json(payload, error_key, route=fallback_route, task=task)
         text = self._extract_text(response)
         retry_meta = self._consume_retry_meta()
         latency_ms = int((time.perf_counter() - started) * 1000)
