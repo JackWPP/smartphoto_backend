@@ -262,6 +262,7 @@ class DetailPromptPipelineResult:
     sanitized: DetailPromptSanitizedStage
     composed: DetailPromptComposedStage
     final_prompt: str
+    visible_copy_slots: list[dict[str, str]]
 
 
 def normalize_detail_prompt_stage(
@@ -439,10 +440,32 @@ def compose_detail_prompt_blocks(
     )
 
 
-def compose_detail_final_prompt(stage: DetailPromptComposedStage, *, detail_page_aspect_ratio: str) -> str:
+def compose_detail_final_prompt(stage: DetailPromptComposedStage, *, detail_page_aspect_ratio: str) -> tuple[str, list[dict[str, str]]]:
+    """Build detail panel final prompt and visible_copy_slots.
+
+    visible_copy_slots mirrors the main-gallery format so the frontend
+    can use the same text-editing UI for both main images and detail panels.
+    """
     normalized = stage.sanitized.normalized
+    visible_lines = stage.sanitized.visible_copy_lines
+    visible_blocks = stage.sanitized.visible_copy_blocks
+    # Build visible_copy_slots from lines, then enrich from blocks
+    visible_copy_slots: list[dict[str, str]] = []
+    for i, line in enumerate(visible_lines, start=1):
+        visible_copy_slots.append({"slot": f"line_{i}", "text": line})
+    if isinstance(visible_blocks, dict):
+        headline = str(visible_blocks.get("headline") or "").strip()
+        supporting = str(visible_blocks.get("supporting") or "").strip()
+        proof_lines = visible_blocks.get("proof_lines") or []
+        if isinstance(proof_lines, list):
+            for j, line in enumerate(proof_lines, start=1):
+                visible_copy_slots.append({"slot": f"proof_{j}", "text": str(line).strip()})
+
     if normalized.raw_prompt_override:
-        return f"{normalized.raw_prompt_override} 必须额外遵守这些约束：{stage.blocks['constraints']}"
+        return (
+            f"{normalized.raw_prompt_override} 必须额外遵守这些约束：{stage.blocks['constraints']}",
+            visible_copy_slots,
+        )
     return (
         f"请生成一张适用于电商详情页的单张横向 panel 图片，画幅比例 {detail_page_aspect_ratio}。"
         f"视觉任务：{stage.visual_contract} "
@@ -451,7 +474,8 @@ def compose_detail_final_prompt(stage: DetailPromptComposedStage, *, detail_page
         f"风格：{stage.blocks['style']} "
         f"商品保真：{normalized.truth_constraint} "
         f"约束：{stage.blocks['constraints']} "
-        f"额外要求：{stage.blocks['instruction']}"
+        f"额外要求：{stage.blocks['instruction']}",
+        visible_copy_slots,
     )
 
 
@@ -490,7 +514,7 @@ def build_detail_prompt_pipeline(
         simplified_chinese_visible_copy_constraints=simplified_chinese_visible_copy_constraints,
         fallback_text=fallback_text,
     )
-    final_prompt = compose_detail_final_prompt(
+    final_prompt, visible_copy_slots = compose_detail_final_prompt(
         composed,
         detail_page_aspect_ratio=detail_page_aspect_ratio,
     )
@@ -499,4 +523,5 @@ def build_detail_prompt_pipeline(
         sanitized=sanitized,
         composed=composed,
         final_prompt=final_prompt,
+        visible_copy_slots=visible_copy_slots,
     )
