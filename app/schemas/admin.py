@@ -489,6 +489,53 @@ class AdminCategoryCatalogMutationRequest(AdminOperatorNoteMixin):
     pass
 
 
+# ── Category Parameter Rules ──────────────────────────────────────────
+
+class AdminCategoryParameterRuleItem(BaseModel):
+    rule_id: str
+    category_slug: str
+    platform_id: str | None = None
+    core_purchase_parameters: list[dict[str, Any]] = Field(default_factory=list)
+    parameter_extraction_hints: list[str] = Field(default_factory=list)
+    anti_patterns: list[str] = Field(default_factory=list)
+    selling_point_themes: list[dict[str, Any]] = Field(default_factory=list)
+    category_reasoning_hints: str | None = None
+    is_active: bool
+    operator_note: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class AdminCategoryParameterRuleListData(AdminPaginationData):
+    items: list[AdminCategoryParameterRuleItem]
+
+
+class AdminCategoryParameterRuleCreateRequest(AdminOperatorNoteMixin):
+    category_slug: str
+    platform_id: str | None = None
+    core_purchase_parameters: list[dict[str, Any]] = Field(default_factory=list)
+    parameter_extraction_hints: list[str] = Field(default_factory=list)
+    anti_patterns: list[str] = Field(default_factory=list)
+    selling_point_themes: list[dict[str, Any]] = Field(default_factory=list)
+    category_reasoning_hints: str | None = None
+
+
+class AdminCategoryParameterRuleUpdateRequest(AdminOperatorNoteMixin):
+    platform_id: str | None = None
+    core_purchase_parameters: list[dict[str, Any]] | None = None
+    parameter_extraction_hints: list[str] | None = None
+    anti_patterns: list[str] | None = None
+    selling_point_themes: list[dict[str, Any]] | None = None
+    category_reasoning_hints: str | None = None
+    is_active: bool | None = None
+
+
+class AdminCategoryParameterRuleMutationRequest(AdminOperatorNoteMixin):
+    pass
+
+
+# ── Brands ────────────────────────────────────────────────────────────
+
 class AdminBrandCreateRequest(AdminOperatorNoteMixin):
     service_id: str = Field(default="default", max_length=64)
     brand_name: str

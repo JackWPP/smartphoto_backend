@@ -1076,100 +1076,91 @@ def build_copy_blocks(
         product_advantages = [_to_brief_english(item) for item in product_advantages]
         key_parameters = [_to_brief_english(item) for item in key_parameters]
 
-    headline_candidates = _select_visible_copy_candidates(
-        [headline],
-        product_name=product_name,
-        allow_product_name_only=False,
-        allow_placeholder_parameters=False,
-    )
-    benefit_candidates = _select_visible_copy_candidates(
-        selling_points + product_advantages,
-        product_name=product_name,
-        allow_product_name_only=False,
-        allow_placeholder_parameters=False,
-    )
-    scene_candidates = _select_visible_copy_candidates(
-        usage_scenes,
-        product_name=product_name,
-        allow_product_name_only=False,
-        allow_placeholder_parameters=False,
-    )
-    proof_candidates = _select_visible_copy_candidates(
-        key_parameters + specs,
-        product_name=product_name,
-        allow_product_name_only=False,
-        allow_placeholder_parameters=True,
-    )
-    product_name_candidates = _select_visible_copy_candidates(
-        [product_name],
-        product_name=product_name,
-        allow_product_name_only=True,
-        allow_placeholder_parameters=False,
-    )
+    # Template-based deterministic slot→text mapping.
+    # Each slot has a fixed set of text areas; each area draws from a specific
+    # field in confirmed_copy.  If the primary field is empty, the fallback is used.
+    # The frontend edit form maps 1:1 to these areas.
+    src = {
+        "headline": headline,
+        "product_name": product_name,
+        "selling_0": selling_points[0] if len(selling_points) > 0 else "",
+        "selling_1": selling_points[1] if len(selling_points) > 1 else "",
+        "adv_0": product_advantages[0] if len(product_advantages) > 0 else "",
+        "adv_1": product_advantages[1] if len(product_advantages) > 1 else "",
+        "param_0": key_parameters[0] if len(key_parameters) > 0 else "",
+        "param_1": key_parameters[1] if len(key_parameters) > 1 else "",
+        "param_2": key_parameters[2] if len(key_parameters) > 2 else "",
+        "spec_0": specs[0] if len(specs) > 0 else "",
+    }
 
-    hero_headline = _first_non_empty(headline_candidates, benefit_candidates, product_name_candidates)
-    hero_supporting = _pick_first_distinct(benefit_candidates + scene_candidates + proof_candidates, hero_headline)
-    hero_matrix = _take_distinct(benefit_candidates + proof_candidates, exclude=[hero_headline, hero_supporting], max_items=2)
+    def _pick(*keys: str) -> str:
+        for k in keys:
+            v = _clean_copy_text(src.get(k, ""), product_name=product_name)
+            if v and len(v) <= 32:
+                return v
+        for k in keys:
+            v = _clean_copy_text(src.get(k, ""), product_name=product_name)
+            if v:
+                return v
+        return ""
 
-    reason_headline = _first_non_empty(benefit_candidates, headline_candidates, product_name_candidates)
-    reason_supporting = _pick_first_distinct(proof_candidates + benefit_candidates + scene_candidates, reason_headline)
-    reason_matrix = _take_distinct(benefit_candidates + proof_candidates + scene_candidates, exclude=[reason_headline, reason_supporting], max_items=3)
-
-    proof_headline = _first_non_empty(proof_candidates, benefit_candidates, headline_candidates, product_name_candidates)
-    proof_supporting = _pick_first_distinct(benefit_candidates + headline_candidates + scene_candidates, proof_headline)
-    proof_lines = _take_distinct(proof_candidates, exclude=[proof_headline, proof_supporting], max_items=3)
-
-    benefit_headline = _first_non_empty(benefit_candidates, scene_candidates, headline_candidates, product_name_candidates)
-    benefit_supporting = _pick_first_distinct(scene_candidates + benefit_candidates, benefit_headline)
-    benefit_matrix = _take_distinct(benefit_candidates + scene_candidates, exclude=[benefit_headline, benefit_supporting], max_items=2)
-
-    closing_headline = _first_non_empty(benefit_candidates, headline_candidates, product_name_candidates)
-    closing_scene_candidates = _select_closing_scene_candidates(scene_candidates)
-    closing_supporting = _pick_first_distinct(benefit_candidates + closing_scene_candidates + proof_candidates, closing_headline)
-    closing_proof = _take_distinct(proof_candidates, exclude=[closing_headline, closing_supporting], max_items=2)
-    closing_matrix = _take_distinct(
-        benefit_candidates + proof_candidates + closing_scene_candidates,
-        exclude=[closing_headline, closing_supporting, *closing_proof],
-        max_items=2,
-    )
+    def _pick_list(*keys: str) -> list[str]:
+        result = []
+        for k in keys:
+            v = _clean_copy_text(src.get(k, ""), product_name=product_name)
+            if v and v not in result:
+                result.append(v)
+        return result
 
     slot_id = str(slot_blueprint["slot_id"])
+
+    # ── Slot templates ──────────────────────────────────────────────
+    # Design principle: headline / supporting / proof_lines each pull from
+    # non-overlapping source pools so every text element is different.
+    # matrix_lines is reserved for parameter data-badges (规格标签).
     if slot_id in {"primary_kv", "hero"}:
-        return _normalize_copy_blocks_for_slot(slot_id, {
-            "headline": hero_headline,
-            "supporting": hero_supporting,
+        hero_headline = _pick("headline", "selling_0")
+        cb = {
+            "headline": hero_headline or product_name,
+            "supporting": _pick("adv_0", "selling_1"),
+            "proof_lines": _pick_list("param_0", "param_1", "selling_2", "adv_1"),
+            "matrix_lines": _pick_list("param_1", "param_2"),
+        }
+    elif slot_id in {"reason_why", "selling_point"}:
+        cb = {
+            "headline": _pick("selling_0", "headline", "product_name"),
+            "supporting": _pick("selling_1", "adv_0"),
             "proof_lines": [],
-            "matrix_lines": hero_matrix,
-        })
-    if slot_id in {"reason_why", "selling_point"}:
-        return _normalize_copy_blocks_for_slot(slot_id, {
-            "headline": reason_headline,
-            "supporting": reason_supporting,
+            "matrix_lines": _pick_list("param_0", "param_1", "adv_1"),
+        }
+    elif slot_id in {"proof_authority", "detail"}:
+        cb = {
+            "headline": _pick("param_0", "selling_0", "product_name"),
+            "supporting": _pick("product_name"),
+            "proof_lines": _pick_list("param_0", "param_1", "adv_0", "spec_0"),
+            "matrix_lines": _pick_list("selling_0", "selling_1"),
+        }
+    elif slot_id in {"benefit_scene_or_compare", "scene"}:
+        cb = {
+            "headline": _pick("selling_1", "selling_0", "headline"),
+            "supporting": _pick("adv_1", "adv_0"),
             "proof_lines": [],
-            "matrix_lines": reason_matrix,
-        })
-    if slot_id in {"proof_authority", "detail"}:
-        return _normalize_copy_blocks_for_slot(slot_id, {
-            "headline": proof_headline,
-            "supporting": proof_supporting,
-            "proof_lines": proof_lines,
+            "matrix_lines": _pick_list("param_0", "param_1"),
+        }
+    elif slot_id in {"closing_selling_point"}:
+        closing_headline = _pick("headline", "selling_0")
+        cb = {
+            "headline": closing_headline or product_name,
+            "supporting": _pick("adv_0", "selling_1"),
+            "proof_lines": _pick_list("param_0", "param_1", "adv_1", "selling_2"),
             "matrix_lines": [],
-        })
-    if slot_id in {"benefit_scene_or_compare", "scene"}:
-        return _normalize_copy_blocks_for_slot(slot_id, {
-            "headline": benefit_headline,
-            "supporting": benefit_supporting,
-            "proof_lines": [],
-            "matrix_lines": benefit_matrix,
-        })
-    if slot_id in {"closing_selling_point", "white_bg"}:
-        return _normalize_copy_blocks_for_slot(slot_id, {
-            "headline": closing_headline if slot_id == "closing_selling_point" else "",
-            "supporting": closing_supporting if slot_id == "closing_selling_point" else "",
-            "proof_lines": closing_proof if slot_id == "closing_selling_point" else [],
-            "matrix_lines": closing_matrix if slot_id == "closing_selling_point" else [],
-        })
-    return _normalize_copy_blocks_for_slot(slot_id, {"headline": hero_headline, "supporting": hero_supporting, "proof_lines": [], "matrix_lines": []})
+        }
+    elif slot_id in {"white_bg"}:
+        cb = {"headline": "", "supporting": "", "proof_lines": [], "matrix_lines": []}
+    else:
+        cb = {"headline": _pick("headline"), "supporting": "", "proof_lines": [], "matrix_lines": []}
+
+    return _normalize_copy_blocks_for_slot(slot_id, cb)
 
 
 def resolve_slot_preferences(
@@ -1261,6 +1252,21 @@ def _text(value: Any, fallback: str = "") -> str:
     return text or fallback
 
 
+def _clean_copy_text(value: str, *, product_name: str = "") -> str:
+    """Strip placeholder/low-info text for use in slot templates."""
+    from app.services.copy_normalization import is_low_information_copy_text, is_placeholder_copy_text
+    text = _text(value)
+    if not text:
+        return ""
+    if is_placeholder_copy_text(text):
+        return ""
+    # Pass product_name so text that's just the product name or contains
+    # only the product name + generic modifiers gets filtered properly.
+    if is_low_information_copy_text(text, product_name=product_name, allow_product_name_only=False):
+        return ""
+    return text
+
+
 def _to_brief_english(text: str) -> str:
     stripped = _text(text)
     if not stripped:
@@ -1272,10 +1278,10 @@ def _to_brief_english(text: str) -> str:
 
 def _normalize_copy_blocks_for_slot(slot_id: str, blocks: dict[str, Any]) -> dict[str, Any]:
     policy = {
-        "primary_kv": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 0, "matrix_max": 2},
-        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 20, "supporting_ascii": 34, "proof_max": 0, "matrix_max": 3},
+        "primary_kv": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 3, "matrix_max": 2},
+        "reason_why": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 20, "supporting_ascii": 34, "proof_max": 2, "matrix_max": 3},
         "proof_authority": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 16, "supporting_ascii": 28, "proof_max": 3, "matrix_max": 0},
-        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 0, "matrix_max": 2},
+        "benefit_scene_or_compare": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 2, "matrix_max": 2},
         "closing_selling_point": {"headline_cn": 16, "headline_ascii": 28, "supporting_cn": 18, "supporting_ascii": 30, "proof_max": 2, "matrix_max": 2},
     }.get(slot_id, {"headline_cn": 18, "headline_ascii": 32, "supporting_cn": 18, "supporting_ascii": 32, "proof_max": 2, "matrix_max": 2})
 

@@ -203,19 +203,22 @@ def submit_render_specs(
             min(worker_limit, len(batch)),
         )
         with ThreadPoolExecutor(max_workers=max(1, min(worker_limit, len(batch)))) as executor:
-            future_map = {
-                executor.submit(
-                    submit_single_render_spec_fn,
-                    client=client,
-                    render_spec={
-                        **render_spec,
-                        "submission_batch_no": batch_index,
-                        "submission_batch_size": len(batch),
-                        "submit_strategy_version": submit_strategy_version,
-                    },
-                ): render_spec
-                for render_spec in batch
-            }
+            future_map: dict[Any, dict[str, Any]] = {}
+            for idx, render_spec in enumerate(batch):
+                if idx > 0:
+                    sleep_fn(1.0)  # stagger submissions by 1s to avoid rate limits
+                future_map[
+                    executor.submit(
+                        submit_single_render_spec_fn,
+                        client=client,
+                        render_spec={
+                            **render_spec,
+                            "submission_batch_no": batch_index,
+                            "submission_batch_size": len(batch),
+                            "submit_strategy_version": submit_strategy_version,
+                        },
+                    )
+                ] = render_spec
             for future in as_completed(future_map):
                 render_spec = future_map[future]
                 try:

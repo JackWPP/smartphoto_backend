@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 import importlib.util
 import json
@@ -60,15 +61,20 @@ class Settings(BaseSettings):
     admin_bootstrap_password: str = ""
     admin_bootstrap_display_name: str = "Admin"
 
-    whatai_api_base: str = "https://api.whatai.cc"
+    whatai_api_base: str = "https://api.aicodemirror.com"
     whatai_api_key: str = ""
-    whatai_chat_model: str = "gpt-4.1-mini"
-    whatai_analysis_model: str = "gemini-3-pro-preview-thinking-high"
-    whatai_planner_model: str = "kimi-k2.5"
-    whatai_image_model: str = "gemini-3.1-flash-image-preview-2k"
+    whatai_chat_model: str = "gpt-5.5"
+    whatai_analysis_model: str = "gemini-3.1-pro-preview"
+    whatai_planner_model: str = "gpt-5.5"
+    whatai_image_model: str = "gpt-image-2"
+    whatai_image_edit_model: str = "gpt-image-2"
     whatai_parameter_model: str = "gemini-3-flash-preview"
     whatai_request_timeout_seconds: int = Field(default=90, ge=30, le=1800)
     whatai_image_edit_timeout_seconds: int = Field(default=120, ge=30, le=1800)
+    image_api_base: str = "https://www.aiartmirror.com"
+    image_api_key: str = ""
+    image_model: str = "gpt-image-2"
+    image_request_timeout_seconds: int = Field(default=90, ge=30, le=1800)
     llm_provider: str = "whatai"
     openrouter_api_base: str = "https://openrouter.ai/api/v1"
     openrouter_api_key: str = ""
@@ -79,23 +85,37 @@ class Settings(BaseSettings):
     doubao_max_retries: int = Field(default=2, ge=1, le=5)
     doubao_thinking_budget_tokens: int = Field(default=0, ge=0, le=100000,
         description="Doubao seed 模型思考 token 预算。0 表示使用 API 默认值，正整数表示限制思考 tokens (需 API 支持)。")
+    doubao_reasoning_effort: str = Field(default="minimal",
+        description="Doubao Chat Completions API reasoning_effort: minimal(不思考)/low/medium/high")
+    doubao_api_mode: str = Field(default="chat",
+        description="Doubao API 模式: chat (Chat Completions) 或 responses (Responses API)")
     openai_compatible_api_base: str = ""
     openai_compatible_api_key: str = ""
     openai_compatible_request_timeout_seconds: int = Field(default=45, ge=5, le=600)
     openai_compatible_max_retries: int = Field(default=2, ge=1, le=5)
+    deepseek_api_base: str = "https://api.deepseek.com/v1"
+    deepseek_api_key: str = "sk-3c53274f60a9466691dad3e9210d1ca2"
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_reasoning_effort: str = "high"
+    deepseek_thinking_routes: str = "main_copy_design,main_planner,detail_planner,copy_planner"
+    qwen_api_base: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    qwen_api_key: str = "sk-fe1d234093dc413db1bfab1e5e49c0d1"
+    qwen_model: str = "qwen3.6-plus"
     planner_profile: str = "harness_first"
     planner_prompt_mode: str = "compact"
     detail_planner_prompt_mode: str = "compact"
     planner_repair_strictness: str = "critical_only"
-    llm_route_analysis: str = "whatai_gemini"
-    llm_route_main_planner: str = "doubao_text"
-    llm_route_detail_planner: str = "doubao_text"
+    llm_route_analysis: str = "qwen_text"
+    text_consistency_max_retries: int = Field(default=0, ge=0, le=4)
+    text_consistency_enabled: bool = Field(default=False)
+    llm_route_main_planner: str = "deepseek_text"
+    llm_route_detail_planner: str = "deepseek_text"
     llm_route_planner_light: str = "whatai_gemini"
     planner_fallback_route: str = "whatai_gemini"
     planner_kimi_enable_thinking: bool = False
     llm_route_parameter_visual: str = "whatai_gemini"
     llm_route_parameter_completion: str = "doubao_text"
-    llm_route_main_copy_design: str = "disabled"
+    llm_route_main_copy_design: str = "deepseek_text"
     llm_route_detail_copy_review: str = "openrouter_text"
     llm_route_form_rewrite: str = "openrouter_text"
     llm_route_text_review: str = "doubao_text"
@@ -106,7 +126,7 @@ class Settings(BaseSettings):
     llm_detail_planner_model: str = "minimax/minimax-m2.7"
     llm_parameter_model: str = "deepseek/deepseek-v3.2"
     llm_fallback_model: str = "deepseek/deepseek-v3.2"
-    whatai_planner_light_model: str = "gemini-3-flash-preview"
+    whatai_planner_light_model: str = "gemini-3-flash-preview"  # now on aicodemirror
     openrouter_planner_light_model: str = "moonshotai/kimi-k2.5"
     openrouter_main_planner_model: str = "moonshotai/kimi-k2.5"
     openrouter_detail_planner_model: str = "moonshotai/kimi-k2.5"
@@ -289,12 +309,43 @@ def resolve_database_url(url: str) -> str:
     return normalized
 
 
+def _build_database_url_from_zeabur() -> str | None:
+    pg_host = os.getenv("POSTGRES_HOST", "").strip()
+    if not pg_host:
+        return None
+    pg_port = os.getenv("POSTGRES_PORT", "5432").strip()
+    pg_db = os.getenv("POSTGRES_DATABASE", "smartphoto").strip()
+    pg_user = os.getenv("POSTGRES_USERNAME", "smartphoto").strip()
+    pg_password = os.getenv("POSTGRES_PASSWORD", "").strip()
+    return f"postgresql+psycopg://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_db}"
+
+
+def _build_redis_url_from_zeabur() -> str | None:
+    redis_host = os.getenv("REDIS_HOST", "").strip()
+    if not redis_host:
+        return None
+    redis_port = os.getenv("REDIS_PORT", "6379").strip()
+    redis_password = os.getenv("REDIS_PASSWORD", "").strip()
+    if redis_password:
+        return f"redis://:{redis_password}@{redis_host}:{redis_port}/0"
+    return f"redis://{redis_host}:{redis_port}/0"
+
+
 @lru_cache
 def get_settings() -> Settings:
     ensure_project_venv_site_packages()
     settings = Settings()
     settings.storage_root.mkdir(parents=True, exist_ok=True)
     settings.admin_frontend_dist.mkdir(parents=True, exist_ok=True)
+
+    zeabur_db_url = _build_database_url_from_zeabur()
+    if zeabur_db_url:
+        settings.database_url = zeabur_db_url
+
+    zeabur_redis_url = _build_redis_url_from_zeabur()
+    if zeabur_redis_url:
+        settings.redis_url = zeabur_redis_url
+
     settings.database_url = resolve_database_url(settings.database_url)
     settings.storage_backend = (settings.storage_backend or "local").strip().lower()
     settings.llm_provider = (settings.llm_provider or "whatai").strip().lower()
@@ -325,6 +376,8 @@ def get_settings() -> Settings:
         settings.parameter_extraction_mode = "combined"
     settings.doubao_api_base = (settings.doubao_api_base or "").strip().rstrip("/")
     settings.doubao_api_key = (settings.doubao_api_key or settings.ark_api_key or "").strip()
+    settings.image_api_base = (settings.image_api_base or "").strip().rstrip("/")
+    settings.image_api_key = (settings.image_api_key or "").strip()
     settings.openai_compatible_api_base = (settings.openai_compatible_api_base or "").strip().rstrip("/")
     settings.quality_review_mode = (settings.quality_review_mode or "sample").strip().lower()
     if settings.quality_review_mode not in {"off", "sample", "full"}:

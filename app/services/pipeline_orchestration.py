@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from typing import Any
 
 from PIL import Image
@@ -37,7 +38,7 @@ from app.services.pipeline_persistence import (
     version_assets,
 )
 from app.services.preview_hashing import PREVIEW_HASH_POLICY_VERSION
-from app.services.prompts import compose_prompt
+from app.services.prompts import compose_prompt, parse_visible_copy_slots
 from app.services.quality_gate import sync_quality_check
 from app.services.reference_images import (
     LoadedReferenceImage,
@@ -432,6 +433,76 @@ def prepare_main_render_spec(
     }
 
 
+def apply_text_consistency_validation(
+    *,
+    client,
+    prompt_payload: dict[str, Any],
+    image_bytes: bytes,
+    image_size: str,
+    aspect_ratio: str,
+    reference_images: list,
+    role: str,
+    slot_id: str,
+    display_order: int,
+    confirmed_copy: dict[str, Any],
+    strategy_preview: dict[str, Any],
+    plan_item: dict[str, Any] | None,
+    instruction: str | None,
+    compose_prompt_fn,
+    generate_image_with_asset_retry_fn,
+    logger,
+    settings,
+) -> tuple[dict[str, Any], bytes, dict[str, Any] | None]:
+    """Multi-pass text consistency: generate → VLM read → check → escalate → retry."""
+    from app.services.vlm_text_check import check_elements_match, vlm_read_text
+
+    text_elements = list(prompt_payload.get("text_elements") or [])
+    if not text_elements or not settings.text_consistency_enabled:
+        return prompt_payload, image_bytes, None
+
+    current_payload = prompt_payload
+    current_image = image_bytes
+    max_retries = int(settings.text_consistency_max_retries)
+    validation: dict[str, Any] | None = None
+
+    for attempt in range(max_retries + 1):
+        vlm_texts = vlm_read_text(client, current_image)
+        check = check_elements_match(text_elements, vlm_texts)
+        validation = {
+            "attempt": attempt + 1,
+            "vlm_texts": vlm_texts,
+            "matched": check["matched"],
+            "unmatched_expected": check["unmatched_expected"],
+            "extra_text": check["extra_text"],
+            "score": check["score"],
+            "passed": check["passed"],
+        }
+        if check["passed"]:
+            logger.info("text consistency PASSED role=%s slot=%s attempt=%d score=%.2f", role, slot_id, attempt + 1, check["score"])
+            break
+        if attempt >= max_retries:
+            logger.warning("text consistency FAILED after %d retries role=%s slot=%s unmatched=%s extra=%s", max_retries + 1, role, slot_id, [u["expected"] for u in check["unmatched_expected"]], check["extra_text"])
+            validation["soft_failed"] = True
+            break
+        # Escalate: name the exact violations
+        extra_texts = check.get("extra_text", [])
+        missing_texts = [u["expected"] for u in check.get("unmatched_expected", [])]
+        constraints = []
+        if extra_texts:
+            quoted = "、".join(f"「{t}」" for t in extra_texts[:3])
+            constraints.append(f"【严格要求】上一版图上错误地出现了以下文字：{quoted}。这些文字绝对不能出现在新图上。")
+        if missing_texts:
+            quoted = "、".join(f"「{t}」" for t in missing_texts[:5])
+            constraints.append(f"【严格要求】上一版缺少了以下指定文字：{quoted}。请确保新图上精确渲染所有指定的文字。")
+        escalated_instruction = " ".join(constraints)
+        merged_instruction = f"{instruction or ''} {escalated_instruction}".strip()
+        logger.info("text consistency retry role=%s slot=%s attempt=%d/%d", role, slot_id, attempt + 1, max_retries)
+        current_payload = compose_prompt_fn(confirmed_copy=confirmed_copy, strategy_preview=strategy_preview, asset_role=role, instruction=merged_instruction, plan_item=plan_item)
+        current_image = generate_image_with_asset_retry_fn(client=client, prompt=current_payload["final_prompt"], image_size=image_size, aspect_ratio=aspect_ratio, reference_images=reference_images, role=role, display_order=display_order)
+
+    return current_payload, current_image, validation
+
+
 def finalize_main_rendered_asset(
     *,
     client,
@@ -621,19 +692,27 @@ def render_single_main_asset_sync(
         display_order=display_order,
     )
     prompt_payload, image_bytes, white_bg_validation = apply_main_gallery_post_validations_fn(
-        client=client,
-        confirmed_copy=confirmed_copy,
-        strategy_preview=strategy_preview,
-        plan_item=plan_item,
-        role=role,
-        slot_id=slot_id,
-        display_order=display_order,
-        instruction=instruction,
-        prompt_payload=prompt_payload,
-        image_bytes=image_bytes,
-        image_size=image_size,
-        aspect_ratio=aspect_ratio,
-        reference_images=reference_images,
+        client=client, confirmed_copy=confirmed_copy, strategy_preview=strategy_preview,
+        plan_item=plan_item, role=role, slot_id=slot_id, display_order=display_order,
+        instruction=instruction, prompt_payload=prompt_payload, image_bytes=image_bytes,
+        image_size=image_size, aspect_ratio=aspect_ratio, reference_images=reference_images,
+    )
+
+    # Multi-pass text consistency validation
+    from app.core.config import get_settings
+    prompt_payload, image_bytes, text_consistency = apply_text_consistency_validation(
+        client=client, prompt_payload=prompt_payload, image_bytes=image_bytes,
+        image_size=image_size, aspect_ratio=aspect_ratio, reference_images=reference_images,
+        role=role, slot_id=slot_id, display_order=display_order,
+        confirmed_copy=confirmed_copy, strategy_preview=strategy_preview,
+        plan_item=plan_item, instruction=instruction,
+        compose_prompt_fn=compose_prompt,
+        generate_image_with_asset_retry_fn=lambda **kw: kw["client"].generate_image(
+            kw["prompt"], kw["image_size"], aspect_ratio=kw["aspect_ratio"],
+            reference_images=kw["reference_images"],
+        ),
+        logger=logging.getLogger(__name__),
+        settings=get_settings(),
     )
 
     generation_snapshot = build_main_generation_snapshot(
@@ -704,6 +783,8 @@ def build_main_generation_snapshot(
         "prompt_blocks": prompt_payload["blocks"],
         "copy_blocks": prompt_payload.get("copy_blocks") or {},
         "copy_blocks_attribution": prompt_payload.get("copy_blocks_attribution") or {},
+        "visible_copy_slots": prompt_payload.get("visible_copy_slots") or [],
+        "text_elements": prompt_payload.get("text_elements") or [],
         "sanitized_fields": prompt_payload.get("sanitized_fields") or [],
         "copy_safety_notes": prompt_payload.get("copy_safety_notes") or [],
         "raw_prompt_override": prompt_payload.get("raw_prompt_override"),
@@ -1872,7 +1953,7 @@ def execute_text_edit_flow(
     carry_forward_version = resolve_regenerate_carry_forward_version(
         db,
         session_id=session.id,
-        asset_family="main_gallery",
+        asset_family=getattr(source_asset, "asset_family", "main_gallery") or "main_gallery",
         parent_asset_id=source_asset.id,
         last_version=last_version,
     )

@@ -89,148 +89,6 @@ _AVOID_PATTERN_PROMPT_LABELS = {
 }
 
 
-def compose_prompt(
-    confirmed_copy: dict,
-    strategy_preview: dict,
-    asset_role: str,
-    instruction: str | None = None,
-    plan_item: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    strategy_preview = validate_contract_warn(
-        StrategyPreviewPayload,
-        strategy_preview,
-        context={"asset_role": asset_role, "stage": "compose_prompt_strategy_preview"},
-    )
-    raw_plan = plan_item or _find_plan_item(strategy_preview, asset_role)
-    plan = validate_contract_warn(
-        AssetPlanItem,
-        raw_plan,
-        context={"asset_role": asset_role, "slot_id": raw_plan.get("slot_id"), "stage": "compose_prompt_plan_item"},
-    )
-    prompt_plan = find_prompt_plan_item(strategy_preview, plan.get("slot_id") or asset_role)
-    if not prompt_plan:
-        prompt_plan = find_prompt_plan_item(strategy_preview, asset_role)
-    prompt_plan = validate_contract_warn(
-        PromptPlanItem,
-        prompt_plan,
-        context={"asset_role": asset_role, "slot_id": plan.get("slot_id"), "stage": "compose_prompt_prompt_plan"},
-    )
-    slot_id = str(plan.get("slot_id") or prompt_plan.get("slot_id") or asset_role)
-    role_spec = get_prompt_role_spec(str(plan.get("role") or asset_role))
-
-    style = _fallback_text(
-        strategy_preview.get("style_summary")
-        or ((confirmed_copy.get("resolved_style_preset") or {}).get("style_summary") if isinstance(confirmed_copy.get("resolved_style_preset"), dict) else "")
-        or confirmed_copy.get("style_custom")
-        or confirmed_copy.get("style_choice"),
-        "简洁高级的电商摄影风格",
-    )
-    # When plan_item is explicitly passed (e.g. regenerate_asset), its copy_blocks
-    # carry the latest override-applied values and must take precedence over
-    # prompt_plan.copy_blocks which may be stale from a cached strategy_preview.
-    if plan_item is not None and plan_item.get("copy_blocks"):
-        raw_copy_blocks = {**dict(prompt_plan.get("copy_blocks") or {}), **dict(plan_item["copy_blocks"])}
-    else:
-        raw_copy_blocks = dict(prompt_plan.get("copy_blocks") or plan.get("copy_blocks") or {})
-    raw_copy_blocks = MainCopyBlocks.from_dict(raw_copy_blocks).to_dict()
-    copy_blocks, sanitized_fields, copy_safety_notes = sanitize_main_copy_blocks(
-        raw_copy_blocks,
-        product_name=confirmed_copy.get("product_name", ""),
-    )
-    text_policy = str(plan.get("text_policy") or role_spec["text_policy"])
-    raw_prompt_override = _clean_text(prompt_plan.get("raw_prompt_override") or plan.get("raw_prompt_override"))
-
-    blocks = {
-        "goal": _compose_goal_block(plan, role_spec, prompt_plan),
-        "subject": _compose_subject_block(confirmed_copy, slot_id, str(plan.get("role") or asset_role), prompt_plan),
-        "composition": _compose_composition_block(slot_id, plan, prompt_plan),
-        "background": _compose_background_block(slot_id, str(plan.get("role") or asset_role), plan, prompt_plan),
-        "style": _compose_style_block(style, plan, prompt_plan),
-        "selling_points": _compose_selling_points_block(slot_id, prompt_plan, copy_blocks, text_policy),
-        "constraints": _compose_constraints_block(slot_id, str(plan.get("role") or asset_role), prompt_plan, text_policy),
-        "instruction": _compose_instruction_block(instruction),
-    }
-    # --- Smart instruction intent parsing: override blocks based on user intent ---
-    instruction_intents = _parse_instruction_intents(instruction)
-    if instruction_intents:
-        blocks = _apply_instruction_overrides(blocks, instruction_intents, instruction)
-    prompt_sections_used = [key for key in PROMPT_BLOCK_ORDER if _clean_text(blocks.get(key))]
-    if _normalized_text_entries(prompt_plan.get("slot_guardrails")):
-        prompt_sections_used.append("slot_guardrails")
-    copy_policy_applied = _copy_policy_for_slot(slot_id, text_policy, copy_blocks=copy_blocks)
-
-    final_prompt = (
-        _compose_raw_override_prompt(raw_prompt_override, prompt_plan)
-        if raw_prompt_override
-        else format_prompt_blocks(
-            blocks,
-            aspect_ratio=str(plan.get("aspect_ratio") or "1:1"),
-            final_prompt_base=_clean_text(prompt_plan.get("final_prompt_base")),
-            fidelity_rule=_clean_text(prompt_plan.get("fidelity_rule")),
-            copy_blocks=copy_blocks,
-            text_policy=text_policy,
-            platform_overlay=prompt_plan.get("platform_overlay"),
-            truth_contract=prompt_plan.get("truth_contract") if isinstance(prompt_plan.get("truth_contract"), dict) else None,
-        )
-    )
-    strategy_fields_used = _collect_strategy_fields_used(
-        confirmed_copy=confirmed_copy,
-        strategy_preview=strategy_preview,
-        plan=plan,
-        prompt_plan=prompt_plan,
-        instruction=instruction,
-    )
-
-    return {
-        "role": str(plan.get("role") or asset_role),
-        "slot_id": str(plan.get("slot_id") or prompt_plan.get("slot_id") or ""),
-        "slot_label": str(plan.get("slot_label") or ""),
-        "slot_family": str(plan.get("slot_family") or ""),
-        "role_label": str(plan.get("role_label") or role_spec["role_label"]),
-        "display_order": int(plan.get("display_order") or 0),
-        "aspect_ratio": str(plan.get("aspect_ratio") or "1:1"),
-        "background_mode": str(plan.get("background_mode") or role_spec["background_mode"]),
-        "text_policy": text_policy,
-        "composition_hint": str(plan.get("composition_hint") or role_spec["composition_hint"]),
-        "visual_structure": str(plan.get("visual_structure") or prompt_plan.get("visual_structure") or ""),
-        "copy_density": str(plan.get("copy_density") or prompt_plan.get("copy_density") or ""),
-        "proof_mode": str(plan.get("proof_mode") or prompt_plan.get("proof_mode") or ""),
-        "scene_mode": str(plan.get("scene_mode") or prompt_plan.get("scene_mode") or ""),
-        "emphasis_style": str(plan.get("emphasis_style") or prompt_plan.get("emphasis_style") or ""),
-        "blocks": blocks,
-        "copy_blocks": copy_blocks,
-        "raw_prompt_override": raw_prompt_override or None,
-        "applied_preset_id": prompt_plan.get("applied_preset_id") or plan.get("applied_preset_id"),
-        "strategy_fields_used": strategy_fields_used,
-        "prompt_sections_used": prompt_sections_used,
-        "copy_policy_applied": copy_policy_applied,
-        "slot_guardrails": _normalized_text_entries(prompt_plan.get("slot_guardrails")),
-        "reference_image_ids": [str(value) for value in prompt_plan.get("reference_image_ids", []) if str(value)],
-        "reference_slots": [str(value) for value in prompt_plan.get("reference_slots", []) if str(value)],
-        "must_keep": _normalized_text_entries(prompt_plan.get("must_keep")),
-        "must_avoid": _normalized_text_entries(prompt_plan.get("must_avoid")),
-        "planner_source": str(prompt_plan.get("planner_source") or "rule_based"),
-        "planner_base": _clean_text(prompt_plan.get("final_prompt_base")),
-        "expression_mode": str(prompt_plan.get("expression_mode") or plan.get("expression_mode") or ""),
-        "expression_label": str(prompt_plan.get("expression_label") or plan.get("expression_label") or ""),
-        "brand_memory_trace": [
-            item
-            for item in strategy_preview.get("brand_memory_trace", [])
-            if isinstance(item, dict) and str(item.get("slot_id") or "").strip() == str(plan.get("slot_id") or prompt_plan.get("slot_id") or "")
-        ],
-        "rule_modules_used": [str(item) for item in prompt_plan.get("rule_modules_used", []) if str(item).strip()],
-        "platform_overlay": prompt_plan.get("platform_overlay"),
-        "risk_flags": [str(item) for item in prompt_plan.get("risk_flags", []) if str(item).strip()],
-        "selling_point_binding": prompt_plan.get("selling_point_binding") or {},
-        "truth_contract": prompt_plan.get("truth_contract") or {},
-        "resolved_constraints": _normalized_text_entries(prompt_plan.get("resolved_constraints")),
-        "copy_safety_notes": copy_safety_notes,
-        "instruction_intents": [k for k, _ in instruction_intents] if instruction_intents else [],
-        "sanitized_fields": sanitized_fields,
-        "final_prompt": final_prompt,
-    }
-
-
 def format_prompt_blocks(
     blocks: dict[str, str],
     *,
@@ -241,17 +99,15 @@ def format_prompt_blocks(
     text_policy: str,
     platform_overlay: dict[str, Any] | None = None,
     truth_contract: dict[str, Any] | None = None,
-) -> str:
+) -> tuple[str, list[dict[str, str]]]:
     parts = [f"请生成一张适用于电商主图组的商品图片，参考画幅比例 {aspect_ratio}。"]
     overlay_id = (platform_overlay or {}).get("overlay_id")
-    parts.append(platform_language_hard_constraint(overlay_id))
-    # --- Meta instruction: separate composition directives from visible copy ---
+    # Prime the model: only render explicitly specified text, nothing else
     parts.append(
-        "【重要规则】下方的目标、主体、构图、背景、风格、卖点表达、约束、保真要求等段落"
-        "全部是给你的画面构图指令，是描述画面应该怎么构成的，不是需要写到图上的文字。"
-        "除非后续可见文案区明确列出了短标签，否则不要在图上添加任何中文标注、英文标注或指引线文字。"
-        "特别注意：不要把必须保留、保真要求、构图、背景等指令内容当作图上标注写出来。"
+        "【硬约束】不要生成任何未经明确指定的文字。禁止品牌名、logo、价格、促销语。"
+        "构图指令不是图上文字，不要渲染。"
     )
+    parts.append(platform_language_hard_constraint(overlay_id))
     if final_prompt_base:
         parts.append(f"核心生成目标：{final_prompt_base}")
     if fidelity_rule:
@@ -273,25 +129,30 @@ def format_prompt_blocks(
             continue
         parts.append(f"{labels[key]}：{value}")
 
-    # --- Visible copy section: clearly separated from directives above ---
-    visible_copy = _copy_blocks_to_text(copy_blocks)
+    # --- Text elements: compact inline format ---
+    text_elements = build_text_elements(copy_blocks)
+    visible_copy_slots = [
+        {"slot": e["role"] if e["role"] != "label" else f"label_{e['id']}", "text": e["text"]}
+        for e in text_elements
+    ]
     domestic_chinese_copy = requires_simplified_chinese_visible_copy((platform_overlay or {}).get("overlay_id"))
-    if text_policy != "no_text" and visible_copy:
+
+    if text_policy != "no_text" and text_elements:
         if domestic_chinese_copy:
-            parts.append("国���中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
-            parts.append(
-                "新增图上文案只能使用简体中文短句；不要英文标题、不要英文副文案、不要英文营销词，也不要思考过程或内部规划标签。"
-            )
+            parts.append("国内中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
             parts.append("保持参考图中商品本体原有英文、型号、logo、按钮字样或铭牌丝印，不要擅自汉化或改字。")
-            parts.append(
-                f"【可见文案区】以下是允许渲染到图上的文案候选（可改写但必须短而有信息密度，并保持简体中文）：{visible_copy}。"
-                "除此以外，不要把上方的构图指令、保真要求、背景描述等内容渲染成图上文字。"
-            )
-        else:
-            parts.append(
-                f"【可见文案区】允许图上短文案，文案草案：{visible_copy}。"
-                "不要把上方构图指令渲染成图上文字。"
-            )
+
+        # Compact text plan: one line per element, no XML wrapping
+        element_lines = []
+        for e in text_elements:
+            role_label = {"headline": "主标题", "supporting": "副标题", "label": "标签"}.get(e["role"], e["role"])
+            element_lines.append(f"[{role_label}] {e['text']}")
+        element_block = " | ".join(element_lines)
+        count = len(text_elements)
+
+        parts.append(
+            f"图上文字（仅此{count}个，一字不改）：{element_block}"
+        )
     elif text_policy != "no_text":
         if domestic_chinese_copy:
             parts.append("国内中文站规则：" + " ".join(simplified_chinese_visible_copy_constraints()))
@@ -301,7 +162,8 @@ def format_prompt_blocks(
             parts.append("允许极少量图上短文案；若没有足够高质量的短句，宁可不显示文字。")
     else:
         parts.append("默认不要生成图上文案。")
-    # --- Language constraint repeated at end (recency anchor) ---
+    # --- Recency anchors: repeat hard constraints at end ---
+    parts.append("【重申】不要添加任何未指定的文字。图上只能出现上述明确列出的文字元素。")
     parts.append(platform_language_hard_constraint(overlay_id))
     # --- Fidelity recency anchor ---
     _hard_summary = ""
@@ -309,7 +171,7 @@ def format_prompt_blocks(
         _hard_summary = str(truth_contract.get("hard_constraint_summary") or "")
     if _hard_summary:
         parts.append(f"【最后提醒】{_hard_summary}")
-    return " ".join(parts)
+    return " ".join(parts), visible_copy_slots
 
 
 def build_prompt_previews(
@@ -356,14 +218,26 @@ def compose_text_edit_prompt(
 ) -> dict[str, Any]:
     """Build a prompt that replaces visible copy on an existing image while preserving everything else."""
     merged = {**source_copy_blocks, **new_copy_blocks}
-    new_visible_copy = _copy_blocks_to_text(merged)
+    new_elements = build_text_elements(merged)
 
-    # --- Replace visible copy section in source prompt ---
+    if new_elements:
+        element_lines = []
+        for e in new_elements:
+            role_label = {"headline": "主标题", "supporting": "副标题", "label": "标签"}.get(e["role"], e["role"])
+            element_lines.append(f"[{role_label}] {e['text']}")
+        count = len(new_elements)
+        replacement_section = (
+            f"图上文字（共{count}个，必须精确渲染，不得改写、省略。禁止添加品牌名、logo、价格、促销语等任何额外文字）："
+            f"{' | '.join(element_lines)}"
+        )
+    else:
+        replacement_section = "本图不需要可见文案。"
+
+    # --- Replace old visible copy section in source prompt ---
     visible_copy_pattern = re.compile(
-        r"【可见文案区】.*?(?=(?:【[^】]+】)|\Z)",
+        r"【可见文案区】.*?(?=(?:【[^】]+】)|\Z)|【文字布局[^【]*",
         re.DOTALL,
     )
-    replacement_section = f"【可见文案区】以下是允许渲染到图上的文案候选：{new_visible_copy}。" if new_visible_copy else "【可见文案区】本图不需要可见文案。"
     if visible_copy_pattern.search(source_final_prompt):
         modified_prompt = visible_copy_pattern.sub(replacement_section + " ", source_final_prompt)
     else:
@@ -373,9 +247,7 @@ def compose_text_edit_prompt(
     preserve_instruction = (
         "【重要指令】你正在对一张已有的电商图片进行文字替换。"
         "请严格保持原图的画面构图、色调配色、背景场景、产品位置、产品外观、整体风格和所有非文字视觉元素完全不变。"
-        "仅将图中的可见文案替换为下方指定的新文案内容。"
-        "如果原图中有文字区域，在相同位置用新文案替换。"
-        "如果新文案比原文案更短，保持相同的排版位置和字号。"
+        "仅将图中的可见文案替换为下方指定的新文案内容——每个元素替换对应位置的旧元素。"
     )
     modified_prompt = preserve_instruction + " " + modified_prompt
 
@@ -392,7 +264,7 @@ def compose_text_edit_prompt(
         "final_prompt": modified_prompt,
         "blocks": {
             "text_edit_instruction": preserve_instruction,
-            "visible_copy": new_visible_copy,
+            "visible_copy": format_elements_xml(new_elements),
             "source_prompt_digest": source_final_prompt[:200],
         },
         "copy_blocks": merged,
@@ -720,6 +592,8 @@ _INSTRUCTION_INTENT_PATTERNS: list[tuple[str, str, str]] = [
      "整体风格偏极简高端，减少装饰元素，突出产品本身。"),
     (r"(?:更|偏).{0,4}(?:高级|高端|品质感|质感)", "style:premium",
      "整体调性偏高端简约，参考杂志级电商摄影质感。"),
+    # --- theme / directional (catch-all, must be last) ---
+    (r".+", "theme:direction", ""),
 ]
 
 
@@ -730,12 +604,22 @@ def _parse_instruction_intents(instruction: str | None) -> list[tuple[str, str]]
         return []
     results: list[tuple[str, str]] = []
     seen_keys: set[str] = set()
+    has_structural_intent = False
     for pattern, intent_key, directive in _INSTRUCTION_INTENT_PATTERNS:
         if intent_key in seen_keys:
             continue
-        if re.search(pattern, cleaned):
-            results.append((intent_key, directive))
+        if not re.search(pattern, cleaned):
+            continue
+        # theme:direction is the catch-all; skip if structural intents already matched
+        if intent_key == "theme:direction":
+            if has_structural_intent:
+                continue
+            results.append((intent_key, cleaned))
             seen_keys.add(intent_key)
+            continue
+        results.append((intent_key, directive))
+        seen_keys.add(intent_key)
+        has_structural_intent = True
     return results
 
 
@@ -743,6 +627,7 @@ def _apply_instruction_overrides(
     blocks: dict[str, str],
     intents: list[tuple[str, str]],
     instruction: str | None,
+    copy_blocks: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Apply parsed intents to override prompt blocks. Returns modified blocks."""
     blocks = dict(blocks)
@@ -752,7 +637,6 @@ def _apply_instruction_overrides(
         if category == "background" and directive:
             blocks["background"] = directive
         elif category == "text_policy":
-            # Text policy changes are conveyed as constraints
             extra_constraints.append(directive)
         elif category == "color" and directive:
             extra_constraints.append(directive)
@@ -760,6 +644,18 @@ def _apply_instruction_overrides(
             extra_constraints.append(directive)
         elif category == "style" and directive:
             extra_constraints.append(directive)
+        elif category == "theme" and directive:
+            blocks["goal"] = "围绕\u201c" + directive + "\u201d这一主题，" + blocks.get("goal", "")
+            subject = blocks.get("subject", "")
+            if subject:
+                blocks["subject"] = subject + "。本图需突出\u201c" + directive + "\u201d使用场景及对应卖点"
+            extra_constraints.append("所有可见文案和视觉元素必须围绕\u201c" + directive + "\u201d主题展开，不要使用通用化、泛品类措辞")
+            if copy_blocks is not None:
+                headline = str(copy_blocks.get("headline") or "")
+                if headline and directive not in headline:
+                    copy_blocks["headline"] = "【" + directive + "】" + headline
+                elif not headline:
+                    copy_blocks["headline"] = directive
     # Append extra constraints to the existing constraints block
     if extra_constraints:
         existing = _clean_text(blocks.get("constraints"))
@@ -847,18 +743,113 @@ def _collect_strategy_fields_used(
     return used
 
 
+def parse_visible_copy_slots(final_prompt: str) -> list[dict[str, str]]:
+    """Parse a final_prompt back into structured text slots (backward compat)."""
+    import re as _re
+
+    # New format: [文字区域N - role] text
+    area_matches = _re.findall(r"\[文字区域(\d+) - ([^\]]+)\]\s*(.+?)(?=\n\[文字区域|\n\n|\Z)", final_prompt, _re.DOTALL)
+    if area_matches:
+        slots = []
+        for num, role, text in area_matches:
+            text = text.strip()
+            if role == "主标题大字":
+                slots.append({"slot": "headline", "text": text})
+            elif role == "副标题中字":
+                slots.append({"slot": "supporting", "text": text})
+            elif role == "小标签" or role == "短文案":
+                n = len([s for s in slots if s["slot"].startswith("proof_") or s["slot"].startswith("matrix_")])
+                slots.append({"slot": f"proof_{n+1}", "text": text})
+        return slots
+
+    # Old format: 【可见文案区】...text1 | text2 | text3...
+    match = _re.search(r"【可见文案区】([^【]+)", final_prompt)
+    if not match:
+        return []
+    section = match.group(1).strip()
+    colon_idx = -1
+    for ch in (chr(0xFF1A), ':'):
+        idx = section.rfind(ch)
+        if idx > colon_idx:
+            colon_idx = idx
+    if colon_idx > 0:
+        section = section[colon_idx + 1:]
+    section = _re.sub(r"[。．]\s*(?:除此以外|不要把上方)[^。]*[。]?$", "", section)
+    section = _re.sub(r"[。．]$", "", section)
+    section = section.strip()
+    parts = [p.strip() for p in section.split("|") if p.strip()]
+    if not parts:
+        return []
+    slots: list[dict[str, str]] = []
+    proof_idx = 0
+    for i, part in enumerate(parts):
+        label_match = _re.match(r"(主标题|副标题|标签\d+|矩阵文案\d+)[：:]", part)
+        if label_match:
+            text = part[label_match.end():].strip()
+            slots.append({"slot": label_match.group(1), "text": text})
+        elif i == 0:
+            slots.append({"slot": "headline", "text": part})
+        elif i == 1:
+            slots.append({"slot": "supporting", "text": part})
+        else:
+            proof_idx += 1
+            slots.append({"slot": f"proof_{proof_idx}", "text": part})
+    return slots
+
+
+def build_text_elements(copy_blocks: dict[str, Any]) -> list[dict[str, str]]:
+    """Build element-level text plan from copy_blocks.
+
+    Every text on the image is an element with a unique id, role, and text.
+    This is the SINGLE SOURCE OF TRUTH. Frontend can dynamically parse this array.
+    """
+    elements: list[dict[str, str]] = []
+    idx = 0
+
+    def _add(role: str, text: str):
+        nonlocal idx
+        t = _brief_copy_text(text)
+        if t:
+            idx += 1
+            elements.append({"id": f"e{idx}", "role": role, "text": t})
+
+    _add("headline", copy_blocks.get("headline"))
+    _add("supporting", copy_blocks.get("supporting"))
+    proof_lines = copy_blocks.get("proof_lines") or []
+    if isinstance(proof_lines, list):
+        for item in proof_lines:
+            _add("label", item)
+    matrix_lines = copy_blocks.get("matrix_lines") or []
+    if isinstance(matrix_lines, list):
+        seen = {e["text"] for e in elements}
+        for item in matrix_lines:
+            t = _brief_copy_text(item)
+            if t and t not in seen:
+                _add("label", item)
+                seen.add(t)
+    return elements
+
+
+def format_elements_xml(elements: list[dict[str, str]]) -> str:
+    """Format elements as an XML-like block for the prompt."""
+    if not elements:
+        return ""
+    lines = ["<text_layout>"]
+    for e in elements:
+        lines.append(f'  <element id="{e["id"]}" role="{e["role"]}">{e["text"]}</element>')
+    lines.append("</text_layout>")
+    return "\n".join(lines)
+
+
+def _visible_copy_slots_to_text(slots: list[dict[str, str]]) -> str:
+    """Convert structured slots back to a pipe-separated prompt string (deprecated)."""
+    texts = [s.get("text", "") for s in slots]
+    return " | ".join(texts[:5])
+
+
 def _copy_blocks_to_text(copy_blocks: dict[str, Any]) -> str:
-    parts: list[str] = []
-    for key in ("headline", "supporting"):
-        value = _brief_copy_text(copy_blocks.get(key))
-        if value:
-            parts.append(value)
-    for key in ("proof_lines", "matrix_lines"):
-        value = copy_blocks.get(key)
-        if isinstance(value, list):
-            parts.extend(_brief_copy_text(item) for item in value if _brief_copy_text(item))
-    unique_parts = _unique_texts(part for part in parts if part)
-    return " | ".join(unique_parts[:5])
+    elements = build_text_elements(copy_blocks)
+    return " | ".join(e["text"] for e in elements[:5])
 
 
 def _normalized_text_entries(value: Any) -> list[str]:
@@ -876,9 +867,8 @@ def _brief_copy_text(value: Any) -> str:
         return ""
     if is_low_information_copy_text(cleaned, allow_product_name_only=True):
         return ""
-    cleaned = re.split(r"[，,。！？；;|｜/\n]", cleaned, maxsplit=1)[0].strip()
-    if len(cleaned) > 28:
-        return cleaned[:28].rstrip()
+    if len(cleaned) > 32:
+        return cleaned[:32].rstrip()
     return cleaned
 
 
@@ -1127,4 +1117,6 @@ def compose_prompt(
         "instruction_intents": [k for k, _ in pipeline.composed.instruction_intents] if pipeline.composed.instruction_intents else [],
         "sanitized_fields": pipeline.sanitized.sanitized_fields,
         "final_prompt": pipeline.final_prompt,
+        "visible_copy_slots": pipeline.visible_copy_slots,
+        "text_elements": build_text_elements(pipeline.sanitized.copy_blocks),
     }

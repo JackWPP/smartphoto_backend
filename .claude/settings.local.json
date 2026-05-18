@@ -11,7 +11,17 @@
       "Bash(python:*)",
       "Bash(gh pr:*)",
       "WebFetch(domain:www.volcengine.com)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "WebFetch(domain:gpt-best.apifox.cn)",
+      "Bash(git checkout *)",
+      "Bash(cat docker-compose.yml)",
+      "Bash(cat docker-compose.prod.yml)",
+      "Bash(PYTHONPATH=. python scripts/vlm_verify.py)",
+      "Bash(.venv/Scripts/python -c ' *)",
+      "Bash(.venv/Scripts/python)",
+      "Bash(.venv/Scripts/python -m pytest tests/test_upstream.py tests/test_worker_tasks.py -q)",
+      "Bash(.venv/Scripts/python -c \"from app.services.main_gallery_rules import build_copy_blocks; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/python -m pytest tests/test_upstream.py::test_build_copy_blocks_filters_placeholder_and_low_signal_copy_for_alibaba_slots -v)"
     ]
   }
 }
